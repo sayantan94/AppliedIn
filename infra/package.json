@@ -1,0 +1,25 @@
+{
+  "name": "appliedin-infra",
+  "version": "0.1.0",
+  "description": "AWS CDK infrastructure for AppliedIn",
+  "private": true,
+  "bin": {
+    "appliedin": "bin/appliedin.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "aws-cdk": "^2.160.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.160.0",
+    "constructs": "^10.3.0"
+  }
+}
