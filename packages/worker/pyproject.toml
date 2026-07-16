@@ -1,0 +1,27 @@
+[project]
+name = "appliedin-worker"
+version = "0.1.0"
+description = "Apply worker + career-site crawler (Fargate) for AppliedIn"
+requires-python = ">=3.12"
+dependencies = [
+    "appliedin-core",
+]
+
+# Heavy browser/agent/Gmail deps are an OPTIONAL extra, installed only in the
+# Docker image (see Dockerfile). Tests inject fakes for Page / model / Gmail
+# service, and every import of these packages is lazy (inside functions), so
+# `uv sync` + `uv run pytest` never need them.
+[project.optional-dependencies]
+runtime = [
+    "playwright==1.47.0",  # pinned to the mcr.microsoft.com/playwright base image version
+    "strands-agents>=0.1",
+    "google-api-python-client>=2.140",
+    "google-auth>=2.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appliedin_worker"]
