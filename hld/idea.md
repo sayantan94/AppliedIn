@@ -69,7 +69,7 @@ EventBridge (cron, default every 6h)
 SQS `tailor-queue`
   └─> Tailoring Lambda (Strands agent)
         ├─ stage-2 match: LLM scores JD vs profile (0-10); < threshold -> status: skipped
-        ├─ tailor: base resume YAML + facts -> tailored YAML -> Typst -> PDF -> S3
+        ├─ tailor: base resume YAML + facts -> tailored YAML -> LaTeX -> Tectonic -> PDF -> S3
         ├─ truthfulness validator (deterministic, see below); fail -> needs_human
         ├─ drafted answers (why us, salary, visa, notice period) + cover letter
         │    (generated only if watchlist.yaml sets requires_cover_letter — a flag
@@ -160,22 +160,25 @@ Dashboard (static SPA on S3 + CloudFront; Cognito-authenticated)
 
 Why this decomposition and not one big cron task: the apply worker genuinely needs Chromium, long runtimes, and per-task IP rotation, so it must be separate; the two queues buy per-job retry semantics and let discovery stay a fast, dumb poller. Discovery and tailoring are NOT split further (matching lives inside tailoring) precisely to keep the moving parts down for a solo maintainer.
 
-### Per-application workflow — AWS Step Functions (human-in-the-loop)
+### Per-application workflow — pattern & orchestration
 
-Each application IS a state machine, one Step Functions (Standard) execution per job. This replaces the raw tailor-queue→apply-queue orchestration: discovery still writes the row and, instead of enqueuing, **starts one execution** keyed by `pk` (name = `company#job_id`, so a job can never run twice). The queues/Fargate/Lambdas built earlier become the *task states* this machine invokes — nothing built is wasted; Step Functions just sequences them and owns the pause/resume.
+Design pattern (per the agentic-AI pattern taxonomy): a **Sequential pipeline + Human-in-the-Loop**, with a **ReAct** sub-agent pocket for custom portals and **Review-&-Critique** (the truthfulness validator) inside tailoring — tied together by **Custom Logic**. We deliberately do NOT use the dynamic patterns (Coordinator / Hierarchical / Swarm): the steps are known and fixed, and for real job applications we want deterministic, auditable, cheap control flow. Autonomy lives *inside* steps (JD understanding, resume tailoring, unfamiliar-form navigation), never in choosing the steps.
 
-States, in order (pre-reqs first, exactly as the flow demands):
+**Framework: Strands Agents SDK** (confirmed), not Google ADK — ADK is Vertex/Gemini-oriented and would fight the AWS-only + Bedrock/Muse-Spark constraints and the six packages already built against Strands. **Orchestration is custom Python logic over durable DynamoDB state — NOT AWS Step Functions.** A step runs, persists its result + status + an `events` entry to the row, and at a gate simply EXITS; the durable state IS the pause. There is no long-lived execution to keep warm.
 
-1. **EnsureAccount** (pre-req) — auto-signup if no portal account (creds to Secrets Manager before submit). CAPTCHA/SMS-2FA → `WaitForHuman(no_account)`.
-2. **ProcessJD** — snapshot JD to S3, LLM match score. `< threshold` → **Skipped** (terminal).
-3. **TweakResume** — tailor (emphasis-only) → truthfulness validator → Typst PDF → S3. Validator fails → `WaitForHuman(form_drift/validation)`.
-4. **FillInfo** — resolve every field via the answer bank + deterministic confidence gate. Any low-confidence/missing field → `WaitForHuman(low_confidence/unknown_field)`.
-5. **Submit** — atomic daily-cap check → submit → confirmation + screenshot. Cap reached → **Capped** (re-entered next tick). Success → **Applied** (terminal). 404 → **JobGone**.
-6. **WaitForHuman** — a `.waitForTaskToken` state. The machine PAUSES; the token is written to the row (`task_token`). When a state needs more data, this is where it waits — indefinitely, cheaply.
+Steps, in order (pre-reqs first):
 
-**The callback (everything from the website).** With WhatsApp deferred, the dashboard is the whole control surface. When Sayantan answers a gate in the UI, the API calls `states:SendTaskSuccess(taskToken, {answer, scope})` (or `SendTaskFailure` for skip). The execution resumes from exactly where it paused — the answer is merged into the field map + answer bank, and the machine re-enters FillInfo→Submit. `/pause` disables the discovery EventBridge rule (no new executions) and in-flight machines finish or sit at their gate. No polling, no lost work; a job can wait days at a gate and resume the instant you reply.
+1. **EnsureAccount** (pre-req) — auto-signup if no portal account (creds to Secrets Manager before submit). CAPTCHA/SMS-2FA → gate `no_account`.
+2. **ProcessJD** — snapshot JD to S3, LLM match score (Strands agent). `< threshold` → **Skipped** (terminal).
+3. **TweakResume** — tailor emphasis-only (Strands agent) → truthfulness critic → LaTeX/Tectonic PDF → S3. Validator fails → gate.
+4. **FillInfo** — resolve every field via the answer bank + deterministic confidence gate; scripted per-ATS, or a **ReAct Strands sub-agent** for custom portals. Any low-confidence/missing field → gate `low_confidence`/`unknown_field`.
+5. **Submit** — atomic daily-cap check → submit → confirmation + screenshot. Cap reached → **Capped** (re-entered next tick). Success → **Applied**. 404 → **JobGone**.
 
-Every state writes its artifacts + an `events` entry to the row (see data model), so the dashboard's per-application timeline and detail view are a direct read of that row — the state machine and the read model stay in lock-step.
+**Human-in-the-loop via website callback.** When a step needs more data it writes `status: needs_human` + `gate_reason` + the pending context to the row and stops. With WhatsApp deferred, the dashboard is the whole control surface: answering a gate in the UI calls the API's `continue(pk, answer, scope)` — which merges the answer into the field map + answer bank and **re-triggers the workflow from the persisted step** (a fresh worker invocation re-hydrates from the row). No polling, no lost work, no idle compute; a job can sit at a gate for days and resume the instant you reply. `/pause` disables the discovery cron so no new work starts; in-flight jobs finish or rest at their gate.
+
+Runner: discovery starts a job by writing the row; a lightweight trigger (SQS message or direct Fargate `RunTask`, keyed by `pk` so a job never runs twice) invokes the worker, which executes steps until it reaches a terminal state or a gate. This keeps the earlier building blocks (adapters, tailoring, fill engines, apply worker) intact — they become the step implementations the orchestrator calls in sequence.
+
+Every step writes its artifacts + an `events` entry to the row (see data model), so the dashboard's per-application timeline and detail view are a direct read of that row — the workflow and the read model stay in lock-step.
 
 ### Bot-detection reality (read this before trusting the zero-touch target)
 
@@ -237,15 +240,27 @@ There is no facts.yaml — the global tier IS the canonical fact store (work aut
 
 ### Truthfulness validator (deterministic)
 
-After tailoring, before rendering: every employer name, job title, date range, degree, and certification in the tailored YAML must exist verbatim in `resume/base.yaml`. Any mismatch routes the job to `needs_human` with a diff. Bullets may be reworded/reordered (that's the point) but structural facts are checksummed. This runs on every application, forever — the one-time human eyeball in Next Steps is a quality check on tone, not the enforcement.
+After tailoring, before LaTeX rendering: every employer name, job title, date range, degree, and certification in the tailored YAML must exist verbatim in `resume/base.yaml`. Any mismatch routes the job to `needs_human` with a diff. Bullets may be reworded/reordered (that's the point) but structural facts are checksummed. This runs on every application, forever — the one-time human eyeball in Next Steps is a quality check on tone, not the enforcement.
 
 ### Config files (repo-versioned)
 
 - `watchlist.yaml` — per company: name + `careers_url` (the seed), portal login secret ref, `mode: auto|gated|assist`, `requires_cover_letter`, optional residential-proxy flag. `ats`/`board`/`discovery` are auto-derived by the resolver from `careers_url` (premise 0); set them only to override. `scripts/seed_watchlist.py` turns a plain list of career URLs into this file.
 - `preferences.yaml` — include/exclude keywords, titles, locations, remote policy, seniority, min match score
-- `resume/base.yaml` — the single source of truth resume (one-time conversion from current format)
+- `resume/base.yaml` — the single source of truth for resume FACTS (employers, titles, dates, degrees, bullets); seeded once by the baseline-résumé workflow (see below). The truthfulness validator checksums against this.
+- `resume/template.tex` — the LaTeX résumé template rendered (via Tectonic) from base.yaml or a tailored variant. Easy to hand-tweak; produces the PDF. Renderer is Tectonic (single self-contained LaTeX binary — LaTeX quality without a full TeX Live install).
 - Facts + answer bank — DynamoDB `answer_bank`, two scopes: global canonical facts (work auth/visa, notice period, salary range, links, EEO/self-identification answers, signup identity) + per-company free text. No facts.yaml — DDB is the single source of truth, seeded once by a setup script, updated only via WhatsApp (gate replies or `/fact`)
 - Configs are bundled into the deployment artifact; changing them requires `cdk deploy` (or a local redeploy script). Acceptable for one user; runtime config store is deliberate non-scope.
+
+### Baseline-résumé workflow (one-time setup)
+
+Before anything applies, the system needs a truthful, structured baseline. This is a small **setup workflow** (run once, locally), itself a mini sequential + human-in-the-loop flow:
+
+1. **Ingest** the current résumé — PDF/Word (LLM extraction) or, if it is already LaTeX/Overleaf, the `.tex` is taken almost verbatim.
+2. **Extract facts** → `resume/base.yaml` (employers, titles, date ranges, degrees, certs, bullets) — the source of truth the truthfulness validator checksums against.
+3. **Establish the template** → `resume/template.tex`, the LaTeX layout rendered by Tectonic. From the existing résumé where possible, so it looks like Sayantan's real résumé.
+4. **Render + confirm** — Tectonic renders base.yaml through the template to a PDF; Sayantan eyeballs it once. Iterate until it matches. This single human check is the only manual résumé step; every later tailored render is automatic and truth-guarded.
+
+Output: `resume/base.yaml` + `resume/template.tex`, committed. Per-application tailoring then rewrites emphasis in a *copy* of base.yaml and renders through the same template — so every application looks like the real résumé, just re-emphasized for the JD.
 - IaC: AWS CDK app in TypeScript (one stack); app code stays Python. GitHub Actions deploy on push (optional, can start with `cdk deploy` from laptop)
 
 ### Guardrails (non-negotiable in C)
@@ -261,7 +276,7 @@ After tailoring, before rendering: every employer name, job title, date range, d
 
 1. What endpoint exposes Muse Spark (Bedrock? direct API?), and what are its context limits? Interim default is Claude Sonnet on Bedrock behind the provider module; tailoring prompts are sized against that until Muse Spark is confirmed.
 2. The actual watchlist. Which 5-15 companies, and which ATS does each use? This decides which adapters get built (build only the ones present in the list).
-3. Base resume's current format (Word/PDF/LaTeX?) for the one-time conversion to `base.yaml`.
+3. Base résumé's current format (Word/PDF/LaTeX?). If it is already LaTeX/Overleaf, the baseline-résumé workflow is nearly free — the existing `.tex` seeds `resume/template.tex` directly and only the facts are extracted to `base.yaml`.
 4. PARTIALLY RESOLVED: Gmail API (read-only scope) is now in scope — auto-signup requires fetching email-verification links/codes, and the same plumbing covers email codes on login. Remaining: portals using SMS 2FA stay gated/assist (no SMS automation).
 5. RESOLVED (P0 decision): the apply worker runs on ECS Fargate — cloud-only, fresh public IP per task. Remaining sub-question: which residential proxy vendor, if burn-in shows a portal needs one.
 6. ToS: most ATS ToS prohibit automated submission. Accepted as personal-use risk; per-portal gated/assist mode is the fallback if a portal actively blocks automation.
@@ -285,9 +300,9 @@ Personal deployment: one AWS CDK stack in Sayantan's account, deployed via `cdk 
 ## Next Steps
 
 1. **First, no code:** write the real watchlist. For each company, open its careers page and note the ATS from the URL (`boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`, `myworkdayjobs.com`, ...). Accounts are auto-created by the apply worker, but optionally pre-create Workday accounts anyway — Workday signup is the flakiest flow and pre-creating de-risks it. Mark companies with no usable feed as `discovery: crawl`.
-2. Scaffold repo (Python app + Strands, TypeScript CDK skeleton), convert base resume to `resume/base.yaml`, write `preferences.yaml`, and run the one-time facts seed script (global facts -> DynamoDB).
+2. Scaffold repo (Python app + Strands, TypeScript CDK skeleton), write `preferences.yaml`, run the facts seed script, and run the **baseline-résumé workflow** to produce `resume/base.yaml` + `resume/template.tex` (see below).
 3. Build discovery adapters for the ATS types actually in the watchlist + DynamoDB tracking with conditional writes; add the career-site crawler for any `discovery: crawl` companies. Run locally; verify job IDs, watermarks, and dedup.
-4. Build the tailoring worker: LLM match scoring, tailoring, truthfulness validator, Typst PDF render, S3 versioning. Eyeball 3-5 tailored outputs for tone (the validator handles truth).
+4. Build the tailoring worker: LLM match scoring, tailoring, truthfulness validator, LaTeX/Tectonic PDF render, S3 versioning. Eyeball 3-5 tailored outputs for tone (the validator handles truth).
 5. WhatsApp bot (Meta Cloud API direct): set up the Meta business account + dedicated number, get message templates approved, then receipts + digest + /pause + reason-specific approval buttons + the read-only free-text Q&A agent over the tracking table.
 6. Apply worker for the single most common non-Workday ATS in the watchlist, gated mode, running on Fargate with per-task IP rotation. Burn in with 3 real approved applications, exercising the field-map persist/resume path.
 7. Flip that portal to auto in watchlist.yaml, add the daily cap + alarms, `cdk deploy` the whole pipeline.
