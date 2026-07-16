@@ -1,0 +1,31 @@
+# Watchlist — the 5-15 companies AppliedIn watches.
+# One entry per company. `ats` selects the discovery adapter; `discovery: crawl`
+# is for companies with no usable feed (handled by the Fargate crawler).
+#
+# mode:       auto | gated | assist   (new portals start gated, earn auto via burn-in)
+# discovery:  feed | crawl
+#
+# Replace these examples with the real watchlist (Next Steps #1 in hld/idea.md).
+companies:
+  - name: ExampleCorp
+    ats: greenhouse
+    board: examplecorp          # the greenhouse board token
+    login_secret: portal/examplecorp
+    mode: gated
+    discovery: feed
+    requires_cover_letter: false
+    residential_proxy: false
+
+  - name: LeverCo
+    ats: lever
+    board: leverco              # the lever handle
+    login_secret: portal/leverco
+    mode: gated
+    discovery: feed
+
+  - name: CustomPortalInc       # no feed -> crawler discovers, agentic engine applies
+    ats: custom
+    board: https://careers.customportal.com/openings
+    login_secret: portal/customportal
+    mode: gated
+    discovery: crawl

@@ -1,0 +1,22 @@
+# Copy to facts.seed.yaml (git-ignored) and fill in real values, then run
+# scripts/seed_facts.py. These become the GLOBAL-scope facts the apply worker
+# uses to answer common form fields high-confidence.
+#
+# Keys are questions as portals phrase them; they're normalized (lowercased,
+# punctuation-stripped) on lookup, so exact casing/punctuation doesn't matter.
+
+"Do you now or in the future require sponsorship?": "Yes, I will require H-1B sponsorship in the future."
+"Are you authorized to work in the US?": "Yes."
+"What is your notice period?": "30 days."
+"Desired salary": "$200,000"
+"LinkedIn profile": "https://www.linkedin.com/in/example"
+"GitHub profile": "https://github.com/example"
+"Gender": "Decline to self-identify"
+"Race/Ethnicity": "Decline to self-identify"
+"Veteran status": "I am not a protected veteran"
+"Disability status": "I don't wish to answer"
+# Signup identity (used by auto-signup when a portal needs an account)
+"First name": "Sayantan"
+"Last name": "Bhowmik"
+"Email": "sayantan.bhowmik94@gmail.com"
+"Phone": "+1-000-000-0000"

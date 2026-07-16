@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "appliedin",
     "appliedin-core",
+    "appliedin-discovery",
 ]
 
 [[package]]
@@ -73,6 +74,23 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
+    { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "appliedin-discovery"
+version = "0.1.0"
+source = { editable = "packages/discovery" }
+dependencies = [
+    { name = "appliedin-core" },
+    { name = "httpx" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "appliedin-core", editable = "packages/core" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "pyyaml", specifier = ">=6" },
 ]
 

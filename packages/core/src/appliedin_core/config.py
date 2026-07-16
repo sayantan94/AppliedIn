@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     daily_cap: int = 5
     max_attempts: int = 2
 
+    # Filesystem: where bundled config (watchlist/preferences) lives at runtime.
+    config_dir: str = "config"
+
     aws_region: str = "us-east-1"
 
 

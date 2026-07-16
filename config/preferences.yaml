@@ -1,0 +1,20 @@
+# Stage-1 deterministic match filter (runs inside discovery).
+# The LLM relevance score (stage-2) runs later in tailoring, with min_match_score.
+include_keywords:
+  - python
+  - backend
+  - distributed systems
+exclude_keywords:
+  - security clearance
+  - unpaid
+titles:
+  - Engineer
+  - Developer
+locations:
+  - Remote
+  - New York
+remote_only: false
+seniority:
+  - senior
+  - staff
+min_match_score: 7
