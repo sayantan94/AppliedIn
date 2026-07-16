@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / CDK
+node_modules/
+cdk.out/
+*.js.map
+
+# Secrets / local config (user-provided, never committed)
+facts.seed.yaml
+*.local.yaml
+.env
+
+# OS / IDE
+.DS_Store
+.idea/

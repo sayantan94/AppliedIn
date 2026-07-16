@@ -1,0 +1,36 @@
+[project]
+name = "appliedin"
+version = "0.1.0"
+description = "Autonomous job-application pipeline"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+appliedin-core = { workspace = true }
+appliedin-discovery = { workspace = true }
+appliedin-tailoring = { workspace = true }
+appliedin-worker = { workspace = true }
+appliedin-dispatcher = { workspace = true }
+appliedin-whatsapp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "moto[dynamodb,s3,sqs,secretsmanager]>=5",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
