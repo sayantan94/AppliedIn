@@ -27,6 +27,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]
+# importlib mode lets same-named test dirs (packages/*/tests) coexist without
+# module-path collisions across the workspace.
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
 
 [tool.ruff]
 line-length = 100
