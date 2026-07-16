@@ -15,7 +15,8 @@ AppliedIn watches the career pages of a handpicked list of companies (5-15), fin
 - Agent framework: **Strands Agents SDK** (not Claude Agent SDK). Model provider must be swappable; the intended model is "Muse Spark" behind whatever endpoint exposes it. All LLM calls go through one provider module so the model is a config value, not an architecture decision. Interim default until Muse Spark access is confirmed: Claude Sonnet on Bedrock, swapped later by config.
 - Portal accounts are **auto-created by the apply worker** when it hits an account wall: identity fields come from the global facts store in DynamoDB, a strong password is generated and saved to Secrets Manager BEFORE the signup form is submitted (a crash can never orphan an account the system doesn't know about), and email-verification links/codes are fetched via the Gmail API (read-only scope). One account per portal, enforced by checking Secrets Manager first: if creds already exist but login fails, that is NEVER treated as re-signup — it routes to `needs_human` with a screenshot (bad password? bot block?), same as any login-adjacent ambiguity. Signup flows blocked by CAPTCHA or SMS-2FA gate as `no_account`.
 - Resume tailoring rewrites emphasis only: reorder bullets, mirror JD vocabulary, adjust summary/skills. It never invents experience, titles, dates, or credentials. Enforced mechanically, not by vibes: see "Truthfulness validator" below.
-- Personal tool for one user. No multi-tenancy, no auth beyond Sayantan's own credentials.
+- Personal tool for one user. No multi-tenancy.
+- Primary interface is the **web dashboard**: a Vercel-hosted static SPA (Inter, monochrome wireframe matching ai.sayantan.sh) behind Amazon Cognito auth. It is both the read model (pipeline lanes, per-application detail with resume version + every submitted field/checkbox + timeline, in-page résumé viewer) AND the human-in-the-loop callback surface — answering a gate in the UI resumes the paused Step Functions execution (`SendTaskSuccess`). Everything is done from the website. The WhatsApp bot is built and tested but **deferred**; it can return later as an optional push channel without pipeline changes.
 
 ## Premises
 
@@ -159,6 +160,23 @@ Dashboard (static SPA on S3 + CloudFront; Cognito-authenticated)
 
 Why this decomposition and not one big cron task: the apply worker genuinely needs Chromium, long runtimes, and per-task IP rotation, so it must be separate; the two queues buy per-job retry semantics and let discovery stay a fast, dumb poller. Discovery and tailoring are NOT split further (matching lives inside tailoring) precisely to keep the moving parts down for a solo maintainer.
 
+### Per-application workflow — AWS Step Functions (human-in-the-loop)
+
+Each application IS a state machine, one Step Functions (Standard) execution per job. This replaces the raw tailor-queue→apply-queue orchestration: discovery still writes the row and, instead of enqueuing, **starts one execution** keyed by `pk` (name = `company#job_id`, so a job can never run twice). The queues/Fargate/Lambdas built earlier become the *task states* this machine invokes — nothing built is wasted; Step Functions just sequences them and owns the pause/resume.
+
+States, in order (pre-reqs first, exactly as the flow demands):
+
+1. **EnsureAccount** (pre-req) — auto-signup if no portal account (creds to Secrets Manager before submit). CAPTCHA/SMS-2FA → `WaitForHuman(no_account)`.
+2. **ProcessJD** — snapshot JD to S3, LLM match score. `< threshold` → **Skipped** (terminal).
+3. **TweakResume** — tailor (emphasis-only) → truthfulness validator → Typst PDF → S3. Validator fails → `WaitForHuman(form_drift/validation)`.
+4. **FillInfo** — resolve every field via the answer bank + deterministic confidence gate. Any low-confidence/missing field → `WaitForHuman(low_confidence/unknown_field)`.
+5. **Submit** — atomic daily-cap check → submit → confirmation + screenshot. Cap reached → **Capped** (re-entered next tick). Success → **Applied** (terminal). 404 → **JobGone**.
+6. **WaitForHuman** — a `.waitForTaskToken` state. The machine PAUSES; the token is written to the row (`task_token`). When a state needs more data, this is where it waits — indefinitely, cheaply.
+
+**The callback (everything from the website).** With WhatsApp deferred, the dashboard is the whole control surface. When Sayantan answers a gate in the UI, the API calls `states:SendTaskSuccess(taskToken, {answer, scope})` (or `SendTaskFailure` for skip). The execution resumes from exactly where it paused — the answer is merged into the field map + answer bank, and the machine re-enters FillInfo→Submit. `/pause` disables the discovery EventBridge rule (no new executions) and in-flight machines finish or sit at their gate. No polling, no lost work; a job can wait days at a gate and resume the instant you reply.
+
+Every state writes its artifacts + an `events` entry to the row (see data model), so the dashboard's per-application timeline and detail view are a direct read of that row — the state machine and the read model stay in lock-step.
+
 ### Bot-detection reality (read this before trusting the zero-touch target)
 
 Headless Chromium submitting forms from AWS datacenter IPs trips Cloudflare/reCAPTCHA/hCaptcha at far higher rates than a residential browser; some ATS front doors block datacenter ranges outright. And a CAPTCHA rendered inside a Fargate container cannot be solved by tapping "Approve" in WhatsApp. Cloud-only is P0 (no home-machine option), so mitigations are layered on AWS, in escalation order:
@@ -183,6 +201,9 @@ Zero-touch rates are measured per portal during burn-in; the rule in Success Cri
 | `match_score`, `skip_reason` | why it proceeded or didn't |
 | `confirmation_id`, `screenshot_s3_key`, `submitted_at` | proof of submission |
 | `attempts`, `last_error` | max 2 total attempts, then needs_human |
+| `events` | append-only step log: list of `{status, at, detail}` written on every transition (found→tailored→submitting→applied…). This is what the dashboard renders as the per-application timeline. |
+
+**Per-step state is the contract with the dashboard.** Each pipeline stage persists everything it produced onto the row *and* appends an `events` entry: discovery writes the JD snapshot (`jd_s3_key`) + `found`; tailoring writes `match_score`, `resume_s3_key`, `resume_version`, `answers_s3_key` + `tailored`; the apply worker writes `fieldmap_s3_key` (the exact fields/checkboxes/answers submitted), `screenshot_s3_key`, `confirmation_id`, `submitted_at` + `submitting`/`applied` (or a gate event). Nothing is computed after the fact — the dashboard's detail view (resume version, every form field with auto/gated confidence, JD, screenshots, timeline) is a straight read of the row plus its S3 artifacts. Defining the states precisely (the `Status` enum) is what lets the system share the right detail at each step.
 
 Status semantics: `submitting` = set immediately before the submit click; the idempotency marker (see AUTO path). `applied_manual` = Sayantan applied by hand (assist packages, CAPTCHA walls); counts as applied for dedup and the repost heuristic, exempt from the confirmation-ID/screenshot criterion. `capped` = daily cap reached; the Discovery Lambda's cron invocation also queries the status GSI for `capped` rows and re-enqueues them to `apply-queue`. `job_gone` = posting 404/closed when the apply worker arrived; terminal, no retries. `error` = infrastructure failure after both attempts (network, worker crash before any submit click) where no portal action is needed from a human; surfaces in the daily digest.
 

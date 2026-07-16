@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AppliedIn — Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect width='48' height='48' rx='8' fill='%23141417'/><text x='7' y='33' font-family='Inter,sans-serif' font-size='26' font-weight='700' fill='%23f4f4f5'>A</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="layout">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-glyph">A</span>
+          <span class="brand-name">AppliedIn</span>
+        </div>
+
+        <nav class="nav" id="nav">
+          <a class="nav-item" data-route="pipeline" href="#/pipeline">
+            <span class="nav-ico">▤</span> Pipeline
+          </a>
+          <a class="nav-item" data-route="applications" href="#/applications">
+            <span class="nav-ico">≡</span> Applications
+          </a>
+          <a class="nav-item" data-route="review" href="#/review">
+            <span class="nav-ico">◈</span> Needs you
+            <span class="nav-badge" id="nav-review-badge" hidden></span>
+          </a>
+          <a class="nav-item" data-route="companies" href="#/companies">
+            <span class="nav-ico">◇</span> Companies
+          </a>
+          <a class="nav-item" data-route="answers" href="#/answers">
+            <span class="nav-ico">✎</span> Answer bank
+          </a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <button id="pipeline-toggle" class="state-btn" data-state="running">
+            <span class="pip"></span><span id="pipeline-label">running</span>
+          </button>
+          <button id="theme-btn" class="icon-btn" title="Toggle theme">◐</button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <div class="main">
+        <header class="topbar">
+          <div class="crumb">
+            <span id="view-title">Pipeline</span>
+            <span id="view-desc" class="crumb-desc"></span>
+          </div>
+          <div class="topbar-right">
+            <input
+              id="search"
+              class="search"
+              type="search"
+              placeholder="search company or role…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span id="clock" class="clock">--:--:--</span>
+          </div>
+        </header>
+
+        <main id="view" class="view"></main>
+
+        <footer class="foot">
+          <span id="foot-count">—</span>
+          <span class="foot-sep">/</span>
+          <span id="foot-updated">syncing…</span>
+          <span class="foot-env" id="foot-env">demo</span>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Application detail drawer -->
+    <div id="scrim" class="scrim" hidden></div>
+    <aside id="drawer" class="drawer" hidden aria-label="Application detail">
+      <div class="drawer-head">
+        <div>
+          <div id="drawer-title" class="drawer-title">—</div>
+          <div id="drawer-sub" class="drawer-sub">—</div>
+        </div>
+        <button id="drawer-close" class="drawer-close" title="Close">✕</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </aside>
+
+    <!-- Résumé viewer -->
+    <div id="rmodal" class="rmodal" hidden>
+      <div class="rmodal-bar">
+        <span id="rmodal-title" class="rmodal-title">résumé</span>
+        <div class="rmodal-actions">
+          <a id="rmodal-download" class="btn" target="_blank" rel="noopener" href="#">Open PDF</a>
+          <button id="rmodal-close" class="drawer-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div id="rmodal-body" class="rmodal-body"></div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script src="config.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
