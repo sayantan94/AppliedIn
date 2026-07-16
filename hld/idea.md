@@ -19,6 +19,7 @@ AppliedIn watches the career pages of a handpicked list of companies (5-15), fin
 
 ## Premises
 
+0. The watchlist seed is just a **career-page URL per company**. A resolver detects the ATS from the URL (`boards.greenhouse.io/<token>`, `jobs.lever.co/<handle>`, `*.myworkdayjobs.com/...`, etc.) and, for custom career pages, fetches the page and scans for an embedded/linked ATS board; it derives the feed token automatically. Anything unrecognized resolves to `discovery: crawl`. So a watchlist entry is `name` + `careers_url` (+ a login-secret ref and `mode`); `ats`/`board` are derived, set manually only to override detection.
 1. Discovery is feed-first, crawler-backed. Greenhouse, Lever, Ashby, and SmartRecruiters expose public JSON job feeds — for companies on those ATSes the feed IS the career site's job list (the site just renders the board), so polling the feed beats crawling the rendered page: faster, structured, zero bot surface. Workday has a queryable JSON endpoint (`/wday/cxs/...`), but it is unofficial, per-tenant, and can change without notice; treat the Workday adapter as best-effort. Companies whose career site exposes no usable feed get the **career-site crawler**: a scheduled Playwright task that loads the careers page, extracts postings via LLM-assisted extraction into the same normalized job record, and feeds the identical filter/dedup/tailor path. Crawled companies apply through the agentic fill engine unless a scripted adapter exists (premises 3-4) — discovery source never decides who clicks; the system does.
 2. Matching is two-stage: a cheap deterministic keyword/title/location filter from `preferences.yaml` runs inside discovery; the LLM relevance score (0-10, default threshold 7) runs in the tailoring worker, behind the queue, so slow LLM calls never block or time out discovery. Only first-poll-forward postings are scored: discovery keeps a per-company watermark, and the initial backfill run is capped (default: 25 newest matching postings per company) so day one doesn't burn hundreds of LLM calls.
 3. Form filling is system-driven on every portal — Sayantan filling a form by hand is never the designed path. Two fill engines: (a) **scripted** — deterministic Playwright per major ATS (Greenhouse/Lever/Ashby/SmartRecruiters), preferred where it exists because it is testable and stable; (b) **agentic** — a Strands agent driving Playwright for portals with no script (custom career portals, one-off ATSes, Workday tenants): it discovers the form, maps fields, and fills. Both engines share the same deterministic confidence rules and gates; a portal on the agentic engine starts `gated` and earns auto through burn-in like any other. Workday flows are per-tenant customized (multi-page, resume-parse-and-correct screens, tenant questionnaires); Workday tenants use the agentic engine and stay `gated` unless a specific tenant proves stable.
@@ -140,6 +141,20 @@ WhatsApp Bot (Meta WhatsApp Business Cloud API; API Gateway webhook -> Lambda)
        (kill switch; /fact is the deterministic global-fact write — the Q&A
         agent stays read-only; /skip only affects jobs not yet claimed by a
         worker — in-flight tasks finish or gate)
+Dashboard (static SPA on S3 + CloudFront; Cognito-authenticated)
+  ├─ a real UI for at-a-glance status: every application with company, title,
+  │    status, match score, gate reason, resume version, confirmation, links to
+  │    the JD snapshot / resume PDF / screenshots; filter by status/company;
+  │    daily-cap + burn-in progress; queue health
+  ├─ auth: Amazon Cognito user pool (single user — Sayantan). The SPA does the
+  │    Cognito hosted-UI / OAuth login; the API authorizer validates the JWT
+  ├─ backend: a read-mostly API (API Gateway HTTP API + Lambda) over the same
+  │    DynamoDB tracking table + S3 artifacts (presigned links). Read-only by
+  │    default; the few write actions it exposes (skip, pause/resume, approve a
+  │    gate) go through the SAME guarded paths the WhatsApp commands use — the
+  │    dashboard is a second front-end on one control plane, not a bypass
+  └─ WhatsApp stays the push channel (approvals on the go); the dashboard is the
+       pull channel (sit-down review). Neither is authoritative over the other.
 ```
 
 Why this decomposition and not one big cron task: the apply worker genuinely needs Chromium, long runtimes, and per-task IP rotation, so it must be separate; the two queues buy per-job retry semantics and let discovery stay a fast, dumb poller. Discovery and tailoring are NOT split further (matching lives inside tailoring) precisely to keep the moving parts down for a solo maintainer.
@@ -205,7 +220,7 @@ After tailoring, before rendering: every employer name, job title, date range, d
 
 ### Config files (repo-versioned)
 
-- `watchlist.yaml` — per company: name, ATS type, board URL/token, portal login secret ref, `mode: auto|gated|assist`, `discovery: feed|crawl`, `requires_cover_letter`, optional residential-proxy flag
+- `watchlist.yaml` — per company: name + `careers_url` (the seed), portal login secret ref, `mode: auto|gated|assist`, `requires_cover_letter`, optional residential-proxy flag. `ats`/`board`/`discovery` are auto-derived by the resolver from `careers_url` (premise 0); set them only to override. `scripts/seed_watchlist.py` turns a plain list of career URLs into this file.
 - `preferences.yaml` — include/exclude keywords, titles, locations, remote policy, seniority, min match score
 - `resume/base.yaml` — the single source of truth resume (one-time conversion from current format)
 - Facts + answer bank — DynamoDB `answer_bank`, two scopes: global canonical facts (work auth/visa, notice period, salary range, links, EEO/self-identification answers, signup identity) + per-company free text. No facts.yaml — DDB is the single source of truth, seeded once by a setup script, updated only via WhatsApp (gate replies or `/fact`)

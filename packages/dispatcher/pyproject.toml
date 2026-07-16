@@ -1,0 +1,15 @@
+[project]
+name = "appliedin-dispatcher"
+version = "0.1.0"
+description = "SQS -> ECS RunTask dispatcher Lambda for AppliedIn"
+requires-python = ">=3.12"
+dependencies = [
+    "appliedin-core",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appliedin_dispatcher"]

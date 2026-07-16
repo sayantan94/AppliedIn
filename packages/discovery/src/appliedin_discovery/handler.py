@@ -19,6 +19,7 @@ from appliedin_core.storage.tracking import TrackingStore
 
 from .adapters import ADAPTERS
 from .filters import stage1_match
+from .resolver import resolve
 from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
 
 log = get_logger(__name__)
@@ -28,6 +29,20 @@ BACKFILL_CAP = 25  # newest matching postings per company on the first poll
 
 def _watermark_pk(company: str) -> str:
     return f"meta#watermark#{company.lower()}"
+
+
+def resolve_company(company: CompanyConfig, client: httpx.Client) -> CompanyConfig:
+    """Fill ats/board/discovery from careers_url when not explicitly set."""
+    if not company.needs_resolution or not company.careers_url:
+        return company
+    match = resolve(company.careers_url, client)
+    log.info(
+        "resolved %s (%s) -> ats=%s discovery=%s",
+        company.name, company.careers_url, match.ats, match.discovery.value,
+    )
+    return company.model_copy(
+        update={"ats": match.ats, "board": match.board, "discovery": match.discovery}
+    )
 
 
 def discover_company(
@@ -79,7 +94,12 @@ def handler(event, context):  # noqa: ANN001 - Lambda signature
 
     total = 0
     with httpx.Client(headers={"User-Agent": "AppliedIn/0.1"}) as client:
-        for company in companies:
+        for raw in companies:
+            try:
+                company = resolve_company(raw, client)
+            except Exception:  # resolution failure must not kill the whole poll
+                log.exception("ATS resolution failed for %s", raw.name)
+                continue
             if company.discovery is not DiscoveryMode.FEED:
                 continue  # crawl companies are handled by the Fargate crawler
             try:

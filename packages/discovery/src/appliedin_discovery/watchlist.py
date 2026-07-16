@@ -15,13 +15,21 @@ from pydantic import BaseModel
 
 class CompanyConfig(BaseModel):
     name: str
-    ats: str
+    careers_url: str = ""  # the seed: a company's career-page URL
+    # ats/board are DERIVED from careers_url by the resolver; set them only to
+    # override detection. discovery is likewise resolved (feed vs crawl).
+    ats: str = ""
     board: str = ""  # board URL or token, adapter-specific
     login_secret: str = ""  # Secrets Manager name for portal creds
     mode: ApplyMode = ApplyMode.GATED
     discovery: DiscoveryMode = DiscoveryMode.FEED
     requires_cover_letter: bool = False
     residential_proxy: bool = False
+
+    @property
+    def needs_resolution(self) -> bool:
+        """True when ats/board must be derived from careers_url at runtime."""
+        return not self.ats or (self.ats != "custom" and not self.board)
 
 
 class Preferences(BaseModel):
