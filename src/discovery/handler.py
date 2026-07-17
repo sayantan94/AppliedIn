@@ -1,24 +1,26 @@
-"""Discovery Lambda — the fast, dumb poller.
+"""Discovery — the fast, dumb finder (mode-agnostic).
 
-Per cron tick: for each feed company, fetch -> stage-1 filter -> apply the
-per-company watermark and first-run backfill cap -> conditional PutItem
-(dedup) -> enqueue survivors to the tailor queue. Also re-enqueues ``capped``
-rows to the apply queue so they retry on the next tick.
+Per run: for each feed company, resolve its ATS from the careers URL, fetch ->
+stage-1 filter -> per-company watermark + first-run backfill cap -> conditional
+put (dedup) -> enqueue survivors to the pipeline queue. Crawl-mode companies go
+to the crawler. Runs identically local (Redis) or cloud (DynamoDB/SQS): all
+storage comes from the mode factory, never constructed directly.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import httpx
+
 from core.config import get_settings
 from core.logging import get_logger
 from core.models import DiscoveryMode, Status
-from core.storage.queue import Queue
-from core.storage.tracking import TrackingStore
+from core.stores import make_stores
 
 from .adapters import ADAPTERS
-from .filters import stage1_match
+from .relevance import relevant
 from .resolver import resolve
 from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
 
@@ -48,67 +50,102 @@ def resolve_company(company: CompanyConfig, client: httpx.Client) -> CompanyConf
 def discover_company(
     company: CompanyConfig,
     prefs: Preferences,
-    tracking: TrackingStore,
-    queue: Queue,
+    tracking: Any,
+    queue: Any,
     client: httpx.Client,
     tailor_queue_url: str,
 ) -> int:
     """Discover one company; returns the number of jobs newly enqueued."""
+    from core.events import emit
+
     adapter = ADAPTERS.get(company.ats)
     if adapter is None:
-        log.warning("no adapter for ats=%s (company=%s)", company.ats, company.name)
+        log.warning("%s: no adapter for ats=%r — check the careers_url", company.name, company.ats)
         return 0
 
-    jobs = [j for j in adapter.fetch(company, client) if stage1_match(j, prefs)]
+    try:
+        fetched = adapter.fetch(company, client)
+    except Exception as exc:
+        log.error("%s: feed fetch failed (%s) — check the board token in watchlist.yaml",
+                  company.name, exc)
+        return 0
+
+    matched = relevant(fetched, prefs)
+    log.info("%s: fetched %d postings, %d relevant", company.name, len(fetched), len(matched))
+    if fetched and not matched:
+        sample = ", ".join(j.title for j in fetched[:3])
+        log.warning("%s: %d postings but the agent judged none relevant — sample: %s",
+                    company.name, len(fetched), sample)
+
+    from tools import seen
+
+    already = seen.load()
+    matched = [j for j in matched if j.jd_url not in already]  # skip past-run URLs
 
     wm_row = tracking.get(_watermark_pk(company.name))
-    first_run = wm_row is None
-    if first_run:
-        jobs = jobs[:BACKFILL_CAP]
+    if wm_row is None:  # first run — cap the backfill
+        matched = matched[:BACKFILL_CAP]
 
-    enqueued = 0
-    for job in jobs:
+    enqueued, new_urls = 0, []
+    for job in matched:
         if tracking.put_new(job):  # False => already seen, skip
             queue.enqueue(tailor_queue_url, {"pk": job.pk})
+            emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
+            new_urls.append(job.jd_url)
             enqueued += 1
+    seen.mark_all(new_urls)
 
+    if enqueued:
+        log.info("%s: enqueued %d new job(s) for the pipeline", company.name, enqueued)
     tracking.set_status(_watermark_pk(company.name), Status.FOUND, last_poll="done")
     return enqueued
 
 
-def requeue_capped(tracking: TrackingStore, queue: Queue, apply_queue_url: str) -> int:
-    count = 0
-    for row in tracking.query_status(Status.CAPPED):
-        queue.enqueue(apply_queue_url, {"pk": row["pk"]})
-        count += 1
-    return count
+def run_discovery() -> dict:
+    """Find new jobs across the watchlist and enqueue them for the pipeline.
 
-
-def handler(event, context):  # noqa: ANN001 - Lambda signature
+    Mode-agnostic: stores come from the factory, so this is the SAME finder on
+    a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
+    Lambda (cloud).
+    """
     settings = get_settings()
-    tracking = TrackingStore(settings.applications_table, region=settings.aws_region)
-    queue = Queue(region=settings.aws_region)
+    stores = make_stores(settings)
     config_dir = Path(settings.config_dir)
     prefs = load_preferences(config_dir / "preferences.yaml")
     companies = load_watchlist(config_dir / "watchlist.yaml")
 
-    total = 0
+    total = crawl_total = 0
+    crawl_companies: list[CompanyConfig] = []
     with httpx.Client(headers={"User-Agent": "AppliedIn/0.1"}) as client:
         for raw in companies:
             try:
                 company = resolve_company(raw, client)
-            except Exception:  # resolution failure must not kill the whole poll
+            except Exception:
                 log.exception("ATS resolution failed for %s", raw.name)
                 continue
             if company.discovery is not DiscoveryMode.FEED:
-                continue  # crawl companies are handled by the Fargate crawler
+                crawl_companies.append(company)  # custom career page -> crawler
+                continue
             try:
                 total += discover_company(
-                    company, prefs, tracking, queue, client, settings.tailor_queue_url
+                    company, prefs, stores.tracking, stores.queue, client, stores.tailor_queue
                 )
-            except Exception:  # one bad company must not kill the whole poll
+            except Exception:
                 log.exception("discovery failed for %s", company.name)
 
-    requeued = requeue_capped(tracking, queue, settings.apply_queue_url)
-    log.info("discovery done: enqueued=%d requeued_capped=%d", total, requeued)
-    return {"enqueued": total, "requeued_capped": requeued}
+    # Crawl-mode companies (no usable feed) -> the browser crawler.
+    if crawl_companies:
+        from .crawler import crawl_company
+
+        for company in crawl_companies:
+            try:
+                crawl_total += crawl_company(company, prefs, stores)
+            except Exception:
+                log.exception("crawl failed for %s", company.name)
+
+    log.info("discovery done: feed=%d crawl=%d", total, crawl_total)
+    return {"enqueued": total, "crawled": crawl_total}
+
+
+def handler(event, context):  # noqa: ANN001 - Lambda signature (cloud cron)
+    return run_discovery()

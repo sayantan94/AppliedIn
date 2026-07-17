@@ -1,20 +1,65 @@
-# Stage-1 deterministic match filter (runs inside discovery).
-# The LLM relevance score (stage-2) runs later in tailoring, with min_match_score.
-include_keywords:
-  - python
-  - backend
-  - distributed systems
-exclude_keywords:
-  - security clearance
-  - unpaid
+# What the discovery AGENT looks for. These are HINTS, not hardcoded rules — the
+# stage-1 relevance agent (src/discovery/relevance.py) reads them as a brief and
+# judges each posting's title, counting role variants (SDE, SWE, Backend /
+# Platform / ML / AI Engineer, …) as fits. The deeper stage-2 LLM score
+# (min_match_score) is the second, per-job gate.
+
+# Target roles. Hands-on software engineering (writes code), focused on AI /
+# AI agents / LLM work — the agent expands each to variants but stays within
+# actual software/AI engineering.
 titles:
-  - Engineer
-  - Developer
-locations:
-  - Remote
-  - New York
-remote_only: false
+  - Software Engineer
+  - Senior Software Engineer
+
+# Soft signals that RAISE fit (not required) — the AI/agents/LLM focus, plus
+# platform / infrastructure engineering.
+include_keywords:
+  - ai
+  - ai agents
+  - agentic
+  - agents
+  - llm
+  - large language model
+  - generative ai
+  - platform
+  - infrastructure
+
 seniority:
   - senior
   - staff
+
+# Never a fit — technical-sounding NON-engineering roles that kept leaking
+# through (management, support, solutions/sales, architects).
+exclude_keywords:
+  - intern
+  - internship
+  - new grad
+  - security clearance
+  - program manager
+  - project manager
+  - product manager
+  - solutions architect
+  - enterprise architect
+  - support engineer
+  - solutions engineer
+  - sales engineer
+  - customer engineer
+  - android
+  - ios
+  - mobile
+
+# REQUIRED location: United States. Prefer Seattle / California (and US-remote);
+# the agent rejects postings clearly outside the US, allows blank/unknown.
+locations:
+  - United States
+  - Remote (US)
+  - Seattle
+  - California
+remote_only: false
+
+# Stage-2: minimum LLM relevance score (0-10) for a job to proceed to apply.
 min_match_score: 7
+
+# Candidate's public GitHub — the tailor reads the repos (names, languages,
+# topics) as extra context to reword bullets toward each JD.
+github: https://github.com/sayantan94

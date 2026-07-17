@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# appliedin — control the pipeline daemon (local mode).
+#
+#   ./appliedin start     launch the daemon in the background (finder + worker + dashboard)
+#   ./appliedin stop      stop the running daemon
+#   ./appliedin status    is it up? + the pipeline board
+#   ./appliedin logs      tail the daemon log (Ctrl-C to stop)
+#   ./appliedin discover | work | run | resume <pk> "<answer>"
+#
+# Thin wrapper over `uv run python -m cli` so it works without activating the venv.
+set -euo pipefail
+cd "$(dirname "$0")"
+export APPLIEDIN_MODE="${APPLIEDIN_MODE:-local}"
+exec uv run python -m cli "$@"

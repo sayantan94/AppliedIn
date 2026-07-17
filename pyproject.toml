@@ -9,32 +9,35 @@ dependencies = [
     "pydantic-settings>=2.3",
     "httpx>=0.27",
     "pyyaml>=6",
-    "strands-agents>=0.1",
+    "google-adk>=2.5.0",
+    "litellm>=1.92.0",
+    "redis>=8.0.1",
+    "mcp>=1.28.1",
+    "sqlalchemy>=2.0.51",
+    "browser-use>=0.5.9",
+    "orjson>=3.11.9",
 ]
 
 [project.optional-dependencies]
-# Heavy runtime-only deps, installed in the worker/tailoring containers.
-# App code imports these lazily so the test suite runs without them.
+# Heavy runtime-only deps (installed in the worker container / when applying).
+# Imported lazily so the rest runs without them.
 runtime = [
-    "playwright>=1.47",
     "google-api-python-client>=2",
     "google-auth>=2",
 ]
 
+[project.scripts]
+# `appliedin start|stop|status|discover|work|run|resume`. Resolves via the
+# editable install (src/ on path); no force-include, so server.py keeps its
+# repo-relative path to web/.
+appliedin = "cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core", "src/discovery", "src/tools", "src/agent"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-# One project, one src/, a subfolder (top-level import package) per component.
-packages = [
-    "src/core",
-    "src/discovery",
-    "src/tailoring",
-    "src/worker",
-    "src/dispatcher",
-    "src/whatsapp",
-]
 
 [dependency-groups]
 dev = [
@@ -43,6 +46,7 @@ dev = [
     "moto[dynamodb,s3,sqs,secretsmanager]>=5",
     "respx>=0.21",
     "ruff>=0.6",
+    "fakeredis>=2.36.2",
 ]
 
 [tool.pytest.ini_options]

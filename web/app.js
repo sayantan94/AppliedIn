@@ -12,12 +12,43 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const state = { apps: [], stats: {}, companies: [], bank: { global: [], companies: {} },
-  paused: false, filter: "all", query: "", route: "pipeline" };
+  paused: false, filter: "all", query: "", route: "live", events: [], liveSeen: 0 };
 
 // --- helpers ---------------------------------------------------------------
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+// Minimal, self-contained markdown → HTML for agent messages (bold, italic,
+// code, links, bullet/numbered lists). Escapes first, so it's XSS-safe.
+function md(src) {
+  let s = esc(src || "");
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+?)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let ul = false, ol = false;
+  const closeLists = () => { if (ul) { out.push("</ul>"); ul = false; } if (ol) { out.push("</ol>"); ol = false; } };
+  for (const line of s.split("\n")) {
+    let m;
+    if ((m = line.match(/^\s*[-*]\s+(.*)/))) {
+      if (ol) { out.push("</ol>"); ol = false; }
+      if (!ul) { out.push("<ul>"); ul = true; }
+      out.push(`<li>${m[1]}</li>`);
+    } else if ((m = line.match(/^\s*\d+\.\s+(.*)/))) {
+      if (ul) { out.push("</ul>"); ul = false; }
+      if (!ol) { out.push("<ol>"); ol = true; }
+      out.push(`<li>${m[1]}</li>`);
+    } else if (line.trim() === "") {
+      closeLists(); out.push("");
+    } else {
+      closeLists(); out.push(line + "<br>");
+    }
+  }
+  closeLists();
+  return out.join("\n");
 }
 function ago(ts) {
   if (!ts) return "—";
@@ -63,6 +94,19 @@ function tagHtml(s) {
 
 // --- views -----------------------------------------------------------------
 const VIEWS = {
+  live: {
+    title: "Logs",
+    desc: "raw input & output at every pipeline stage, grouped by job — live",
+    render() {
+      if (!state.events.length) {
+        return `<div class="panel"><div class="empty">
+          Waiting for activity — every stage's raw input and output streams here,
+          grouped by job, as the daemon runs.</div></div>`;
+      }
+      return `<div class="runs">${groupRuns(state.events).map(runBlock).join("")}</div>`;
+    },
+  },
+
   pipeline: {
     title: "Pipeline",
     desc: "discovered → applied → waiting for you",
@@ -127,7 +171,9 @@ const VIEWS = {
           <div><div class="t-co" style="font-size:15px">${esc(r.company)}
             <span style="color:var(--faint);font-weight:400"> — ${esc(r.title)}</span></div>
             <div class="mono" style="font-size:12px;color:var(--faint);margin-top:3px">
-              gate: ${esc(STATUS_LABEL(r.gate_reason || "review"))}</div></div>
+              gate: ${esc(STATUS_LABEL(r.gate_reason || "review"))} · <span style="color:var(--muted-fg)">${esc(r.pk)}</span>
+              ${r.jd_url ? ` · <a href="${esc(r.jd_url)}" target="_blank" rel="noopener" style="color:var(--muted-fg)">view posting ↗</a>` : ""}
+            </div></div>
           <button class="btn" data-open="${esc(r.pk)}">Open</button>
         </div>
         <div style="padding:14px 16px">${gatePrompt(r)}</div>
@@ -185,12 +231,17 @@ function kpiStrip() {
 }
 
 function cardHtml(r) {
+  const jobUrl = r.jd_url
+    ? `<a class="card-joburl" href="${esc(r.jd_url)}" target="_blank" rel="noopener"
+         onclick="event.stopPropagation()">view posting ↗</a>`
+    : "";
   return `<div class="card" data-pk="${esc(r.pk)}">
     <div class="card-top"><span class="card-co">${esc(r.company)}</span>${scoreHtml(r.match_score)}</div>
     <div class="card-role">${esc(r.title)}</div>
     <div class="card-meta"><span>${esc(r.resume_version || "—")}</span>
       ${r.gate_reason ? `<span class="dotsep">${esc(STATUS_LABEL(r.gate_reason))}</span>` : ""}
       <span class="dotsep">${ago(r.updated_at)}</span></div>
+    ${jobUrl ? `<div class="card-links">${jobUrl}</div>` : ""}
   </div>`;
 }
 function qaHtml(x) {
@@ -198,15 +249,12 @@ function qaHtml(x) {
     <div class="qa-a">${esc(x.a)}</div><div class="qa-src">via ${esc(x.source)}</div></div>`;
 }
 function gatePrompt(r) {
-  if (r.gate_reason === "low_confidence" || r.gate_reason === "unknown_field") {
-    const f = (r.fields || []).find((x) => x.confidence === "low");
-    return f ? `<div class="mono" style="font-size:13px">Q: ${esc(f.label)}<br>
-      <span style="color:var(--faint)">draft:</span> ${esc(f.value)} — reply <b>ok</b> to approve or send your own.</div>`
-      : "Awaiting your input.";
+  if (r.gate_question) {
+    return `<div class="md" style="font-size:13px;color:var(--fg)">${md(r.gate_question)}</div>`;
   }
   if (r.gate_reason === "no_account") return "Auto-signup was blocked. Reply once the account exists.";
   if (r.gate_reason === "captcha") return "A CAPTCHA blocked the bot — apply manually, then /done.";
-  return "Open to review the captured form and approve.";
+  return "Open to review — approve to continue.";
 }
 
 // --- detail drawer ---------------------------------------------------------
@@ -231,12 +279,37 @@ function openDrawer(pk) {
     `<div class="tl"><div class="tl-dot ${t.done ? "done" : ""}"></div>
       <div><div class="tl-label">${esc(t.label)}</div><div class="tl-time">${when(t.at)}</div></div></div>`).join("");
 
+  const gate = r.status === "needs_human" ? `
+    <div class="section gate-box">
+      <div class="section-t">⛔ blocked — needs you${r.gate_reason ? " · " + esc(STATUS_LABEL(r.gate_reason)) : ""}</div>
+      <div class="gate-q md">${md(r.gate_question || "The pipeline is paused at this step — approve to continue.")}</div>
+      <textarea id="gate-answer" class="gate-input" rows="2"
+        placeholder="Type your answer, or leave blank to approve &amp; continue…"></textarea>
+      <div class="drawer-actions">
+        <button class="btn btn-primary" data-act="answer" data-pk="${esc(r.pk)}">Approve &amp; continue</button>
+        <button class="btn" data-act="skip" data-pk="${esc(r.pk)}">Skip</button>
+      </div>
+    </div>` : "";
+
+  const closed = r.closed_reason ? `
+    <div class="section closed-box">
+      <div class="section-t">why it closed</div>
+      <div class="closed-why">${esc(r.closed_reason)}</div>
+    </div>` : "";
+
+  const diff = r.has_diff ? `
+    <div class="section"><div class="section-t">what the tailor changed</div>
+      <div id="diff-body" class="diff-body"><span class="muted">loading…</span></div></div>` : "";
+
   $("#drawer-body").innerHTML = `
+    ${gate}
+    ${closed}
     <div class="section"><div class="section-t">status</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${tagHtml(r.status)}${scoreHtml(r.match_score)}
         ${r.gate_reason ? `<span class="mono" style="font-size:12px;color:var(--faint)">gate: ${esc(STATUS_LABEL(r.gate_reason))}</span>` : ""}
       </div></div>
+    ${diff}
 
     <div class="section"><div class="section-t">metadata used to apply</div>
       <dl class="meta-grid">
@@ -262,10 +335,6 @@ function openDrawer(pk) {
 
     <div class="section"><div class="section-t">artifacts</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${links}</div></div>
-
-    ${r.status === "needs_human" ? `<div class="drawer-actions">
-      <button class="btn btn-primary" data-act="approve" data-pk="${esc(r.pk)}">Approve & submit</button>
-      <button class="btn" data-act="skip" data-pk="${esc(r.pk)}">Skip</button></div>` : ""}
   `;
   $("#drawer-title").textContent = r.company;
   $("#drawer-sub").textContent = r.title;
@@ -275,6 +344,24 @@ function openDrawer(pk) {
     $("#scrim").classList.add("show");
     $("#drawer").classList.add("show");
   });
+  if (r.has_diff) loadDiff(r.pk);
+}
+
+function loadDiff(pk) {
+  fetch(api(`/actions/diff/${encodeURIComponent(pk)}`), { headers: auth.header() })
+    .then((r) => r.json())
+    .then((d) => {
+      const el = $("#diff-body");
+      if (!el) return;
+      const changes = (d.changes || []).filter((c) => c.before?.length || c.after?.length);
+      if (!changes.length) { el.innerHTML = `<span class="muted">${esc(d.note || "no bullet changes")}</span>`; return; }
+      el.innerHTML = changes.map((c) => `
+        <div class="diff-item">
+          ${(c.before || []).map((b) => `<div class="diff-line del">− ${esc(b)}</div>`).join("")}
+          ${(c.after || []).map((a) => `<div class="diff-line add">+ ${esc(a)}</div>`).join("")}
+        </div>`).join("");
+    })
+    .catch(() => { const el = $("#diff-body"); if (el) el.innerHTML = `<span class="muted">couldn't load diff</span>`; });
 }
 function closeDrawer() {
   $("#scrim").classList.remove("show");
@@ -286,7 +373,9 @@ function closeDrawer() {
 function openResume(pk) {
   const r = state.apps.find((a) => a.pk === pk);
   if (!r) return;
-  const real = r.resume_url && /^https?:/.test(r.resume_url);
+  // Real PDF whenever we have a resume_url (http presign OR same-origin
+  // /artifact/…). Only demo mode falls back to the placeholder résumé.
+  const real = !!r.resume_url && !DEMO;
   $("#rmodal-title").textContent = `${r.company} · ${r.resume_version || "résumé"}`;
   const dl = $("#rmodal-download");
   if (real) { dl.href = r.resume_url; dl.hidden = false; } else dl.hidden = true;
@@ -339,7 +428,7 @@ function renderNav() {
   badge.textContent = needs;
 }
 function render() {
-  const view = VIEWS[state.route] || VIEWS.pipeline;
+  const view = VIEWS[state.route] || VIEWS.live;
   $("#view-title").textContent = view.title;
   $("#view-desc").textContent = view.desc;
   $("#view").innerHTML = view.render();
@@ -347,14 +436,15 @@ function render() {
   renderNav();
 }
 function goto(route) {
-  state.route = VIEWS[route] ? route : "pipeline";
+  state.route = VIEWS[route] ? route : "live";
+  if (state.route === "live") { state.liveSeen = 0; updateLiveBadge(); }
   closeDrawer();
   render();
 }
 
 // --- data ------------------------------------------------------------------
 async function load() {
-  if (DEMO || LOGIN_DISABLED) {
+  if (DEMO) {
     const d = await import("./demo-data.js");
     state.apps = d.applications;
     state.stats = d.stats;
@@ -369,14 +459,131 @@ async function load() {
     ]);
     state.apps = apps.items || [];
     state.stats = stats;
+    state.companies = apps.companies || [];
+    state.bank = apps.bank || { global: [], companies: {} };
     state.paused = !!stats.paused;
-    $("#foot-env").textContent = CONFIG.env || "live";
+    $("#foot-env").textContent = CONFIG.env || "local";
   }
   $("#foot-updated").textContent = "updated " + new Date().toLocaleTimeString();
   renderPause();
   render();
 }
 const api = (p) => (CONFIG.apiUrl || "").replace(/\/$/, "") + p;
+function post(path, body) {
+  return fetch(api(path), {
+    method: "POST",
+    headers: { ...auth.header(), "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  }).catch(() => toast("request failed"));
+}
+
+// Raw logs, grouped by job → chronological stages. One `run` block per job.
+const STAGE_LABEL = { scorer: "score", tailor: "tailor", critic: "critique",
+  applier: "apply", tailor_critique: "tailor", appliedin_pipeline: "pipeline" };
+
+function groupRuns(events) {
+  const order = [];               // pks, most-recently-active first
+  const byPk = new Map();
+  for (const e of events) {       // events arrive newest-first
+    const pk = e.pk || "—";
+    if (!byPk.has(pk)) { byPk.set(pk, []); order.push(pk); }
+    byPk.get(pk).unshift(e);      // chronological within a job
+  }
+  return order.map((pk) => {
+    const lines = byPk.get(pk);
+    const app = state.apps.find((a) => a.pk === pk) || {};
+    const meta = lines.find((e) => e.url) || {};
+    const named = lines.find((e) => (e.detail || "").includes(" @ "));
+    return {
+      pk,
+      company: app.company || (named ? named.detail.split(" @ ")[1] : ""),
+      title: app.title || (named ? named.detail.split(" @ ")[0] : pk),
+      url: app.jd_url || meta.url || "",
+      status: app.status || runStatus(lines),
+      lines,
+    };
+  });
+}
+function runStatus(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const k = lines[i].kind;
+    if (k === "applied") return "applied";
+    if (k === "gate") return "needs_human";
+    if (k === "error") return "error";
+  }
+  return "submitting";
+}
+
+function runBlock(r) {
+  return `<div class="run" data-pk="${esc(r.pk)}">
+    <div class="run-head">
+      <span class="run-co">${esc(r.company || "—")}</span>
+      <span class="run-role">${esc(r.title)}</span>
+      ${tagHtml(r.status)}
+    </div>
+    ${r.url ? `<a class="run-url" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>` : ""}
+    <div class="run-log">${r.lines.map(logLine).join("")}</div>
+  </div>`;
+}
+
+function logLine(e) {
+  const t = e.at ? new Date(e.at).toLocaleTimeString("en-GB") : "";
+  const stage = STAGE_LABEL[e.agent] || e.agent || "";
+  if (e.kind === "step") {  // entering a stage → a subtle separator
+    return `<div class="log-stage">${esc(STAGE_LABEL[e.detail] || e.detail || stage)}</div>`;
+  }
+  let mark = "·", raw = e.detail || "";
+  if (e.kind === "response") { mark = "model"; raw = e.detail; }
+  else if (e.kind === "action") { mark = "→ call"; raw = `${e.detail}(${e.input ?? ""})`; }
+  else if (e.kind === "result") { mark = "← ret"; raw = `${e.detail}  ${e.output ?? ""}`; }
+  else if (e.kind === "gate") { mark = "gate"; }
+  else if (e.kind === "applied") { mark = "done"; }
+  else if (e.kind === "discovered") { mark = "found"; }
+  else if (e.kind === "running") { mark = "start"; }
+  else if (e.kind === "error") { mark = "error"; }
+  const shot = e.screenshot
+    ? `<a class="log-shot" href="${esc(e.screenshot)}" target="_blank" rel="noopener">
+         <img src="${esc(e.screenshot)}" alt="screenshot" loading="lazy"></a>` : "";
+  const rawHtml = (e.kind === "response" || e.kind === "gate") ? md(raw) : esc(raw);
+  return `<div class="log-line k-${esc(e.kind)}">
+    <span class="log-t">${t}</span>
+    <span class="log-stg">${esc(stage)}</span>
+    <span class="log-mark">${esc(mark)}</span>
+    <span class="log-raw ${(e.kind === "response" || e.kind === "gate") ? "md" : ""}">${rawHtml}</span>
+    ${shot}
+  </div>`;
+}
+
+function connectLive() {
+  if (DEMO) return;  // demo has no live stream
+  let es;
+  const open = () => {
+    es = new EventSource(api("/events"));
+    es.onmessage = (m) => {
+      try {
+        const e = JSON.parse(m.data);
+        state.events.unshift(e);
+        if (state.events.length > 300) state.events.pop();
+        if (state.route === "live") render();
+        else { state.liveSeen++; updateLiveBadge(); }
+        if (["discovered", "applied", "gate", "running"].includes(e.kind)) scheduleReload();
+      } catch { /* ignore */ }
+    };
+    es.onerror = () => { es.close(); setTimeout(open, 3000); };  // auto-reconnect
+  };
+  open();
+}
+
+let _reloadTimer = null;
+function scheduleReload() {  // debounce board refreshes when the store changes
+  clearTimeout(_reloadTimer);
+  _reloadTimer = setTimeout(() => load().catch(() => {}), 800);
+}
+function updateLiveBadge() {
+  const b = $("#nav-live-badge");
+  if (state.route === "live" || state.liveSeen === 0) { b.hidden = true; return; }
+  b.hidden = false; b.textContent = state.liveSeen > 99 ? "99+" : state.liveSeen;
+}
 
 function renderPause() {
   $("#pipeline-toggle").dataset.state = state.paused ? "paused" : "running";
@@ -412,8 +619,17 @@ function wire() {
     if (resume) { openResume(resume.dataset.resume); return; }
     const act = e.target.closest("[data-act]");
     if (!act) return;
-    toast(act.dataset.act === "approve" ? "approved & re-queued" : "skipped");
+    const pk = act.dataset.pk;
+    if (act.dataset.act === "answer") {
+      const answer = ($("#gate-answer")?.value || "").trim() || "approved";
+      post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
+      toast("sent — pipeline resuming");
+    } else {
+      post(`/actions/skip/${encodeURIComponent(pk)}`);
+      toast("skipped");
+    }
     closeDrawer();
+    scheduleReload();
   });
   $("#scrim").addEventListener("click", closeDrawer);
   $("#drawer-close").addEventListener("click", closeDrawer);
@@ -439,6 +655,14 @@ function wire() {
     root.setAttribute("data-theme", light ? "dark" : "light");
     localStorage.setItem("appliedin.theme", light ? "dark" : "light");
   });
+  $("#reset-btn").addEventListener("click", () => {
+    if (!confirm("Reset the pipeline? Clears all tracked jobs, the queue, live logs, "
+      + "and stored résumés/screenshots. Your facts and saved logins are kept.")) return;
+    post("/actions/reset").then(() => {
+      state.apps = []; state.events = []; state.liveSeen = 0;
+      toast("pipeline reset"); load(); render();
+    });
+  });
 }
 
 function startClock() {
@@ -454,7 +678,10 @@ async function boot() {
   goto(location.hash.replace("#/", "") || "pipeline");
   try { await load(); } catch (e) { toast("could not load data"); console.error(e); }
   goto(location.hash.replace("#/", "") || "pipeline");
-  if (!DEMO && !LOGIN_DISABLED) setInterval(() => load().catch(() => {}), 30000);
+  if (!DEMO) {
+    connectLive();                                   // live activity stream (SSE)
+    setInterval(() => load().catch(() => {}), 30000); // periodic board refresh
+  }
 }
 
 boot();

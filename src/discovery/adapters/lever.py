@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+
 from core.models import JobRecord
 
 from ..watchlist import CompanyConfig

@@ -1,85 +1,107 @@
 # AppliedIn
 
-Autonomous job-application pipeline. Watches a handpicked list of companies,
-finds new matching postings, tailors the resume per JD, and applies through
-each company's own portal — fully on AWS, with a WhatsApp control surface.
+Autonomous, agentic job-application pipeline. It finds jobs, tailors your résumé
+to each one, and applies through the company's portal — pausing for you only at
+the moments that need a human (approving a submission, or a fact it hasn't been
+told). One codebase, two modes: local on your Mac, or cloud on AWS.
 
-Design of record: [`hld/idea.md`](hld/idea.md).
-Implementation plan: [`docs/superpowers/plans/2026-07-16-appliedin-foundation.md`](docs/superpowers/plans/2026-07-16-appliedin-foundation.md).
+## How it works
+
+The pipeline is Google ADK agents over a durable queue. Discovery finds jobs and
+enqueues them; each job then runs through a sequential agent graph:
+
+- **score** — an LLM rates fit 0–10 against your résumé + the JD; anything below
+  your `min_match_score` is skipped before any tailoring is wasted on it.
+- **tailor → critic** — a light-touch loop rewords the résumé's bullets toward
+  the JD's vocabulary (never inventing facts, never touching your titles or
+  summary), compiles it to PDF (Tectonic), and saves it — with a "what changed"
+  diff.
+- **apply** — human-gated: it asks you to approve, then a real browser agent
+  (browser-use) fills and submits the form using only approved answers. If it
+  hits an unknown field, an account wall, or a CAPTCHA, it stops and asks you;
+  your answer is banked as a fact and never asked again.
+
+Everything streams to a live dashboard — every agent step's input and output,
+grouped by job, plus a screenshot of what the browser saw.
+
+```mermaid
+sequenceDiagram
+    participant Cron as Daemon / EventBridge
+    participant Disc as Discovery
+    participant Q as Queue (Redis · SQS)
+    participant Pipe as Apply pipeline (ADK)
+    participant BU as browser-use
+    participant Store as Store (Redis·DDB + FS·S3)
+    participant You
+
+    Cron->>Disc: discover (feeds + browser crawl)
+    Disc->>Store: dedup (put_new + seen.json)
+    Disc->>Q: enqueue {pk}
+    Q->>Pipe: job {pk}
+    Pipe->>Pipe: score (skip if below threshold)
+    Pipe->>Pipe: tailor + critic → render PDF
+    Pipe->>Store: save résumé + diff
+    Pipe->>You: gate — "ready to apply?"
+    You->>Pipe: approve
+    Pipe->>BU: fill + submit (approved answers only)
+    alt missing answer / account / CAPTCHA
+        BU-->>You: ask; answer is banked as a fact
+    end
+    Pipe->>Store: status = applied
+```
+
+## Two modes (same code)
+
+| | Local (your Mac) | Cloud (AWS) |
+| --- | --- | --- |
+| Store | Redis | DynamoDB |
+| Queue | Redis list | SQS |
+| Artifacts | filesystem | S3 |
+| Orchestration LLM | Anthropic (Haiku) | Bedrock |
+| Browser LLM | browser-use on Anthropic / OpenAI / OpenRouter | same |
+| Triggers | `daemon` (cron + queue loop + web) | EventBridge + SQS |
+| UI | localhost | Vercel |
+
+`APPLIEDIN_MODE` picks the backends via `core/stores.py`; nothing else changes.
+The browser-driving model is separate from orchestration — set
+`APPLIEDIN_BROWSER_MODEL` (e.g. `gpt-4.1-mini`, `openrouter/moonshotai/kimi-k2`,
+`claude-sonnet-4-6`) so orchestration stays cheap on Haiku while the browser
+uses whatever drives it best.
+
+## Run locally
+
+```bash
+# 1. cp .env.example .env, then paste your Anthropic key: ANTHROPIC_API_KEY=sk-ant-...
+# 2. save YOUR résumé's LaTeX to resume/base.tex (git-ignored; the tailor edits
+#    this — it never invents facts, only re-emphasizes)
+# 3. list company career URLs in config/watchlist.yaml + your criteria in
+#    config/preferences.yaml
+./setup.sh            # one-time: venv, deps, Redis, Tectonic, Playwright/Chromium
+./appliedin start     # → dashboard at http://127.0.0.1:8787
+```
+
+Daemon + CLI:
+
+```bash
+./appliedin start | stop | status | logs      # background daemon lifecycle
+./appliedin discover | work | run             # one-shot passes (no server)
+./appliedin resume <pk> "<answer>"            # answer a gate from the CLI
+```
+
+`setup.sh` installs everything; `appliedin start` runs the daemon detached — it
+serves the dashboard, finds jobs on a schedule, tailors + applies, and waits on
+you at gates (your answers become facts in `.local/facts.md`). Per-job output
+(the JD + tailored résumé) lands in `output/` for inspection.
 
 ## Layout
 
-Monorepo: a uv workspace of Python service packages plus a TypeScript CDK app.
-
 ```
-packages/
-  core/         appliedin-core — shared models, storage clients, LLM provider
-  discovery/    ATS feed adapters + EventBridge poller Lambda
-  tailoring/    match scoring, tailoring agent, truthfulness validator, Typst render
-  worker/       apply worker + career-site crawler + scripted/agentic fill (Fargate)
-  dispatcher/   SQS -> ECS RunTask (one Fargate task per job = IP rotation)
-  whatsapp/     Meta Cloud API webhook, command router, read-only Q&A agent
-infra/          AWS CDK app (TypeScript), one stack
-config/         watchlist.yaml, preferences.yaml (repo-versioned)
-scripts/        seed_facts.py (one-time global-facts seed)
+src/core/       models, config, stores factory, storage interfaces + local/cloud backends
+src/discovery/  feed adapters, ATS resolver, browser crawler, agentic relevance filter
+src/tools/      résumé render/validate/diff, JD fetch, browser-use (apply/crawl/llm),
+                per-job output, seen-list, github context, credentials, gmail
+src/agent/      ADK: graph.py (score→tailor→apply), finder.py, run.py, skills/
+src/daemon.py   local always-on (cron + queue + web)   src/server.py  dashboard + API
+src/cli.py      start/stop/status/logs/…               src/pipeline.py  find→queue→apply
+web/            live dashboard (Logs, gates, résumé PDF + diff)   infra/  AWS CDK
 ```
-
-Everything is deployed to AWS. The apply worker/crawler run as on-demand
-Fargate tasks in a **public-subnet, no-NAT VPC** so each task gets a fresh
-public IP — the datacenter-IP rotation described in the HLD.
-
-## Development
-
-Requires [uv](https://docs.astral.sh/uv/) and Node 20+.
-
-```bash
-uv python install 3.12
-uv sync --all-packages          # resolve + install every workspace package
-uv run pytest packages -q       # run the whole test suite
-uv run ruff check packages      # lint
-```
-
-Per-package tests: `uv run pytest packages/discovery -q`.
-
-## Configuration
-
-- `config/watchlist.yaml` — the companies to watch (name, ATS, board token,
-  `mode`, `discovery: feed|crawl`). Replace the examples with the real list.
-- `config/preferences.yaml` — stage-1 keyword/title/location filter.
-- **Facts** (visa, notice period, salary, EEO, signup identity) live only in
-  DynamoDB — there is no `facts.yaml`. Seed once:
-  ```bash
-  cp facts.seed.example.yaml facts.seed.yaml   # fill in real values
-  APPLIEDIN_ANSWER_BANK_TABLE=<table> uv run python scripts/seed_facts.py facts.seed.yaml
-  ```
-  After seeding, facts update only via WhatsApp (gate replies or `/fact`).
-
-## Deploy
-
-The CDK app provisions the whole pipeline as one stack. Deploying builds the
-worker/tailoring container images, so **Docker must be running**.
-
-```bash
-cd infra
-npm install
-npx cdk synth        # requires Docker (bundles Lambda + container assets)
-npx cdk deploy
-```
-
-Type-check the infra without Docker: `cd infra && npx tsc --noEmit`.
-
-### WhatsApp setup (Meta Cloud API)
-
-1. Create a Meta business account + WhatsApp app, add a dedicated phone number
-   (not your personal WhatsApp number).
-2. Put the token, `phone_number_id`, `app_secret`, `verify_token`, and your
-   own `wa_id` into the `appliedin/whatsapp` secret.
-3. Set the Meta webhook callback URL to the stack's `WhatsAppWebhookUrl` output.
-4. Get the outbound message templates (receipt / gate / digest) approved.
-
-## Guardrails (non-negotiable)
-
-Daily submit cap, per-portal gated burn-in, deterministic confidence gate,
-truthfulness validator on every resume, `/pause` kill switch, max 2 attempts
-per job, and a job that reached `submitting` is never auto-retried. See the
-HLD's Guardrails section.

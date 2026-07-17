@@ -6,6 +6,7 @@ POST https://api.ashbyhq.com/posting-api/job-board/<name>?includeCompensation=tr
 from __future__ import annotations
 
 import httpx
+
 from core.models import JobRecord
 
 from ..watchlist import CompanyConfig

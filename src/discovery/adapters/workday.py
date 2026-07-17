@@ -8,6 +8,7 @@ expected fields is skipped rather than crashing the whole poll.
 from __future__ import annotations
 
 import httpx
+
 from core.logging import get_logger
 from core.models import JobRecord
 

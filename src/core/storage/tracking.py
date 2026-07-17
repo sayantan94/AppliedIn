@@ -13,13 +13,14 @@ import boto3
 from botocore.exceptions import ClientError
 
 from ..models import JobRecord, Status
+from .base import AbstractTracking
 
 JD_HASH_INDEX = "jd_hash-index"
 STATUS_INDEX = "status-index"
 _CAP_PK = "meta#dailycap"
 
 
-class TrackingStore:
+class TrackingStore(AbstractTracking):
     def __init__(self, table_name: str, *, region: str | None = None) -> None:
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
 
@@ -86,6 +87,15 @@ class TrackingStore:
             KeyConditionExpression=boto3.dynamodb.conditions.Key("status").eq(status.value),
         )
         return resp.get("Items", [])
+
+    def all(self) -> list[dict]:
+        rows, kwargs = [], {}
+        while True:
+            resp = self._table.scan(**kwargs)
+            rows += [r for r in resp.get("Items", []) if not str(r.get("pk", "")).startswith("meta#")]
+            if "LastEvaluatedKey" not in resp:
+                return rows
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
     def try_increment_daily_cap(self, date_str: str, cap: int) -> bool:
         """Atomically reserve one submit slot for ``date_str``.

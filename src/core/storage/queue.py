@@ -10,8 +10,10 @@ import json
 
 import boto3
 
+from .base import AbstractQueue
 
-class Queue:
+
+class Queue(AbstractQueue):
     def __init__(self, *, region: str | None = None) -> None:
         self._sqs = boto3.client("sqs", region_name=region)
 

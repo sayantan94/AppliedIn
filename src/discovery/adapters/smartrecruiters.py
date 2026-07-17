@@ -8,6 +8,7 @@ fetch detail if needed. Paginated via ``offset``/``limit``.
 from __future__ import annotations
 
 import httpx
+
 from core.models import JobRecord
 
 from ..watchlist import CompanyConfig

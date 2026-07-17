@@ -1,13 +1,17 @@
-import pytest
+"""LLM provider follows the mode: Anthropic (local) / Bedrock (cloud)."""
+
 from core.config import Settings
-from core.llm.provider import get_model
 
 
-def test_muse_spark_is_explicit_swap_point():
-    with pytest.raises(NotImplementedError):
-        get_model(Settings(llm_provider="muse_spark"))
+def test_local_mode_uses_anthropic():
+    s = Settings(mode="local")
+    assert s.llm_provider == "anthropic"
+    assert s.llm_model == s.anthropic_model
+    assert s.litellm_model.startswith("anthropic/")
 
 
-def test_unknown_provider_rejected():
-    with pytest.raises(ValueError):
-        get_model(Settings(llm_provider="nope"))
+def test_cloud_mode_uses_bedrock():
+    s = Settings(mode="cloud")
+    assert s.llm_provider == "bedrock"
+    assert s.llm_model == s.bedrock_model
+    assert s.litellm_model.startswith("bedrock/")

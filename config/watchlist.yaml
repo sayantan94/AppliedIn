@@ -1,28 +1,19 @@
-# Watchlist — the 5-15 companies AppliedIn watches.
-#
-# THE SEED IS JUST THE CAREER-PAGE URL. The discovery resolver detects the ATS
-# (greenhouse/lever/ashby/smartrecruiters/workday) from the URL — or by scanning
-# the page for an embedded board — and derives the feed token automatically.
-# Unrecognized career pages fall back to `discovery: crawl`.
-#
-# So a minimal entry is just name + careers_url. Set `ats`/`board` only to
-# override detection.
-#
-#   mode:  auto | gated | assist   (new portals start gated, earn auto via burn-in)
-#
-# Replace these examples with the real watchlist (Next Steps #1 in hld/idea.md).
+# Watchlist — the companies AppliedIn watches. The seed is the career-page URL;
+# the finder resolves the ATS (or falls back to crawl for custom portals).
+#   mode: auto | gated | assist   (new portals start gated, earn auto via burn-in)
 companies:
-  - name: ExampleCorp
-    careers_url: https://boards.greenhouse.io/examplecorp
-    login_secret: portal/examplecorp
-    mode: gated
+  # Greenhouse feed — works out of the box (structured JSON, no browser needed).
+#  - name: Stripe
+#    careers_url: https://boards.greenhouse.io/stripe
+#    login_secret: portal/stripe
+#    mode: gated
 
-  - name: LeverCo
-    careers_url: https://jobs.lever.co/leverco
-    login_secret: portal/leverco
-    mode: gated
-
-  - name: CustomPortalInc          # resolver finds no feed -> crawler + agentic apply
-    careers_url: https://careers.customportal.com/openings
-    login_secret: portal/customportal
+  # Apple — custom JS portal, no public feed, so it's crawled + applied via the
+  # browser. (Its search page renders jobs with JS, so the finder crawls it with
+  # the browser MCP rather than a plain fetch.)
+  - name: Apple
+    careers_url: https://jobs.apple.com/en-us/search?location=united-states-USA
+    ats: custom
+    discovery: crawl
+    login_secret: portal/apple
     mode: gated

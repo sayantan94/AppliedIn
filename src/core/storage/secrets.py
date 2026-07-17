@@ -12,8 +12,10 @@ import json
 import boto3
 from botocore.exceptions import ClientError
 
+from .base import AbstractSecrets
 
-class SecretsClient:
+
+class SecretsClient(AbstractSecrets):
     def __init__(self, *, region: str | None = None) -> None:
         self._sm = boto3.client("secretsmanager", region_name=region)
 

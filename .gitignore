@@ -17,6 +17,9 @@ cdk.out/
 facts.seed.yaml
 *.local.yaml
 .env
+# local runtime state: saved logins (secrets.json), your facts (facts.md),
+# ADK sessions, artifacts, daemon pid/log — never commit
+.local/
 
 # OS / IDE
 .DS_Store
@@ -24,3 +27,8 @@ facts.seed.yaml
 
 # résumé: local render + raw source
 resume/preview.pdf
+
+# your real résumé — keep it out of git
+resume/base.tex
+resume/*.pdf
+output/

@@ -33,6 +33,10 @@
         </div>
 
         <nav class="nav" id="nav">
+          <a class="nav-item" data-route="live" href="#/live">
+            <span class="nav-ico">◉</span> Logs
+            <span class="nav-badge live-badge" id="nav-live-badge" hidden></span>
+          </a>
           <a class="nav-item" data-route="pipeline" href="#/pipeline">
             <span class="nav-ico">▤</span> Pipeline
           </a>
@@ -55,6 +59,7 @@
           <button id="pipeline-toggle" class="state-btn" data-state="running">
             <span class="pip"></span><span id="pipeline-label">running</span>
           </button>
+          <button id="reset-btn" class="icon-btn" title="Reset pipeline data (keeps facts & logins)">⟲</button>
           <button id="theme-btn" class="icon-btn" title="Toggle theme">◐</button>
         </div>
       </aside>

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import boto3
 
+from .base import AbstractArtifactStore
+
 PREFIXES = ("jd", "resumes", "screenshots", "fieldmaps", "sessions")
 
 
-class ArtifactStore:
+class ArtifactStore(AbstractArtifactStore):
     def __init__(self, bucket: str, *, region: str | None = None) -> None:
         self._bucket = bucket
         self._s3 = boto3.client("s3", region_name=region)

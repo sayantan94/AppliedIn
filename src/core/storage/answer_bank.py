@@ -13,6 +13,7 @@ import boto3
 
 from ..ids import make_pk, normalize_label
 from ..models import AnswerScope
+from .base import AbstractAnswerBank
 
 _GLOBAL_PK = "global"
 
@@ -21,7 +22,7 @@ def _company_pk(company: str) -> str:
     return f"company#{company.strip().lower()}"
 
 
-class AnswerBank:
+class AnswerBank(AbstractAnswerBank):
     def __init__(self, table_name: str, *, region: str | None = None) -> None:
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
 
@@ -73,6 +74,17 @@ class AnswerBank:
                         "use_count": 0,
                     }
                 )
+
+    def all_facts(self, company: str) -> dict[str, str]:
+        import boto3
+
+        facts: dict[str, str] = {}
+        for pk in (_GLOBAL_PK, _company_pk(company)):
+            resp = self._table.query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(pk))
+            for item in resp.get("Items", []):
+                facts[item.get("question_raw", item["sk"])] = item["answer"]
+        return facts
 
 
 __all__ = ["AnswerBank", "make_pk"]

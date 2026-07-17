@@ -9,8 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from core.models import ApplyMode, DiscoveryMode
 from pydantic import BaseModel
+
+from core.models import ApplyMode, DiscoveryMode
 
 
 class CompanyConfig(BaseModel):
@@ -40,6 +41,7 @@ class Preferences(BaseModel):
     remote_only: bool = False
     seniority: list[str] = []
     min_match_score: int = 7
+    github: str = ""  # candidate's GitHub profile — extra context for tailoring
 
 
 def load_watchlist(path: str | Path) -> list[CompanyConfig]:

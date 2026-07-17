@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
+
 from core.logging import get_logger
 from core.models import DiscoveryMode
 
