@@ -28,40 +28,51 @@ POLL_INTERVAL = int(os.environ.get("APPLIEDIN_POLL_INTERVAL_SEC", "5"))
 WEB_PORT = int(os.environ.get("APPLIEDIN_WEB_PORT", "8787"))
 
 
-def loop() -> None:
-    from agent.run import run_job
+def _discovery_loop() -> None:
+    """The 'cron' — find + enqueue jobs on a schedule. Runs in its OWN thread so a
+    long/expensive discovery cycle (many crawls) never blocks job processing."""
     from discovery.handler import run_discovery
 
-    stores = make_stores()
-    if not hasattr(stores.queue, "drain"):
-        raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
-
-    log.info("daemon up: discover every %ds, poll every %ds", DISCOVER_INTERVAL, POLL_INTERVAL)
     last_discover = 0.0
     while True:
         now = time.monotonic()
-        if now - last_discover >= DISCOVER_INTERVAL:  # the "cron"
+        if now - last_discover >= DISCOVER_INTERVAL:
             try:
                 log.info("discovery cycle: %s", run_discovery())
             except Exception:
                 log.exception("discovery cycle failed")
             last_discover = now
+        time.sleep(min(POLL_INTERVAL, 60))
 
-        for item in stores.queue.drain(stores.tailor_queue):  # the "event source"
+
+def _worker_loop() -> None:
+    """The 'event source' — drain the queue and run the pipeline per job. Its own
+    thread, so a slow job (browser apply) never blocks discovery."""
+    from agent.run import run_job
+
+    stores = make_stores()
+    while True:
+        for item in stores.queue.drain(stores.tailor_queue):
             try:
                 log.info("pipeline: %s", run_job(item["pk"], stores))
             except Exception:
                 log.exception("pipeline failed for %s", item.get("pk"))
-
         time.sleep(POLL_INTERVAL)
 
 
 def main() -> None:
-    # Pipeline (find + apply) runs in the background; the web server (dashboard +
-    # API) runs in the foreground so the UI fetches live data from the store.
+    # Discovery and the pipeline worker run as SEPARATE background threads (so
+    # neither blocks the other); the web server runs in the foreground.
     from server import serve
 
-    threading.Thread(target=loop, daemon=True).start()
+    stores = make_stores()
+    if not hasattr(stores.queue, "drain"):
+        raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
+
+    log.info("daemon up: discover every %ds, poll every %ds (discovery + worker are separate)",
+             DISCOVER_INTERVAL, POLL_INTERVAL)
+    threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
+    threading.Thread(target=_worker_loop, daemon=True, name="worker").start()
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)
