@@ -31,8 +31,7 @@ export class WhatsApp extends Construct {
 
     // Webhook: verify signature, ACK fast, enqueue for async processing.
     const webhook = pyLambda(this, "Webhook", {
-      pkg: "whatsapp",
-      handler: "appliedin_whatsapp.webhook.handler",
+      handler: "whatsapp.webhook.handler",
       timeout: Duration.seconds(10),
       environment: commonEnv,
     });
@@ -41,8 +40,7 @@ export class WhatsApp extends Construct {
 
     // Processor: the real work, off the webhook's request path.
     const processor = pyLambda(this, "Processor", {
-      pkg: "whatsapp",
-      handler: "appliedin_whatsapp.processor.handler",
+      handler: "whatsapp.processor.handler",
       timeout: Duration.minutes(2),
       memoryMiB: 1024,
       environment: commonEnv,

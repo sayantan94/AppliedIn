@@ -13,14 +13,12 @@ RUN dnf install -y tar xz && \
     chmod +x /usr/local/bin/typst && \
     rm -rf /tmp/typst*
 
-# Install core + tailoring into the Lambda task root.
-COPY packages/core ${LAMBDA_TASK_ROOT}/_src/core
-COPY packages/tailoring ${LAMBDA_TASK_ROOT}/_src/tailoring
+# Install the project (all src/ components) into the Lambda task root.
+COPY pyproject.toml ${LAMBDA_TASK_ROOT}/_src/pyproject.toml
+COPY src ${LAMBDA_TASK_ROOT}/_src/src
 COPY config ${LAMBDA_TASK_ROOT}/config
-RUN pip install --no-cache-dir ${LAMBDA_TASK_ROOT}/_src/core \
-                                ${LAMBDA_TASK_ROOT}/_src/tailoring \
-      -t ${LAMBDA_TASK_ROOT} && \
+RUN pip install --no-cache-dir ${LAMBDA_TASK_ROOT}/_src -t ${LAMBDA_TASK_ROOT} && \
     rm -rf ${LAMBDA_TASK_ROOT}/_src
 
 ENV APPLIEDIN_CONFIG_DIR=config
-CMD ["appliedin_tailoring.handler.handler"]
+CMD ["tailoring.handler.handler"]

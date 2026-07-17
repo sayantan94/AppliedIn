@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
-from appliedin_discovery.resolver import resolve
+from discovery.resolver import resolve
 
 
 def _parse_line(line: str) -> tuple[str, str] | None:

@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 import yaml
-from appliedin_core.config import get_settings
-from appliedin_core.storage.answer_bank import AnswerBank
+from core.config import get_settings
+from core.storage.answer_bank import AnswerBank
 
 
 def main(seed_path: str) -> None:

@@ -18,8 +18,7 @@ export class Dispatcher extends Construct {
     const publicSubnetIds = compute.vpc.publicSubnets.map((s) => s.subnetId).join(",");
 
     const fn = pyLambda(this, "Fn", {
-      pkg: "dispatcher",
-      handler: "appliedin_dispatcher.handler.handler",
+      handler: "dispatcher.handler.handler",
       timeout: Duration.minutes(1),
       environment: {
         APPLIEDIN_ECS_CLUSTER: compute.cluster.clusterName,

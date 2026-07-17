@@ -15,8 +15,7 @@ export class Discovery extends Construct {
     super(scope, id);
 
     const fn = pyLambda(this, "Fn", {
-      pkg: "discovery",
-      handler: "appliedin_discovery.handler.handler",
+      handler: "discovery.handler.handler",
       timeout: Duration.minutes(5),
       environment: {
         APPLIEDIN_APPLICATIONS_TABLE: data.applications.tableName,

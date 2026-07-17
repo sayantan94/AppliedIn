@@ -19,7 +19,7 @@ export class DataResources extends Construct {
   constructor(scope: Construct, id: string) {
     super(scope, id);
 
-    // applications: pk = company#job_id. GSIs mirror appliedin_core.storage.tracking.
+    // applications: pk = company#job_id. GSIs mirror core.storage.tracking.
     this.applications = new dynamodb.Table(this, "Applications", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,

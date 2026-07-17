@@ -45,7 +45,7 @@ export class Compute extends Construct {
 
     const image = new ecr_assets.DockerImageAsset(this, "WorkerImage", {
       directory: path.join(__dirname, "..", ".."),
-      file: path.join("packages", "worker", "Dockerfile"),
+      file: path.join("src", "worker", "Dockerfile"),
     });
 
     this.taskDefinition = new ecs.FargateTaskDefinition(this, "WorkerTask", {

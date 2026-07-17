@@ -21,3 +21,6 @@ facts.seed.yaml
 # OS / IDE
 .DS_Store
 .idea/
+
+# résumé: local render + raw source
+resume/preview.pdf
