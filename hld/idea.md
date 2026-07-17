@@ -169,7 +169,7 @@ Design pattern (per the agentic-AI pattern taxonomy): a **Sequential pipeline + 
 Steps, in order (pre-reqs first):
 
 1. **EnsureAccount** (pre-req) — auto-signup if no portal account (creds to Secrets Manager before submit). CAPTCHA/SMS-2FA → gate `no_account`.
-2. **ProcessJD** — snapshot JD to S3, LLM match score (Strands agent). `< threshold` → **Skipped** (terminal).
+2. **ProcessJD** — agentic discovery step: a Strands agent extracts the structured role (title, seniority, must-haves, comp if present) from the posting and match-scores it against the profile + `preferences.yaml`. Snapshot JD to S3, persist score + which preferences matched. `< threshold` → **Skipped** (terminal). (Discovery's cheap stage-1 keyword filter still runs first, in the poller, to avoid scoring obvious non-matches — the agent does the real judgement here.)
 3. **TweakResume** — tailor emphasis-only (Strands agent) → truthfulness critic → LaTeX/Tectonic PDF → S3. Validator fails → gate.
 4. **FillInfo** — resolve every field via the answer bank + deterministic confidence gate; scripted per-ATS, or a **ReAct Strands sub-agent** for custom portals. Any low-confidence/missing field → gate `low_confidence`/`unknown_field`.
 5. **Submit** — atomic daily-cap check → submit → confirmation + screenshot. Cap reached → **Capped** (re-entered next tick). Success → **Applied**. 404 → **JobGone**.
@@ -182,13 +182,18 @@ Every step writes its artifacts + an `events` entry to the row (see data model),
 
 ### Bot-detection reality (read this before trusting the zero-touch target)
 
-Headless Chromium submitting forms from AWS datacenter IPs trips Cloudflare/reCAPTCHA/hCaptcha at far higher rates than a residential browser; some ATS front doors block datacenter ranges outright. And a CAPTCHA rendered inside a Fargate container cannot be solved by tapping "Approve" in WhatsApp. Cloud-only is P0 (no home-machine option), so mitigations are layered on AWS, in escalation order:
+Headless Chromium submitting forms from AWS datacenter IPs trips Cloudflare/reCAPTCHA/hCaptcha at far higher rates than a residential browser; some ATS front doors block datacenter ranges outright. Cloud-only is P0 (no home-machine option). The browser backend is **Amazon Bedrock AgentCore Browser** — a managed, isolated, ephemeral cloud browser built for exactly this: agents drive it (Strands / Playwright over its streaming automation endpoint), sessions are containerized and reset after each use, and it gives two things that map straight onto our design:
 
-1. **IP rotation via task recycling (default).** The apply worker is already one Fargate task per job; launching each task in a public subnet with `assignPublicIp: ENABLED` gives every application a fresh public IP from AWS's pool, torn down afterward — no IP accumulates cross-application history. Honest limit: these are still AWS-ASN datacenter IPs. Rotation defeats per-IP rate limiting and reputation buildup, but NOT ASN/range classification — Cloudflare and friends score "this is AWS," not the specific address. Expect a higher CAPTCHA/gate rate than a residential connection; burn-in measures the real rate per portal.
-2. **Per-portal residential proxy.** If burn-in shows a portal blocking or CAPTCHA-walling AWS ranges, route only that portal's tasks through a residential proxy (a per-company flag in watchlist.yaml; adds cost + a vendor, so opt-in per portal, never global).
-3. **Permanent gated/assist.** Portals that block automation even through a proxy stay on the notify-and-assist path.
+- **Live View** — a real-time interactive view of the session. This is the ideal human-in-the-loop surface: when a step gates (CAPTCHA, an unexpected wall), the dashboard can embed the Live View so Sayantan watches/intervenes in the actual browser, then the pipeline resumes — far better than a screenshot.
+- **Session recording + CloudTrail** — DOM/action/console/network capture to S3 for replay, so every application is auditable.
 
-Zero-touch rates are measured per portal during burn-in; the rule in Success Criteria (sustain ≥80% or revert the portal to gated/assist) is the enforcement.
+It also removes the need to self-manage Fargate+Playwright and per-task IP juggling. Residual bot-detection reality, in escalation order:
+
+1. **AgentCore Browser session per job (default).** One ephemeral isolated session per application; managed egress, no cross-application session history.
+2. **Per-portal residential proxy / custom browser network config.** If burn-in shows a portal blocking the managed egress, use AgentCore's custom-browser network settings or a residential proxy for that portal only (per-company flag in watchlist.yaml; opt-in, never global).
+3. **Gate to Live-View / assist.** Portals that still CAPTCHA-wall automation gate to the Live-View for a human tap, or fall back to notify-and-assist.
+
+Zero-touch rates are measured per portal during burn-in; the rule in Success Criteria (sustain ≥80% or revert the portal to gated/assist) is the enforcement. (Fargate remains only as the compute host that runs the worker process and drives the AgentCore session; the browser itself is no longer inside the container.)
 
 ### Data model — DynamoDB `applications`
 
