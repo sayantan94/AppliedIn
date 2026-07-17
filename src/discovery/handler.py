@@ -86,14 +86,14 @@ def discover_company(
     if wm_row is None:  # first run — cap the backfill
         matched = matched[:BACKFILL_CAP]
 
-    enqueued, new_urls = 0, []
+    enqueued, new_jobs = 0, []
     for job in matched:
         if tracking.put_new(job):  # False => already seen, skip
             queue.enqueue(tailor_queue_url, {"pk": job.pk})
             emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
-            new_urls.append(job.jd_url)
+            new_jobs.append(job)
             enqueued += 1
-    seen.mark_all(new_urls)
+    seen.mark(new_jobs)
 
     if enqueued:
         log.info("%s: enqueued %d new job(s) for the pipeline", company.name, enqueued)

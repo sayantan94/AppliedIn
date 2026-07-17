@@ -206,14 +206,14 @@ def crawl_company(
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]  # skip past-run URLs
 
-    enqueued, new_urls = 0, []
+    enqueued, new_jobs = 0, []
     for job in jobs:
         if stores.tracking.put_new(job):
             stores.queue.enqueue(stores.tailor_queue, {"pk": job.pk})
             emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
-            new_urls.append(job.jd_url)
+            new_jobs.append(job)
             enqueued += 1
-    seen.mark_all(new_urls)
+    seen.mark(new_jobs)
     if enqueued:
         log.info("%s: enqueued %d new job(s)", company.name, enqueued)
     return enqueued
