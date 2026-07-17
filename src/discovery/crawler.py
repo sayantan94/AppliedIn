@@ -70,13 +70,17 @@ def _search_terms(prefs: Preferences) -> list[str]:
 def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobRecord]:
     """Tier-2 escalation: drive the page with a browser agent (browser-use) and
     map the postings it uncovers to JobRecords."""
+    from urllib.parse import urljoin
+
     from core.config import get_settings
     from tools.browser_crawl import crawl
 
     items = _run_async(crawl(url, company, _search_terms(prefs), get_settings().browser_model))
     return [
         JobRecord(company=company, job_id=str(it["job_id"]), title=it.get("title", ""),
-                  jd_url=it.get("url", ""), jd_text=it.get("title", ""), ats="custom")
+                  # normalize relative URLs (e.g. /en-us/details/…) to absolute so the
+                  # seen-list dedup and the clickable link are consistent
+                  jd_url=urljoin(url, it.get("url", "")), jd_text=it.get("title", ""), ats="custom")
         for it in items if it.get("job_id")
     ]
 
