@@ -4,12 +4,13 @@
 # Platform / ML / AI Engineer, …) as fits. The deeper stage-2 LLM score
 # (min_match_score) is the second, per-job gate.
 
-# Target roles. Hands-on software engineering (writes code), focused on AI /
-# AI agents / LLM work — the agent expands each to variants but stays within
-# actual software/AI engineering.
+# Target roles, in priority order — Senior first (the crawl searches these
+# top-down, and the scorer weighs seniority fit). Hands-on software engineering
+# (writes code), focused on AI / AI agents / LLM work.
 titles:
-  - Software Engineer
   - Senior Software Engineer
+  - Staff Software Engineer
+  - Software Engineer
 
 # Soft signals that RAISE fit (not required) — the AI/agents/LLM focus, plus
 # platform / infrastructure engineering.
