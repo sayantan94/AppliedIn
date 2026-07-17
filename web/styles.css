@@ -1234,10 +1234,31 @@ table.data tbody tr:hover {
   font-size: 12px;
   line-height: 1.55;
 }
-.diff-line { overflow-wrap: anywhere; }
-.diff-line.del { color: var(--muted-fg); text-decoration: line-through; text-decoration-color: var(--faint); }
-.diff-line.add { color: var(--fg); }
+.diff-line { overflow-wrap: anywhere; padding: 1px 6px; border-radius: 3px; }
+.diff-line.del { color: #d1242f; background: rgba(255, 40, 40, 0.10); }
+.diff-line.add { color: #1a7f37; background: rgba(35, 200, 90, 0.12); }
+:root[data-theme="dark"] .diff-line.del { color: #ff7b72; }
+:root[data-theme="dark"] .diff-line.add { color: #3fb950; }
 .muted { color: var(--faint); font-size: 13px; }
+
+/* Needs-you tabs (grouped by company) */
+.rtabs {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  margin-bottom: 16px; border-bottom: 1px solid var(--border);
+}
+.rtab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; background: none; border: none;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--muted-fg); font: inherit; font-size: 13px; cursor: pointer;
+}
+.rtab:hover { color: var(--fg); }
+.rtab.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--fg); }
+.rtab-n {
+  font-size: 11px; background: var(--muted); border-radius: 999px;
+  padding: 1px 7px; color: var(--muted-fg); font-variant-numeric: tabular-nums;
+}
+.rtab.active .rtab-n { background: var(--fg); color: var(--card); }
 
 /* rendered markdown (agent messages / gate questions) */
 .md ul, .md ol { margin: 6px 0; padding-left: 20px; }

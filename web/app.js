@@ -12,7 +12,8 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const state = { apps: [], stats: {}, companies: [], bank: { global: [], companies: {} },
-  paused: false, filter: "all", query: "", route: "live", events: [], liveSeen: 0 };
+  paused: false, filter: "all", query: "", route: "live", events: [], liveSeen: 0,
+  reviewCompany: null };
 
 // --- helpers ---------------------------------------------------------------
 function esc(s) {
@@ -161,12 +162,21 @@ const VIEWS = {
 
   review: {
     title: "Needs you",
-    desc: "gated applications awaiting your reply",
+    desc: "gated applications awaiting your reply — grouped by company",
     render() {
       const items = state.apps.filter((a) => a.status === "needs_human");
       if (!items.length) return `<div class="panel"><div class="empty">
         Nothing waiting — the pipeline is running clean.</div></div>`;
-      return items.map((r) => `<div class="panel" style="margin-bottom:14px">
+      const byCo = {};
+      for (const r of items) (byCo[r.company || "—"] ||= []).push(r);
+      const companies = Object.keys(byCo).sort();
+      let sel = state.reviewCompany;
+      if (!companies.includes(sel)) sel = companies[0];
+      state.reviewCompany = sel;
+      const tabs = companies.map((c) =>
+        `<button class="rtab ${c === sel ? "active" : ""}" data-rcompany="${esc(c)}">
+          ${esc(c)}<span class="rtab-n">${byCo[c].length}</span></button>`).join("");
+      const cards = byCo[sel].map((r) => `<div class="panel" style="margin-bottom:14px">
         <div class="panel-head">
           <div><div class="t-co" style="font-size:15px">${esc(r.company)}
             <span style="color:var(--faint);font-weight:400"> — ${esc(r.title)}</span></div>
@@ -178,6 +188,7 @@ const VIEWS = {
         </div>
         <div style="padding:14px 16px">${gatePrompt(r)}</div>
       </div>`).join("");
+      return `<div class="rtabs">${tabs}</div><div class="rlist">${cards}</div>`;
     },
   },
 
@@ -607,9 +618,11 @@ function wire() {
   window.addEventListener("hashchange", () => goto(location.hash.replace("#/", "") || "pipeline"));
 
   $("#view").addEventListener("click", (e) => {
+    const rtab = e.target.closest("[data-rcompany]");
     const card = e.target.closest("[data-pk]");
     const chip = e.target.closest("[data-filter]");
     const open = e.target.closest("[data-open]");
+    if (rtab) { state.reviewCompany = rtab.dataset.rcompany; render(); return; }
     if (chip) { state.filter = chip.dataset.filter; render(); return; }
     if (open) { openDrawer(open.dataset.open); return; }
     if (card) openDrawer(card.dataset.pk);
