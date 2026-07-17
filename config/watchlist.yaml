@@ -1,16 +1,141 @@
 # Watchlist — the companies AppliedIn watches. The seed is the career-page URL;
-# the finder resolves the ATS (or falls back to crawl for custom portals).
-#   mode: auto | gated | assist   (new portals start gated, earn auto via burn-in)
+# the finder resolves the ATS (Greenhouse/Lever/Ashby/Workday → fast feed) or
+# falls back to the browser crawl for custom portals.
+#   mode: gated  (new portals start gated — you approve before it submits)
+# Leave `ats`/`discovery` unset to let the finder auto-detect on first run.
 companies:
-  # Greenhouse feed — works out of the box (structured JSON, no browser needed).
-#  - name: Stripe
-#    careers_url: https://boards.greenhouse.io/stripe
-#    login_secret: portal/stripe
-#    mode: gated
+  # --- Frontier AI labs ---
+  - name: OpenAI
+    careers_url: https://openai.com/careers
+    mode: gated
+  - name: Anthropic
+    careers_url: https://www.anthropic.com/careers
+    mode: gated
+  - name: Google DeepMind
+    careers_url: https://deepmind.google/about/careers
+    mode: gated
+  - name: Meta
+    careers_url: https://www.metacareers.com/jobs
+    mode: gated
+  - name: Mistral AI
+    careers_url: https://mistral.ai/careers
+    mode: gated
+  - name: Microsoft
+    careers_url: https://careers.microsoft.com/v2/global/en/home.html
+    mode: gated
+  - name: Cohere
+    careers_url: https://cohere.com/careers
+    mode: gated
 
-  # Apple — custom JS portal, no public feed, so it's crawled + applied via the
-  # browser. (Its search page renders jobs with JS, so the finder crawls it with
-  # the browser MCP rather than a plain fetch.)
+  # --- AI infrastructure / compute ---
+  - name: NVIDIA
+    careers_url: https://www.nvidia.com/en-us/about-nvidia/careers/
+    mode: gated
+  - name: Nebius
+    careers_url: https://nebius.com/careers
+    mode: gated
+  - name: CoreWeave
+    careers_url: https://www.coreweave.com/careers
+    mode: gated
+  - name: Cerebras
+    careers_url: https://www.cerebras.ai/careers
+    mode: gated
+
+  # --- Agentic / applied-AI products ---
+  - name: Cursor
+    careers_url: https://cursor.com/careers
+    mode: gated
+  - name: Cognition
+    careers_url: https://cognition.ai/careers
+    mode: gated
+  - name: Perplexity
+    careers_url: https://www.perplexity.ai/hub/careers
+    mode: gated
+  - name: Glean
+    careers_url: https://www.glean.com/careers
+    mode: gated
+  - name: Harvey
+    careers_url: https://www.harvey.ai/careers
+    mode: gated
+  - name: Replit
+    careers_url: https://replit.com/careers
+    mode: gated
+  - name: Vercel
+    careers_url: https://vercel.com/careers
+    mode: gated
+  - name: LangChain
+    careers_url: https://www.langchain.com/careers
+    mode: gated
+  - name: Notion
+    careers_url: https://www.notion.com/careers
+    mode: gated
+  - name: ElevenLabs
+    careers_url: https://elevenlabs.io/careers
+    mode: gated
+
+  # --- AI-strong platforms / data ---
+  - name: Databricks
+    careers_url: https://www.databricks.com/company/careers/open-positions
+    mode: gated
+  - name: Snowflake
+    careers_url: https://careers.snowflake.com/us/en
+    mode: gated
+  - name: Scale AI
+    careers_url: https://scale.com/careers
+    mode: gated
+  - name: Hugging Face
+    careers_url: https://apply.workable.com/huggingface
+    mode: gated
+  - name: Weights & Biases
+    careers_url: https://wandb.ai/site/careers
+    mode: gated
+  - name: Datadog
+    careers_url: https://careers.datadoghq.com
+    mode: gated
+  - name: Ramp
+    careers_url: https://ramp.com/careers
+    mode: gated
+  - name: Figma
+    careers_url: https://www.figma.com/careers
+    mode: gated
+
+  # --- Big tech ---
+  - name: Netflix
+    careers_url: https://explore.jobs.netflix.net/careers
+    mode: gated
+  - name: Google
+    careers_url: https://www.google.com/about/careers/applications/jobs/results
+    mode: gated
+  - name: Salesforce
+    careers_url: https://careers.salesforce.com/en/jobs
+    mode: gated
+  - name: Oracle
+    careers_url: https://careers.oracle.com/jobs
+    mode: gated
+  - name: Adobe
+    careers_url: https://careers.adobe.com/us/en/search-results
+    mode: gated
+  - name: Intel
+    careers_url: https://jobs.intel.com
+    mode: gated
+  - name: Uber
+    careers_url: https://www.uber.com/us/en/careers/list
+    mode: gated
+  - name: Airbnb
+    careers_url: https://careers.airbnb.com/positions
+    mode: gated
+  - name: Palantir
+    careers_url: https://www.palantir.com/careers/
+    mode: gated
+
+  # --- Feed (Greenhouse) — fast, no browser needed ---
+  - name: Stripe
+    careers_url: https://boards.greenhouse.io/stripe
+    ats: greenhouse
+    board: stripe
+    mode: gated
+
+  # --- Custom JS portal, crawled with the browser (no public feed) ---
   - name: Apple
     careers_url: https://jobs.apple.com/en-us/search?location=united-states-USA
     ats: custom
