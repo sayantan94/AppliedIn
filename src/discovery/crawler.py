@@ -182,16 +182,24 @@ def crawl_company(
 
     extract = extractor or _default_extractor
     extracted = extract(html, company.name)
+    from tools import seen
+
     jobs = relevant(extracted, prefs)
     # The cheap render under-renders JS search UIs (Apple returns a handful) — if
     # the agent judged nothing relevant, escalate to a real browser agent that
     # loads the full listing, then re-screen. Skipped when an extractor is
-    # injected, so tests stay offline.
+    # injected (tests stay offline) or the company is already exhausted.
+    crawled = False
     if not jobs and extractor is None:
-        log.info("%s: %d postings, 0 relevant from render+extract — escalating to browser-use",
-                 company.name, len(extracted))
-        extracted = _browser_extract(company.careers_url, company.name, prefs)
-        jobs = relevant(extracted, prefs)
+        if seen.crawl_exhausted(company.name):
+            log.info("%s: browser crawl skipped — recent postings exhausted "
+                     "(reset, or a new posting, will re-enable it)", company.name)
+        else:
+            log.info("%s: %d postings, 0 relevant from render+extract — escalating to "
+                     "browser-use", company.name, len(extracted))
+            extracted = _browser_extract(company.careers_url, company.name, prefs)
+            jobs = relevant(extracted, prefs)
+            crawled = True
 
     log.info("%s: extracted %d postings, %d relevant", company.name, len(extracted), len(jobs))
     if not extracted:
@@ -200,8 +208,6 @@ def crawl_company(
     elif not jobs:
         log.warning("%s: %d postings but the agent judged none relevant — sample: %s",
                     company.name, len(extracted), ", ".join(j.title for j in extracted[:3]))
-
-    from tools import seen
 
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]  # skip past-run URLs
@@ -214,6 +220,8 @@ def crawl_company(
             new_jobs.append(job)
             enqueued += 1
     seen.mark(new_jobs)
+    if crawled:  # 0 new -> mark exhausted so we stop re-crawling this company
+        seen.record_crawl(company.name, enqueued)
     if enqueued:
         log.info("%s: enqueued %d new job(s)", company.name, enqueued)
     return enqueued
