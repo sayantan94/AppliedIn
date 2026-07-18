@@ -185,7 +185,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     st = sub.add_parser("start")
     st.add_argument("--no-discover", action="store_true",
-                    help="dashboard + queue worker only, no crawler (for testing the approval flow)")
+                    help="dashboard + queue worker only, no crawler")
     for name in ("stop", "status", "logs", "discover", "work", "run"):
         sub.add_parser(name)
     r = sub.add_parser("resume")
