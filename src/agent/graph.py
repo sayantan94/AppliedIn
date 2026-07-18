@@ -1,4 +1,4 @@
-"""AppliedIn — the agentic pipeline in pure ADK (no Strands).
+"""AppliedIn — the agentic pipeline
 
 Sequential pipeline, each stage the pattern that fits it:
 
@@ -74,7 +74,17 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     try:
         key = artifacts.put("resumes", f"{pk}.pdf", render_pdf(tailored_latex), "application/pdf")
         fmt = "pdf"
-    except RuntimeError as exc:  # tectonic not installed — fall back to source
+    except RuntimeError as exc:
+        # NEVER downgrade a good PDF to a .tex pointer: the apply step needs a PDF
+        # to upload. If a previous save compiled, keep it and make the agent fix
+        # its broken edit; only fall back to .tex when no PDF ever existed.
+        prev = (stores.tracking.get(pk) or {}).get("resume_s3_key", "")
+        if prev.endswith(".pdf"):
+            log.warning("PDF render failed (%s); keeping previous good PDF", exc)
+            return {"ok": False,
+                    "message": "Your edited LaTeX does NOT compile (syntax error). The "
+                               "previous valid résumé is kept. Fix the error and re-save "
+                               "the FULL corrected .tex."}
         log.warning("PDF render failed (%s); storing .tex only", exc)
         key = tex_key
         fmt = "tex"
@@ -97,9 +107,14 @@ def exit_loop(tool_context: ToolContext) -> dict:
 
 async def apply_to_job(tool_context: ToolContext) -> dict:
     """Drive a browser (browser-use) to fill and submit THIS job's application,
-    using only human-approved answers + the saved portal login. Returns
-    status 'applied' (with a confirmation) or 'gate' (with the missing question)."""
+    using human-approved answers, the saved login, the TAILORED résumé (uploaded),
+    and a writer model for open-ended questions. Returns status 'applied' (with a
+    confirmation) or 'gate' (with the missing question)."""
+    import base64
+
     from core.config import get_settings
+    from core.events import emit
+    from core.models import Status
     from core.stores import make_stores
     from tools.browser_apply import apply
     from tools.credentials import get_login
@@ -114,22 +129,61 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
         facts["Login email/username"] = creds.get("username", "")
         facts["Login password"] = creds.get("password", "")
 
-    result = await apply(st.get("jd_url", ""), company, facts, get_settings().browser_model, pk=pk)
+    row = stores.tracking.get(pk) or {}
+    # WIP: flag the board that the browser is actively submitting this one.
+    stores.tracking.set_status(pk, Status.SUBMITTING)
+    emit("running", pk=pk, agent="applier", detail="submitting application…",
+         url=st.get("jd_url", ""))
+
+    result = await apply(
+        st.get("jd_url", ""), company, facts, get_settings().browser_model,
+        pk=pk, jd_text=st.get("jd_text", ""),
+        resume_tex=_load_resume_tex(stores, row),      # tailored résumé for the writer
+        github=st.get("github_context", ""),
+        resume_path=_resume_pdf_path(row),             # tailored PDF to upload
+    )
 
     # Persist the final screenshot so the dashboard can show what the agent saw.
     # Keep the base64 OUT of the value returned to the LLM (it's huge).
     shot = result.pop("screenshot_b64", None)
     if shot and pk:
         try:
-            import base64
             key = stores.artifacts.put("screenshots", f"{pk}.png",
                                        base64.b64decode(shot), "image/png")
             st["screenshot_s3_key"] = key
-            row = stores.tracking.get(pk) or {}
-            stores.tracking.set_status(pk, row.get("status", "applying"), screenshot_s3_key=key)
+            cur = stores.tracking.get(pk) or {}
+            stores.tracking.set_status(pk, cur.get("status", "submitting"), screenshot_s3_key=key)
         except Exception as exc:  # a screenshot is nice-to-have, never fatal
             log.warning("could not save screenshot for %s: %s", pk, exc)
+    fields = result.pop("fields", None)
+    if fields and pk:  # the form's real field map (incl. checkboxes) — for the drawer
+        cur = stores.tracking.get(pk) or {}
+        stores.tracking.set_status(pk, cur.get("status", "submitting"), fields=fields)
+    for q, a in (result.pop("drafted", None) or {}).items():
+        # Bank writer drafts (company scope) so re-runs never redraft from scratch.
+        from core.models import AnswerScope
+        stores.answer_bank.put(q, a, AnswerScope.COMPANY, company=company, source="writer")
     return result
+
+
+def _load_resume_tex(stores, row: dict) -> str:
+    """The tailored résumé LaTeX for this job — the writer drafts answers from it."""
+    key = row.get("resume_tex_key")
+    if not key:
+        return ""
+    try:
+        return stores.artifacts.get(key).decode()
+    except Exception:
+        return ""
+
+
+def _resume_pdf_path(row: dict) -> str:
+    """Absolute path to the tailored résumé PDF, for the browser to upload."""
+    key = row.get("resume_s3_key")  # "resumes/<pk>.pdf"
+    if not key or not key.endswith(".pdf"):
+        return ""
+    p = Path(get_settings().local_dir) / "artifacts" / key
+    return str(p.resolve()) if p.exists() else ""
 
 
 def ask_human(question: str, tool_context: ToolContext) -> dict:

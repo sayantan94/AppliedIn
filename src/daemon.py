@@ -31,12 +31,13 @@ WEB_PORT = int(os.environ.get("APPLIEDIN_WEB_PORT", "8787"))
 def _discovery_loop() -> None:
     """The 'cron' — find + enqueue jobs on a schedule. Runs in its OWN thread so a
     long/expensive discovery cycle (many crawls) never blocks job processing."""
+    from core import flags
     from discovery.handler import run_discovery
 
     last_discover = 0.0
     while True:
         now = time.monotonic()
-        if now - last_discover >= DISCOVER_INTERVAL:
+        if not flags.paused() and now - last_discover >= DISCOVER_INTERVAL:
             try:
                 log.info("discovery cycle: %s", run_discovery())
             except Exception:
@@ -45,18 +46,45 @@ def _discovery_loop() -> None:
         time.sleep(min(POLL_INTERVAL, 60))
 
 
+def _sweep_found(stores) -> None:  # noqa: ANN001
+    """AUTO mode only: when the queue is idle, feed a couple of waiting `found`
+    jobs back into it so the backlog keeps progressing overnight. Stops feeding
+    once today's applications hit the daily cap (jobs simply wait for tomorrow)."""
+    from agent.run import _today_applied
+    from core.config import get_settings
+    from core.models import Status
+
+    if _today_applied(stores) >= get_settings().daily_cap:
+        return
+    waiting = [r for r in stores.tracking.query_status(Status.FOUND)
+               if not str(r.get("pk", "")).startswith("meta#")]
+    for row in waiting[:2]:  # small batches — pace the LLM spend
+        stores.queue.enqueue(stores.tailor_queue, {"pk": row["pk"]})
+        log.info("sweep: queued waiting job %s", row["pk"])
+
+
 def _worker_loop() -> None:
     """The 'event source' — drain the queue and run the pipeline per job. Its own
     thread, so a slow job (browser apply) never blocks discovery."""
     from agent.run import run_job
+    from core import flags
 
     stores = make_stores()
     while True:
-        for item in stores.queue.drain(stores.tailor_queue):
+        if flags.paused():
+            time.sleep(POLL_INTERVAL)
+            continue
+        items = stores.queue.drain(stores.tailor_queue)
+        for item in items:
             try:
                 log.info("pipeline: %s", run_job(item["pk"], stores))
             except Exception:
                 log.exception("pipeline failed for %s", item.get("pk"))
+        if not items and flags.apply_mode() == "auto":
+            try:
+                _sweep_found(stores)
+            except Exception:
+                log.exception("backlog sweep failed")
         time.sleep(POLL_INTERVAL)
 
 

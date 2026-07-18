@@ -27,12 +27,14 @@ class Status(str, Enum):
     NEEDS_HUMAN = "needs_human"
     CAPPED = "capped"
     JOB_GONE = "job_gone"
+    FAILED = "failed"  # apply ran but couldn't confirm a submit (dead posting, no form)
     ERROR = "error"
 
 
 class GateReason(str, Enum):
     """Why an application stopped and requires a human (on ``needs_human``)."""
 
+    APPROVAL = "approval"  # ready to submit — waiting for your go-ahead
     CAPTCHA = "captcha"
     NO_ACCOUNT = "no_account"  # auto-signup was blocked (CAPTCHA/SMS-2FA)
     UNKNOWN_FIELD = "unknown_field"

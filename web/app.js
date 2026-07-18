@@ -13,7 +13,21 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const state = { apps: [], stats: {}, companies: [], bank: { global: [], companies: {} },
   paused: false, filter: "all", query: "", route: "live", events: [], liveSeen: 0,
-  reviewCompany: null };
+  reviewCompany: null, pipelineCompany: "__all__", seen: {} };
+
+// "New" = a notable state change (gate / applied / failed) the user hasn't opened
+// yet. Keyed by pk→updated_at in localStorage, so a fresh update re-flags as new
+// and opening the card clears it. Discovered/found jobs never count as a notification.
+function isUnseen(r) {
+  if (!r.updated_at || !["needs_human", "applied", "failed", "error"].includes(r.status)) return false;
+  return state.seen[r.pk] !== r.updated_at;
+}
+function markSeen(pk) {
+  const r = state.apps.find((a) => a.pk === pk);
+  if (!r || !r.updated_at || state.seen[pk] === r.updated_at) return;
+  state.seen[pk] = r.updated_at;
+  try { localStorage.setItem("appliedin.seen", JSON.stringify(state.seen)); } catch { /* ignore */ }
+}
 
 // --- helpers ---------------------------------------------------------------
 function esc(s) {
@@ -51,6 +65,15 @@ function md(src) {
   closeLists();
   return out.join("\n");
 }
+// Some log payloads arrive JSON-escaped (a model that emitted "—", or a
+// tool return that was json.dumps'd) — decode the common escapes so the raw
+// log reads as text/lines, not backslash noise. Runs BEFORE esc()/md().
+function unraw(s) {
+  return String(s ?? "")
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "  ");
+}
 function ago(ts) {
   if (!ts) return "—";
   const d = (Date.now() - new Date(ts).getTime()) / 1000;
@@ -64,30 +87,50 @@ function when(ts) {
     hour: "2-digit", minute: "2-digit" }) : "—";
 }
 const STATUS_LABEL = (s) => s.replace(/_/g, " ");
+// Honest, human labels for WHY a job is waiting — never jargon like "low confidence".
+const GATE_LABEL = {
+  approval: "awaiting your approval",
+  unknown_field: "needs an answer from you",
+  captcha: "CAPTCHA — finish manually",
+  no_account: "account/login needed",
+  low_confidence: "needs review",
+};
+const gateLabel = (r) => GATE_LABEL[r] || STATUS_LABEL(r || "review");
 const tagClass = (s) =>
   ["applied", "applied_manual"].includes(s) ? "solid strong"
   : s === "needs_human" ? "strong"
   : s === "found" ? "dashed"
-  : ["skipped", "job_gone", "error", "capped"].includes(s) ? "" : "solid";
+  : ["error", "failed"].includes(s) ? "fail"
+  : ["skipped", "job_gone", "capped"].includes(s) ? "" : "solid";
 
 const LANES = [
-  { key: "discovered", title: "Discovered", match: ["found"] },
-  { key: "progress", title: "Tailoring & applying", match: ["tailored", "submitting"] },
-  { key: "review", title: "Waiting for you", match: ["needs_human"] },
+  { key: "discovered", title: "Found · waiting turn", match: ["found"] },
+  { key: "progress", title: "Working now", match: ["tailored", "submitting"] },
+  { key: "review", title: "Needs you", match: ["needs_human"] },
   { key: "applied", title: "Applied", match: ["applied", "applied_manual"] },
-  { key: "closed", title: "Closed", match: ["skipped", "job_gone", "error", "capped"] },
+  { key: "failed", title: "Failed", match: ["failed", "error"] },
+  { key: "closed", title: "Closed", match: ["skipped", "job_gone", "capped"] },
 ];
 const FILTERS = [
   ["all", "all", () => true],
   ["review", "needs you", (r) => r.status === "needs_human"],
   ["progress", "in pipeline", (r) => ["found", "tailored", "submitting", "capped"].includes(r.status)],
   ["applied", "applied", (r) => ["applied", "applied_manual"].includes(r.status)],
-  ["closed", "closed", (r) => ["skipped", "job_gone", "error"].includes(r.status)],
+  ["failed", "failed", (r) => ["failed", "error"].includes(r.status)],
+  ["closed", "closed", (r) => ["skipped", "job_gone", "capped"].includes(r.status)],
 ];
 
+// Confidence → colour. 0 = red, 10 = green, continuous through amber (GitHub-ish).
+// One tone (68% sat, 45% light) that stays legible on both the dark & light theme.
+function scoreColor(n) {
+  const h = Math.max(0, Math.min(10, n)) / 10 * 125; // 0 red … 125 green
+  return `hsl(${Math.round(h)} 68% 45%)`;
+}
 function scoreHtml(n) {
   if (n == null) return '<span class="score">—</span>';
-  return `<span class="score"><span class="score-bar"><span style="width:${n * 10}%"></span></span>${n}</span>`;
+  const c = scoreColor(n);
+  return `<span class="score" style="color:${c}"><span class="score-bar">` +
+    `<span style="width:${n * 10}%;background:${c}"></span></span>${n}</span>`;
 }
 function tagHtml(s) {
   return `<span class="tag ${tagClass(s)}">${esc(STATUS_LABEL(s))}</span>`;
@@ -110,21 +153,48 @@ const VIEWS = {
 
   pipeline: {
     title: "Pipeline",
-    desc: "discovered → applied → waiting for you",
+    desc: "found → scored → tailored → applied · flip auto ☾ to run while you sleep",
     render() {
       const kpis = kpiStrip();
+      // Company tabs — the board is unfollowable with 40 companies piled into each
+      // lane, so scope it to one company at a time (plus an "All" tab).
+      const companies = [...new Set(state.apps.map((a) => a.company).filter(Boolean))].sort();
+      let sel = state.pipelineCompany;
+      if (sel !== "__all__" && !companies.includes(sel)) sel = "__all__";
+      state.pipelineCompany = sel;
+      // A company tab FLASHES when a run left something needing your input that
+      // you haven't opened yet — impossible to miss after an overnight cycle.
+      const alertCo = (c) => state.apps.some((a) => a.company === c &&
+        (isUnseen(a) || a.status === "needs_human"));
+      const newCo = (c) => state.apps.some((a) => a.company === c && isUnseen(a));
+      const tab = (key, label, n, alert, fresh) =>
+        `<button class="rtab ${key === sel ? "active" : ""} ${fresh ? "flash" : ""}"
+           data-pcompany="${esc(key)}">
+          ${alert ? "🔔 " : ""}${esc(label)}<span class="rtab-n">${n}</span></button>`;
+      const tabs = tab("__all__", "All", state.apps.length, false, false) +
+        companies.map((c) =>
+          tab(c, c, state.apps.filter((a) => a.company === c).length,
+              alertCo(c), newCo(c))).join("");
+      const pool = sel === "__all__" ? state.apps : state.apps.filter((a) => a.company === sel);
       const lanes = LANES.map((lane) => {
-        const items = state.apps.filter((a) => lane.match.includes(a.status));
+        const items = pool.filter((a) => lane.match.includes(a.status));
         const cards = items.map(cardHtml).join("") ||
           `<div class="empty" style="padding:24px">empty</div>`;
+        // "Approve all" on the Needs-you lane: approve every one only waiting on
+        // your go-ahead (not the ones needing a real answer/CAPTCHA).
+        const approvable = lane.key === "review"
+          ? items.filter((a) => a.gate_reason === "approval").length : 0;
+        const bulk = approvable
+          ? `<button class="lane-approve" data-approve-all="1">✓ approve ${approvable}</button>`
+          : "";
         return `<div class="lane" data-lane="${lane.key}">
           <div class="lane-head"><span class="lane-dot"></span>
             <span class="lane-title">${lane.title}</span>
-            <span class="lane-count">${items.length}</span></div>
+            <span class="lane-count">${items.length}</span>${bulk}</div>
           <div class="lane-body">${cards}</div>
         </div>`;
       }).join("");
-      return kpis + `<div class="lanes">${lanes}</div>`;
+      return kpis + `<div class="rtabs rtabs-scroll">${tabs}</div><div class="lanes">${lanes}</div>`;
     },
   },
 
@@ -181,7 +251,7 @@ const VIEWS = {
           <div><div class="t-co" style="font-size:15px">${esc(r.company)}
             <span style="color:var(--faint);font-weight:400"> — ${esc(r.title)}</span></div>
             <div class="mono" style="font-size:12px;color:var(--faint);margin-top:3px">
-              gate: ${esc(STATUS_LABEL(r.gate_reason || "review"))} · <span style="color:var(--muted-fg)">${esc(r.pk)}</span>
+              ${esc(gateLabel(r.gate_reason))} · <span style="color:var(--muted-fg)">${esc(r.pk)}</span>
               ${r.jd_url ? ` · <a href="${esc(r.jd_url)}" target="_blank" rel="noopener" style="color:var(--muted-fg)">view posting ↗</a>` : ""}
             </div></div>
           <button class="btn" data-open="${esc(r.pk)}">Open</button>
@@ -196,6 +266,9 @@ const VIEWS = {
     title: "Companies",
     desc: "watchlist · burn-in · discovery mode",
     render() {
+      if (!state.companies.length) return `<div class="panel"><div class="empty">
+        No per-company view yet — watchlist status (mode · burn-in · discovery)
+        populates here once that's wired to the server.</div></div>`;
       return `<div class="grid-cards">${state.companies.map((c) => {
         const burn = Array.from({ length: c.needed }, (_, i) =>
           `<i class="${i < c.clean_approvals ? "on" : ""}"></i>`).join("");
@@ -231,7 +304,9 @@ function kpiStrip() {
   const segs = Array.from({ length: cap }, (_, i) => `<i class="${i < used ? "on" : ""}"></i>`).join("");
   const pipeline = ["found", "tailored", "submitting"].reduce((n, k) => n + (c[k] || 0), 0);
   const tiles = [
-    { l: "today · submitted", v: `${used}<span class="unit"> / ${cap}</span>`, x: `<div class="segmeter">${segs}</div>` },
+    { l: "today · submitted", v: `${used}<span class="unit"> / ${cap}</span>`,
+      sub: state.mode === "auto" ? "auto ☾ — applies while you sleep" : "gated — you approve each",
+      x: `<div class="segmeter">${segs}</div>` },
     { l: "needs you", v: c.needs_human || 0, sub: (c.needs_human ? "awaiting reply" : "all clear") },
     { l: "in pipeline", v: pipeline, sub: `${c.submitting || 0} submitting` },
     { l: "applied", v: (c.applied || 0) + (c.applied_manual || 0), sub: `${c.skipped || 0} skipped` },
@@ -242,16 +317,48 @@ function kpiStrip() {
 }
 
 function cardHtml(r) {
+  const n = r.match_score;
+  // Colour-code the whole block by confidence: an accent stripe + a faint wash,
+  // green (strong fit) → red (weak). Neutral when there's no score yet.
+  const tint = n != null
+    ? ` style="box-shadow:inset 3px 0 0 ${scoreColor(n)};` +
+      `background:color-mix(in srgb, ${scoreColor(n)} 8%, var(--bg))"`
+    : "";
   const jobUrl = r.jd_url
     ? `<a class="card-joburl" href="${esc(r.jd_url)}" target="_blank" rel="noopener"
          onclick="event.stopPropagation()">view posting ↗</a>`
     : "";
-  return `<div class="card" data-pk="${esc(r.pk)}">
+  // Only the meta bits we actually have — no dangling "— · —" placeholders.
+  const t = ago(r.updated_at);
+  const bits = [
+    r.resume_version && esc(r.resume_version),
+    (r.fields || []).length && `${r.fields.length} fields filled`,
+    t !== "—" && t,
+  ].filter(Boolean);
+  const meta = bits.length
+    ? `<div class="card-meta">${bits.map((b, i) =>
+        `<span${i ? ' class="dotsep"' : ""}>${b}</span>`).join("")}</div>`
+    : "";
+  // Live state the user should notice at a glance: a WIP pulse while the browser
+  // submits, a bright 🆕 for an update they haven't opened, a quiet 🔔 once seen.
+  const unseen = isUnseen(r);
+  const flag = r.status === "submitting"
+    ? `<div class="card-flag wip"><span class="wip-dot"></span>applying…</div>`
+    : r.status === "needs_human"
+    ? `<div class="card-flag ${unseen ? "new" : "alert"}">${unseen ? "🆕 " : "🔔 "}${esc(gateLabel(r.gate_reason))}</div>`
+    : unseen && r.status === "applied"
+    ? `<div class="card-flag new">🆕 applied ✓</div>`
+    : unseen && ["failed", "error"].includes(r.status)
+    ? `<div class="card-flag new">🆕 update · needs review</div>`
+    : "";
+  const cls = r.status === "submitting" ? "card wip"
+    : unseen ? "card new"
+    : r.status === "needs_human" ? "card alert" : "card";
+  return `<div class="${cls}" data-pk="${esc(r.pk)}"${tint}>
     <div class="card-top"><span class="card-co">${esc(r.company)}</span>${scoreHtml(r.match_score)}</div>
     <div class="card-role">${esc(r.title)}</div>
-    <div class="card-meta"><span>${esc(r.resume_version || "—")}</span>
-      ${r.gate_reason ? `<span class="dotsep">${esc(STATUS_LABEL(r.gate_reason))}</span>` : ""}
-      <span class="dotsep">${ago(r.updated_at)}</span></div>
+    ${flag}
+    ${meta}
     ${jobUrl ? `<div class="card-links">${jobUrl}</div>` : ""}
   </div>`;
 }
@@ -292,7 +399,7 @@ function openDrawer(pk) {
 
   const gate = r.status === "needs_human" ? `
     <div class="section gate-box">
-      <div class="section-t">⛔ blocked — needs you${r.gate_reason ? " · " + esc(STATUS_LABEL(r.gate_reason)) : ""}</div>
+      <div class="section-t">⏸ ${esc(gateLabel(r.gate_reason))}</div>
       <div class="gate-q md">${md(r.gate_question || "The pipeline is paused at this step — approve to continue.")}</div>
       <textarea id="gate-answer" class="gate-input" rows="2"
         placeholder="Type your answer, or leave blank to approve &amp; continue…"></textarea>
@@ -302,10 +409,14 @@ function openDrawer(pk) {
       </div>
     </div>` : "";
 
+  const canRetry = ["failed", "error", "capped"].includes(r.status);
   const closed = r.closed_reason ? `
     <div class="section closed-box">
-      <div class="section-t">why it closed</div>
+      <div class="section-t">why it ${canRetry ? "failed" : "closed"}</div>
       <div class="closed-why">${esc(r.closed_reason)}</div>
+      ${canRetry ? `<div class="drawer-actions">
+        <button class="btn btn-primary" data-act="retry" data-pk="${esc(r.pk)}">↻ Retry</button>
+      </div>` : ""}
     </div>` : "";
 
   const diff = r.has_diff ? `
@@ -318,7 +429,7 @@ function openDrawer(pk) {
     <div class="section"><div class="section-t">status</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${tagHtml(r.status)}${scoreHtml(r.match_score)}
-        ${r.gate_reason ? `<span class="mono" style="font-size:12px;color:var(--faint)">gate: ${esc(STATUS_LABEL(r.gate_reason))}</span>` : ""}
+        ${r.gate_reason && r.status === "needs_human" ? `<span class="mono" style="font-size:12px;color:var(--faint)">${esc(gateLabel(r.gate_reason))}</span>` : ""}
       </div></div>
     ${diff}
 
@@ -356,6 +467,10 @@ function openDrawer(pk) {
     $("#drawer").classList.add("show");
   });
   if (r.has_diff) loadDiff(r.pk);
+  // Opening a card = seeing it: clear its "new" flag on the board behind the drawer.
+  const wasNew = isUnseen(r);
+  markSeen(pk);
+  if (wasNew) { const v = VIEWS[state.route]; if (v) $("#view").innerHTML = v.render(); renderNav(); }
 }
 
 function loadDiff(pk) {
@@ -468,8 +583,11 @@ async function load() {
       fetch(api("/applications"), { headers: auth.header() }).then((r) => r.json()),
       fetch(api("/stats"), { headers: auth.header() }).then((r) => r.json()),
     ]);
-    state.apps = apps.items || [];
+    // Guard: never render internal bookkeeping rows (meta# watermarks) as cards.
+    state.apps = (apps.items || []).filter((r) => !String(r.pk || "").startsWith("meta#"));
     state.stats = stats;
+    state.mode = stats.apply_mode || "gated";
+    state.autoMin = stats.auto_min_score ?? 8;
     state.companies = apps.companies || [];
     state.bank = apps.bank || { global: [], companies: {} };
     state.paused = !!stats.paused;
@@ -490,7 +608,8 @@ function post(path, body) {
 
 // Raw logs, grouped by job → chronological stages. One `run` block per job.
 const STAGE_LABEL = { scorer: "score", tailor: "tailor", critic: "critique",
-  applier: "apply", tailor_critique: "tailor", appliedin_pipeline: "pipeline" };
+  applier: "apply", browser: "browser", writer: "writer",
+  tailor_critique: "tailor", appliedin_pipeline: "pipeline" };
 
 function groupRuns(events) {
   const order = [];               // pks, most-recently-active first
@@ -537,6 +656,28 @@ function runBlock(r) {
   </div>`;
 }
 
+// Turn machine payloads into something a human can skim: skill dumps become one
+// line, score JSON becomes a sentence, objects become "key: value" lines.
+function smartRaw(e, raw) {
+  const t = (raw || "").trim();
+  if (e.kind === "result" && /load_skill|run_skill_script/.test(e.detail || "")) {
+    const m = t.match(/skill_name"?\s*:\s*"([^"]+)/);
+    return `loaded skill${m ? `: ${m[1]}` : ""} (instructions hidden)`;
+  }
+  const sc = t.match(/^\{\s*"?score"?\s*:\s*(\d+)\s*,\s*"?reasoning"?\s*:\s*"([\s\S]*)/);
+  if (sc) return `score ${sc[1]}/10 — ${sc[2].replace(/["}\s…]*$/, "")}`;
+  if ((e.kind === "result" || e.kind === "response") && t.startsWith("{")) {
+    try {
+      const o = JSON.parse(t);
+      return Object.entries(o).map(([k, v]) =>
+        `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n");
+    } catch { /* truncated JSON — show as-is */ }
+  }
+  return raw;
+}
+
+const CLIP_AT = 380;  // longer than this → collapsed behind "show all"
+
 function logLine(e) {
   const t = e.at ? new Date(e.at).toLocaleTimeString("en-GB") : "";
   const stage = STAGE_LABEL[e.agent] || e.agent || "";
@@ -555,12 +696,18 @@ function logLine(e) {
   const shot = e.screenshot
     ? `<a class="log-shot" href="${esc(e.screenshot)}" target="_blank" rel="noopener">
          <img src="${esc(e.screenshot)}" alt="screenshot" loading="lazy"></a>` : "";
-  const rawHtml = (e.kind === "response" || e.kind === "gate") ? md(raw) : esc(raw);
+  const text = unraw(smartRaw(e, raw));
+  const isMd = e.kind === "response" || e.kind === "gate";
+  const rawHtml = isMd ? md(text) : esc(text);
+  const long = text.length > CLIP_AT;
   return `<div class="log-line k-${esc(e.kind)}">
     <span class="log-t">${t}</span>
     <span class="log-stg">${esc(stage)}</span>
     <span class="log-mark">${esc(mark)}</span>
-    <span class="log-raw ${(e.kind === "response" || e.kind === "gate") ? "md" : ""}">${rawHtml}</span>
+    <span class="log-cell">
+      <span class="log-raw ${isMd ? "md" : ""} ${long ? "clipped" : ""}">${rawHtml}</span>
+      ${long ? '<button class="log-more">show all ▾</button>' : ""}
+    </span>
     ${shot}
   </div>`;
 }
@@ -574,7 +721,7 @@ function connectLive() {
       try {
         const e = JSON.parse(m.data);
         state.events.unshift(e);
-        if (state.events.length > 300) state.events.pop();
+        if (state.events.length > 2000) state.events.pop();
         if (state.route === "live") render();
         else { state.liveSeen++; updateLiveBadge(); }
         if (["discovered", "applied", "gate", "running"].includes(e.kind)) scheduleReload();
@@ -599,6 +746,15 @@ function updateLiveBadge() {
 function renderPause() {
   $("#pipeline-toggle").dataset.state = state.paused ? "paused" : "running";
   $("#pipeline-label").textContent = state.paused ? "paused" : "running";
+  const mb = $("#mode-btn");
+  if (mb) {
+    mb.dataset.mode = state.mode || "gated";
+    $("#mode-label").textContent = state.mode === "auto" ? "auto ☾" : "gated";
+    mb.title = state.mode === "auto"
+      ? `AUTO — finds & applies while you sleep (score ≥ ${state.autoMin ?? 8}, `
+        + `cap ${state.stats.daily_cap ?? 5}/day). Click to switch to gated.`
+      : "GATED — every application waits for your approval. Click to switch to auto.";
+  }
 }
 function toast(msg) {
   const el = $("#toast");
@@ -618,11 +774,33 @@ function wire() {
   window.addEventListener("hashchange", () => goto(location.hash.replace("#/", "") || "pipeline"));
 
   $("#view").addEventListener("click", (e) => {
+    const more = e.target.closest(".log-more");
+    if (more) {
+      e.stopPropagation();
+      const clip = more.parentElement.querySelector(".log-raw");
+      const open = clip.classList.toggle("open");
+      more.textContent = open ? "show less ▴" : "show all ▾";
+      return;
+    }
     const rtab = e.target.closest("[data-rcompany]");
+    const ptab = e.target.closest("[data-pcompany]");
+    const approveAll = e.target.closest("[data-approve-all]");
     const card = e.target.closest("[data-pk]");
     const chip = e.target.closest("[data-filter]");
     const open = e.target.closest("[data-open]");
+    if (approveAll) {
+      const co = state.pipelineCompany && state.pipelineCompany !== "__all__"
+        ? state.pipelineCompany : "";
+      const n = state.apps.filter((a) => a.gate_reason === "approval"
+        && (!co || a.company === co)).length;
+      if (!confirm(`Approve and apply to ${n} job${n === 1 ? "" : "s"}`
+        + `${co ? " at " + co : ""}? They run one at a time; complete each CAPTCHA as its window opens.`)) return;
+      post("/actions/approve-all", { company: co || "__all__" });
+      toast(`approving ${n} — windows will open one at a time`);
+      return;
+    }
     if (rtab) { state.reviewCompany = rtab.dataset.rcompany; render(); return; }
+    if (ptab) { state.pipelineCompany = ptab.dataset.pcompany; render(); return; }
     if (chip) { state.filter = chip.dataset.filter; render(); return; }
     if (open) { openDrawer(open.dataset.open); return; }
     if (card) openDrawer(card.dataset.pk);
@@ -637,6 +815,9 @@ function wire() {
       const answer = ($("#gate-answer")?.value || "").trim() || "approved";
       post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
       toast("sent — pipeline resuming");
+    } else if (act.dataset.act === "retry") {
+      post(`/actions/retry/${encodeURIComponent(pk)}`);
+      toast("retrying — re-running the pipeline");
     } else {
       post(`/actions/skip/${encodeURIComponent(pk)}`);
       toast("skipped");
@@ -660,7 +841,17 @@ function wire() {
   });
   $("#pipeline-toggle").addEventListener("click", () => {
     state.paused = !state.paused; renderPause();
-    toast(state.paused ? "pipeline paused" : "pipeline resumed");
+    post("/actions/pause", { paused: state.paused });
+    toast(state.paused ? "pipeline paused — nothing will run" : "pipeline resumed");
+  });
+  $("#mode-btn").addEventListener("click", () => {
+    state.mode = state.mode === "auto" ? "gated" : "auto"; renderPause();
+    post("/actions/mode", { mode: state.mode });
+    toast(state.mode === "auto"
+      ? `auto ☾ on — applies jobs scoring ≥ ${state.autoMin ?? 8} by itself, `
+        + `up to ${state.stats.daily_cap ?? 5}/day; only CAPTCHAs & unknowns wait for you`
+      : "gated — every application waits for your approval");
+    render();
   });
   $("#theme-btn").addEventListener("click", () => {
     const root = document.documentElement;
@@ -686,6 +877,7 @@ function startClock() {
 async function boot() {
   const saved = localStorage.getItem("appliedin.theme");
   if (saved) document.documentElement.setAttribute("data-theme", saved);
+  try { state.seen = JSON.parse(localStorage.getItem("appliedin.seen") || "{}"); } catch { state.seen = {}; }
   wire();
   startClock();
   goto(location.hash.replace("#/", "") || "pipeline");

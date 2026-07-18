@@ -21,7 +21,7 @@ log = get_logger(__name__)
 
 CHANNEL = "appliedin:events"
 HISTORY = "appliedin:events:log"
-HISTORY_MAX = 200
+HISTORY_MAX = 2000  # keep the full day's activity — logs must not disappear
 
 
 @lru_cache

@@ -16,6 +16,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ANTHROPIC_API_KEY (read by LiteLLM) are available from one file.
 load_dotenv()
 
+# Let LiteLLM silently drop sampling params a model rejects instead of 400ing.
+# Reasoning models (gpt-5*, o-series) only accept temperature=1 and reject
+# frequency_penalty/top_p; ADK + browser-use send those defaults. This one flag
+# covers every completion() call and the ADK LiteLlm path alike.
+try:
+    import litellm
+
+    litellm.drop_params = True
+except Exception:  # litellm always present in practice; never block startup on it
+    pass
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="APPLIEDIN_", extra="ignore")
@@ -44,9 +55,27 @@ class Settings(BaseSettings):
     bedrock_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # browser-use (crawl + apply) drives a real browser and needs a model that
-    # reliably emits structured tool actions — Haiku doesn't, so it uses Sonnet.
-    # Only the browser-use calls use this; all orchestration stays on Haiku.
-    browser_model: str = "claude-sonnet-4-6"
+    # reliably emits structured tool actions. Only the browser-use calls use this;
+    # orchestration models are set by orchestrator_model / the per-agent overrides.
+    browser_model: str = "gpt-4.1-mini"
+    # Apply engine: "agent" = browser-use (LLM drives, using our deterministic
+    # helper tools) — swap browser_model to change the driver. "scripted" = pure
+    # Playwright pipeline (no LLM in the click loop).
+    apply_engine: str = "scripted"  # deterministic pipeline; agent = browser-use fallback
+    # Run the browser without a visible window (APPLIEDIN_BROWSER_HEADLESS=true).
+    # Headed is friendlier to bot-detection; headless suits overnight/Docker runs.
+    browser_headless: bool = False
+    # Use REAL Google Chrome (channel "chrome") + a persistent profile instead of
+    # bundled headless Chromium. A real browser with accumulated cookies triggers
+    # far fewer CAPTCHAs, and you can pre-log-in to portals in this profile once.
+    browser_channel: str = "chrome"
+    browser_profile_dir: str = ".local/chrome-profile"
+    # ASSIST: when a CAPTCHA (or a human-only step) blocks an otherwise-filled
+    # form in a VISIBLE browser, keep the window open and wait for YOU to solve it
+    # and submit — the automation just detects the real confirmation. Never solves
+    # a CAPTCHA itself. Seconds to wait for the human before giving up.
+    assist_captcha: bool = True
+    assist_wait_seconds: int = 240
 
     @property
     def llm_provider(self) -> str:
@@ -61,27 +90,43 @@ class Settings(BaseSettings):
         """Model string for ADK/LiteLLM (``anthropic/...`` or ``bedrock/...``)."""
         return f"{self.llm_provider}/{self.llm_model}"
 
-    # Per-agent model overrides — mix & match. Each is a full LiteLLM string
-    # (e.g. "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5-20251001"). Empty
-    # => that agent uses the base litellm_model above. Env: APPLIEDIN_SCORER_MODEL,
-    # APPLIEDIN_TAILOR_MODEL, APPLIEDIN_CRITIC_MODEL, APPLIEDIN_RELEVANCE_MODEL.
+    # Base model for ALL orchestration agents (a full LiteLLM string, e.g.
+    # "openai/gpt-4.1-mini"). Empty => the mode default (litellm_model). The
+    # per-agent overrides below win over this. Env: APPLIEDIN_ORCHESTRATOR_MODEL.
+    orchestrator_model: str = ""
+
+    # Per-agent model overrides — mix & match, since each component has different
+    # needs. Full LiteLLM strings (e.g. "openai/gpt-4.1-mini",
+    # "anthropic/claude-haiku-4-5-20251001"). Empty => the orchestrator base.
+    # Env: APPLIEDIN_SCORER_MODEL / _TAILOR_MODEL / _CRITIC_MODEL / _RELEVANCE_MODEL.
     scorer_model: str = ""
     tailor_model: str = ""
     critic_model: str = ""
     relevance_model: str = ""
+    # The "writer": drafts free-text application answers (why this role, essays)
+    # from the résumé + GitHub + JD. Its own knob so you can spend on writing.
+    writer_model: str = ""
 
     def agent_model(self, agent: str) -> str:
-        """The LiteLLM model string for one orchestration agent (its override, or
-        the base model). `agent` is scorer | tailor | critic | relevance."""
+        """The LiteLLM model string for one orchestration agent: its own override,
+        else the orchestrator base, else the mode default. `agent` is
+        scorer | tailor | critic | relevance | writer (empty = applier / default)."""
         override = {
             "scorer": self.scorer_model, "tailor": self.tailor_model,
             "critic": self.critic_model, "relevance": self.relevance_model,
+            "writer": self.writer_model,
         }.get(agent, "")
-        return override or self.litellm_model
+        return override or self.orchestrator_model or self.litellm_model
 
     # Guardrails
     daily_cap: int = 5
     max_attempts: int = 2
+
+    # Apply mode default (runtime-overridable from the dashboard — core.flags):
+    # "gated" = approve each apply; "auto" = jobs scoring ≥ auto_min_score apply
+    # themselves up to daily_cap (find-and-apply while you sleep).
+    apply_mode: str = "gated"
+    auto_min_score: int = 8
 
     # Filesystem: where bundled config (watchlist/preferences) lives at runtime.
     config_dir: str = "config"

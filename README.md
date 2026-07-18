@@ -16,10 +16,13 @@ enqueues them; each job then runs through a sequential agent graph:
   the JD's vocabulary (never inventing facts, never touching your titles or
   summary), compiles it to PDF (Tectonic), and saves it — with a "what changed"
   diff.
-- **apply** — human-gated: it asks you to approve, then a real browser agent
-  (browser-use) fills and submits the form using only approved answers. If it
-  hits an unknown field, an account wall, or a CAPTCHA, it stops and asks you;
-  your answer is banked as a fact and never asked again.
+- **apply** — human-gated by default (approve first); flip **auto ☾** and jobs
+  scoring ≥ your threshold apply themselves, up to a daily cap, while you sleep.
+  The browser uploads the tailored résumé and fills every field from your approved
+  facts; a **writer** model drafts any free-text answers ("why this role?") from
+  your résumé + GitHub. If a required field is genuinely unknown, or a CAPTCHA
+  blocks the submit, it stops and asks you — your answer is banked as a fact and
+  never asked again.
 
 Everything streams to a live dashboard — every agent step's input and output,
 grouped by job, plus a screenshot of what the browser saw.
@@ -45,10 +48,38 @@ sequenceDiagram
     You->>Pipe: approve
     Pipe->>BU: fill + submit (approved answers only)
     alt missing answer / account / CAPTCHA
-        BU-->>You: ask; answer is banked as a fact
+        BU-->>You: ask, then bank the answer as a fact
     end
     Pipe->>Store: status = applied
 ```
+
+## Models
+
+Every stage runs on the model that fits it — cheap where the judgment is
+mechanical, stronger where writing quality matters. Each is a full LiteLLM string,
+so you can mix providers, and each is overridable by its own `APPLIEDIN_*_MODEL`
+env var (`APPLIEDIN_ORCHESTRATOR_MODEL` is the base the agents fall back to).
+
+| Stage | What it does | Default model | Env var |
+| --- | --- | --- | --- |
+| Relevance | stage-1 title screen | `openai/gpt-5-mini` | `APPLIEDIN_RELEVANCE_MODEL` → orchestrator |
+| Scorer | rate fit 0–10 vs your résumé | `openai/gpt-5-mini` | `APPLIEDIN_SCORER_MODEL` → orchestrator |
+| Tailor | reword the résumé for the JD | `anthropic/claude-haiku-4-5` | `APPLIEDIN_TAILOR_MODEL` |
+| Critic | review the tailored résumé | `anthropic/claude-haiku-4-5` | `APPLIEDIN_CRITIC_MODEL` |
+| Writer | draft free-text answers / essays | `anthropic/claude-sonnet-4-6` | `APPLIEDIN_WRITER_MODEL` |
+| Applier / field-mapper | orchestrate the apply | `openai/gpt-5-mini` | `APPLIEDIN_ORCHESTRATOR_MODEL` |
+| Browser | drive Chrome (crawl + apply) | `gpt-5-mini` | `APPLIEDIN_BROWSER_MODEL` |
+
+The split in one line: **gpt-5-mini** for the high-volume mechanical work
+(screening, scoring, field-mapping, driving the browser), **Haiku** for résumé
+writing, **Sonnet** for the essays — they must read well and run rarely. The
+browser model is deliberately separate from orchestration; a stronger vision model
+(e.g. `claude-sonnet-4-6`) picks tricky dropdowns more reliably if you want it.
+
+`APPLIEDIN_APPLY_ENGINE=agent` (the default) runs the unified engine: browser-use
+fills the form (uploads the résumé, types fields, picks dropdowns by vision, drafts
+essays) and a deterministic finalize step submits, reads validation errors, and
+self-heals — handing off to you only for a CAPTCHA or a genuinely unknown field.
 
 ## Two modes (same code)
 
@@ -57,16 +88,11 @@ sequenceDiagram
 | Store | Redis | DynamoDB |
 | Queue | Redis list | SQS |
 | Artifacts | filesystem | S3 |
-| Orchestration LLM | Anthropic (Haiku) | Bedrock |
-| Browser LLM | browser-use on Anthropic / OpenAI / OpenRouter | same |
+| LLMs | per-stage mix (see [Models](#models)) | same models via Bedrock/hosted |
 | Triggers | `daemon` (cron + queue loop + web) | EventBridge + SQS |
 | UI | localhost | Vercel |
 
 `APPLIEDIN_MODE` picks the backends via `core/stores.py`; nothing else changes.
-The browser-driving model is separate from orchestration — set
-`APPLIEDIN_BROWSER_MODEL` (e.g. `gpt-4.1-mini`, `openrouter/moonshotai/kimi-k2`,
-`claude-sonnet-4-6`) so orchestration stays cheap on Haiku while the browser
-uses whatever drives it best.
 
 ## Run locally
 

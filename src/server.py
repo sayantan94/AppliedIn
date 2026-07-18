@@ -36,11 +36,20 @@ def _closed_reason(row: dict) -> str | None:
         return f"Skipped: {reason}." if reason else "Skipped."
     if status == "job_gone":
         return "The posting was taken down before we could apply."
+    if status == "failed":
+        return row.get("fail_reason") or "The application could not be submitted."
     if status == "error":
         return row.get("error") or "Hit an error during the pipeline (see the logs)."
     if status == "capped":
         return "Daily application cap reached — parked for the next run."
     return None
+
+
+def _is_job_row(row: dict) -> bool:
+    """Real application rows only. Internal bookkeeping (crawl watermarks,
+    `meta#…`) shares the tracking table but isn't a job — hide it from the board
+    so it doesn't render as a blank card or inflate the counts."""
+    return not str(row.get("pk") or "").startswith("meta#")
 
 
 def _to_ui(row: dict, artifacts) -> dict:
@@ -92,7 +101,7 @@ def create_app() -> FastAPI:
     @app.get("/applications")
     def applications():
         stores = make_stores(settings)
-        rows = stores.tracking.all()
+        rows = [r for r in stores.tracking.all() if _is_job_row(r)]
         return {"items": [_to_ui(r, stores.artifacts) for r in rows]}
 
     @app.get("/stats")
@@ -100,10 +109,16 @@ def create_app() -> FastAPI:
         stores = make_stores(settings)
         counts: dict[str, int] = {}
         for r in stores.tracking.all():
+            if not _is_job_row(r):
+                continue
             counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
+        from core import flags
         return {"daily_cap": settings.daily_cap, "today_submitted": applied,
-                "queue_age_seconds": None, "paused": False, "counts_by_status": counts}
+                "queue_age_seconds": None, "paused": flags.paused(),
+                "apply_mode": flags.apply_mode(),
+                "auto_min_score": settings.auto_min_score,
+                "counts_by_status": counts}
 
     @app.post("/actions/resume/{pk}")
     def resume(pk: str, body: dict, background: BackgroundTasks):
@@ -117,6 +132,88 @@ def create_app() -> FastAPI:
     def skip(pk: str):
         make_stores(settings).tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
         return {"ok": True}
+
+    @app.post("/actions/retry/{pk}")
+    def retry(pk: str, background: BackgroundTasks):
+        """Re-run a failed/errored job from scratch (clean session, current KB)."""
+        from agent.run import retry_job
+        background.add_task(retry_job, pk)
+        return {"ok": True, "status": "retrying"}
+
+    @app.post("/actions/mode")
+    def set_mode(body: dict):
+        """Flip apply mode: 'gated' (approve each) / 'auto' (apply while asleep)."""
+        from core import flags
+        mode = (body.get("mode") or "").lower()
+        if mode not in ("gated", "auto"):
+            return {"ok": False, "note": "mode must be 'gated' or 'auto'"}
+        flags.set_flag("apply_mode", mode)
+        return {"ok": True, "apply_mode": mode}
+
+    @app.post("/actions/approve-all")
+    def approve_all(body: dict, background: BackgroundTasks):
+        """Approve every job waiting only for your go-ahead (gate 'approval'),
+        optionally scoped to one company. They run 5 AT A TIME (parallel batches)
+        for speed — each apply gets its own Chrome profile so the windows don't
+        collide (Chrome locks a profile to one process)."""
+        from agent.run import resume_job
+        company = (body.get("company") or "").strip().lower()
+        stores = make_stores(settings)
+        pks = []
+        for r in stores.tracking.query_status(Status.NEEDS_HUMAN):
+            if company and company != "__all__" and (r.get("company") or "").lower() != company:
+                continue
+            q = (r.get("gate_pending") or {}).get("question", "")
+            if r.get("gate_reason") == "approval" or q.startswith("Ready to apply"):
+                pks.append(r["pk"])
+
+        _LANES = 5  # concurrent applies (also the number of Chrome profiles)
+
+        def _run_all(items: list) -> None:
+            import asyncio
+
+            from agent.run import _apply_direct
+            from core.logging import get_logger
+            from core.stores import make_stores as _mk
+            from tools.browser_apply import set_profile_override
+            lg = get_logger("approve_all")
+
+            # Run every apply as a coroutine in ONE event loop (never one
+            # asyncio.run per thread — browser-use shares async objects that then
+            # cross loops and crash). A queue of distinct profile dirs both caps
+            # concurrency at _LANES and hands each apply its own Chrome profile
+            # (Chrome locks a user_data_dir to one process). Lane 0 is the real
+            # logged-in profile; 1..N are fresh (fine for public ATS forms).
+            base = (getattr(settings, "browser_profile_dir", "") or "").strip()
+
+            async def _driver() -> None:
+                lanes: "asyncio.Queue[str]" = asyncio.Queue()
+                for i in range(_LANES):
+                    lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
+
+                async def _one(pk: str) -> None:
+                    lane = await lanes.get()  # blocks until a lane frees → caps at _LANES
+                    try:
+                        set_profile_override(lane)  # task-local contextvar → this apply
+                        await _apply_direct(pk, _mk())
+                    except Exception:
+                        lg.exception("approve-all failed for %s", pk)
+                    finally:
+                        lanes.put_nowait(lane)
+
+                await asyncio.gather(*(_one(pk) for pk in items))
+
+            asyncio.run(_driver())
+
+        background.add_task(_run_all, pks)
+        return {"ok": True, "approving": len(pks), "lanes": _LANES}
+
+    @app.post("/actions/pause")
+    def set_pause(body: dict):
+        """Freeze/unfreeze the worker + discovery without stopping the daemon."""
+        from core import flags
+        flags.set_flag("paused", "yes" if body.get("paused") else "no")
+        return {"ok": True, "paused": flags.paused()}
 
     @app.post("/actions/reset")
     def reset():
@@ -175,7 +272,7 @@ def create_app() -> FastAPI:
         from core.events import CHANNEL, recent
 
         async def gen():
-            for ev in reversed(recent(40)):  # recent history first
+            for ev in reversed(recent(400)):  # deep history first — keep runs visible
                 yield f"data: {json.dumps(ev)}\n\n"
             r = aredis.from_url(settings.redis_url, decode_responses=True)
             ps = r.pubsub()

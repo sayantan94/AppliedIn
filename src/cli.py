@@ -135,7 +135,11 @@ def start(no_discover: bool = False) -> dict:
 
 
 def stop() -> dict:
-    """Stop the running daemon (and its detached process group)."""
+    """Stop the running daemon (and its detached process group). Escalates to
+    SIGKILL if it lingers — a half-dead worker thread must never keep writing
+    state (a zombie run once clobbered a job row minutes after 'stop')."""
+    import time
+
     pid = _running_pid() or _port_pid()
     if pid is None:
         return {"status": "not running"}
@@ -146,6 +150,20 @@ def stop() -> dict:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
+    for _ in range(20):  # up to 2s for a graceful exit
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break  # gone
+    else:  # still alive — kill hard
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
     _pid_file().unlink(missing_ok=True)
     return {"status": "stopped", "pid": pid}
 

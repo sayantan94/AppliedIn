@@ -105,14 +105,24 @@ button {
   padding: 0 8px;
 }
 .brand-glyph {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--fg);
-  border-radius: var(--r-sm);
-  font-weight: 700;
-  font-size: 15px;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: block;
+}
+.brand-glyph svg {
+  display: block;
+}
+/* Theme-aware logo: ink squircle + paper "A + check" mark, inverts with theme. */
+.brand-logo .lg-badge {
+  fill: var(--fg);
+}
+.brand-logo .lg-mark {
+  fill: none;
+  stroke: var(--bg);
+  stroke-width: 4.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .brand-name {
   font-weight: 700;
@@ -171,7 +181,8 @@ button {
   margin-top: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .state-btn {
   flex: 1;
@@ -200,6 +211,15 @@ button {
 .state-btn[data-state="paused"] .pip {
   background: transparent;
   border: 1px solid var(--faint);
+}
+/* Apply-mode switch: hollow pip = gated (you approve), solid ring = auto ☾ */
+#mode-btn[data-mode="gated"] .pip {
+  background: transparent;
+  border: 1px solid var(--faint);
+}
+#mode-btn[data-mode="auto"] {
+  border-color: var(--fg);
+  color: var(--fg);
 }
 .icon-btn {
   width: 34px;
@@ -383,6 +403,20 @@ button {
   border-radius: 999px;
   padding: 1px 8px;
 }
+.lane-approve {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--fg);
+  background: var(--fg);
+  color: var(--bg);
+  transition: opacity 0.14s;
+}
+.lane-approve:hover {
+  opacity: 0.85;
+}
 .lane-body {
   padding: 10px;
   display: flex;
@@ -405,6 +439,14 @@ button {
 }
 .lane[data-lane="discovered"] .lane-dot {
   border-style: dashed;
+}
+.lane[data-lane="failed"] .lane-dot {
+  background: #d1242f;
+  border-color: #d1242f;
+}
+:root[data-theme="dark"] .lane[data-lane="failed"] .lane-dot {
+  background: #ff7b72;
+  border-color: #ff7b72;
 }
 
 .card {
@@ -442,7 +484,8 @@ button {
 .card-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 2px 10px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--faint);
@@ -485,6 +528,22 @@ button {
 .tag.dashed::before {
   border-style: dashed;
   background: transparent;
+}
+.tag.fail {
+  color: #d1242f;
+  border-color: color-mix(in srgb, #d1242f 40%, var(--border));
+}
+.tag.fail::before {
+  background: #d1242f;
+  border-color: #d1242f;
+}
+:root[data-theme="dark"] .tag.fail {
+  color: #ff7b72;
+  border-color: color-mix(in srgb, #ff7b72 40%, var(--border));
+}
+:root[data-theme="dark"] .tag.fail::before {
+  background: #ff7b72;
+  border-color: #ff7b72;
 }
 
 /* --- Score bar ----------------------------------------------------------- */
@@ -1187,6 +1246,36 @@ table.data tbody tr:hover {
 .log-stg { color: var(--muted-fg); font-weight: 600; }
 .log-mark { color: var(--muted-fg); white-space: nowrap; }
 .log-raw { color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-cell { min-width: 0; display: block; }
+/* Long payloads collapse to a skimmable preview; "show all" expands in place. */
+.log-cell .log-raw { display: block; }
+.log-cell .log-raw.clipped {
+  max-height: 7.6em;
+  overflow: hidden;
+  position: relative;
+}
+.log-cell .log-raw.clipped:not(.open)::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2.2em;
+  background: linear-gradient(transparent, var(--card));
+  pointer-events: none;
+}
+.log-cell .log-raw.clipped.open { max-height: none; }
+.log-more {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted-fg);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: color 0.14s, border-color 0.14s;
+}
+.log-more:hover { color: var(--fg); border-color: var(--input); }
 .log-line.k-response .log-raw { color: var(--muted-fg); }
 .log-line.k-gate .log-mark, .log-line.k-gate .log-raw { color: var(--fg); font-weight: 700; }
 .log-line.k-gate { background: var(--muted); border-radius: var(--r-sm); }
@@ -1259,6 +1348,18 @@ table.data tbody tr:hover {
   padding: 1px 7px; color: var(--muted-fg); font-variant-numeric: tabular-nums;
 }
 .rtab.active .rtab-n { background: var(--fg); color: var(--card); }
+/* Many companies → one horizontally-scrollable row, not several wrapped rows. */
+.rtabs-scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.rtabs-scroll .rtab { flex: 0 0 auto; white-space: nowrap; }
+/* A company with an unseen "needs you" update after a run — the tab flashes. */
+.rtab.flash { animation: tabflash 1.2s ease-in-out infinite; border-radius: var(--r-sm) var(--r-sm) 0 0; }
+@keyframes tabflash {
+  0%, 100% { background: transparent; }
+  50% { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rtab.flash { animation: none; background: color-mix(in srgb, var(--fg) 12%, transparent); }
+}
 
 /* rendered markdown (agent messages / gate questions) */
 .md ul, .md ol { margin: 6px 0; padding-left: 20px; }
@@ -1278,6 +1379,51 @@ table.data tbody tr:hover {
   line-height: 0;
 }
 .log-shot img { display: block; max-width: 340px; max-height: 240px; width: auto; height: auto; }
+
+/* Live card flags: WIP while the browser submits, 🔔 when it needs you */
+.card-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+.card-flag.wip {
+  color: #9a6a00;
+  background: color-mix(in srgb, #d29922 18%, transparent);
+}
+:root[data-theme="dark"] .card-flag.wip {
+  color: #e3b341;
+  background: color-mix(in srgb, #d29922 22%, transparent);
+}
+.card-flag.alert {
+  color: var(--fg);
+  background: var(--muted);
+}
+/* An update the user hasn't opened yet — high-contrast so it reads as "new". */
+.card-flag.new {
+  color: var(--bg);
+  background: var(--fg);
+}
+.card.new {
+  border-color: var(--fg);
+}
+.wip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d29922;
+  animation: wippulse 1.1s ease-in-out infinite;
+}
+@keyframes wippulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.65); }
+}
+.card.alert { border-color: var(--input); }
 
 .card-links { margin-top: 8px; }
 .card-joburl {
