@@ -61,6 +61,24 @@ class Settings(BaseSettings):
         """Model string for ADK/LiteLLM (``anthropic/...`` or ``bedrock/...``)."""
         return f"{self.llm_provider}/{self.llm_model}"
 
+    # Per-agent model overrides — mix & match. Each is a full LiteLLM string
+    # (e.g. "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5-20251001"). Empty
+    # => that agent uses the base litellm_model above. Env: APPLIEDIN_SCORER_MODEL,
+    # APPLIEDIN_TAILOR_MODEL, APPLIEDIN_CRITIC_MODEL, APPLIEDIN_RELEVANCE_MODEL.
+    scorer_model: str = ""
+    tailor_model: str = ""
+    critic_model: str = ""
+    relevance_model: str = ""
+
+    def agent_model(self, agent: str) -> str:
+        """The LiteLLM model string for one orchestration agent (its override, or
+        the base model). `agent` is scorer | tailor | critic | relevance."""
+        override = {
+            "scorer": self.scorer_model, "tailor": self.tailor_model,
+            "critic": self.critic_model, "relevance": self.relevance_model,
+        }.get(agent, "")
+        return override or self.litellm_model
+
     # Guardrails
     daily_cap: int = 5
     max_attempts: int = 2

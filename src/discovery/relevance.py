@@ -66,7 +66,7 @@ def relevant(
 
     from core.config import get_settings
 
-    model = model or get_settings().litellm_model
+    model = model or get_settings().agent_model("relevance")
     listing = "\n".join(
         f"{i}. {j.title}  [location: {j.location or 'unknown'}]" for i, j in enumerate(jobs)
     )

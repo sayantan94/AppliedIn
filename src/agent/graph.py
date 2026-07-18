@@ -35,8 +35,10 @@ log = get_logger(__name__)
 _SKILLS = Path(__file__).parent / "skills"
 
 
-def _model() -> LiteLlm:
-    model = os.environ.get("APPLIEDIN_ADK_MODEL") or get_settings().litellm_model
+def _model(agent: str = "") -> LiteLlm:
+    # APPLIEDIN_ADK_MODEL is a blanket override for every agent; otherwise each
+    # agent uses its own model (agent_model) so you can mix & match.
+    model = os.environ.get("APPLIEDIN_ADK_MODEL") or get_settings().agent_model(agent)
     return LiteLlm(model=model)
 
 
@@ -145,7 +147,7 @@ def _skill(name: str) -> SkillToolset:
 
 # --- agents ------------------------------------------------------------------
 scorer = LlmAgent(
-    name="scorer", model=_model(),
+    name="scorer", model=_model("scorer"),
     description="Agentic discovery: extract the role and match-score it.",
     instruction=(
         "You are a senior technical recruiter scoring how well ONE candidate fits ONE role.\n\n"
@@ -162,7 +164,7 @@ scorer = LlmAgent(
 )
 
 tailor = LlmAgent(
-    name="tailor", model=_model(),
+    name="tailor", model=_model("tailor"),
     description="Re-emphasizes the seed résumé LaTeX for the JD (via the tailoring skill).",
     instruction=(
         "Tailor the candidate's seed résumé to the job, then save it.\n\n"
@@ -205,7 +207,7 @@ tailor = LlmAgent(
 )
 
 critic = LlmAgent(
-    name="critic", model=_model(),
+    name="critic", model=_model("critic"),
     description="Reviews the draft; ends the loop when it's strong.",
     instruction=(
         "Review the tailored résumé against the job. Bias HARD toward APPROVING — the "
