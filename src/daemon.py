@@ -69,9 +69,13 @@ def main() -> None:
     if not hasattr(stores.queue, "drain"):
         raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
 
-    log.info("daemon up: discover every %ds, poll every %ds (discovery + worker are separate)",
-             DISCOVER_INTERVAL, POLL_INTERVAL)
-    threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
+    discovery_on = os.environ.get("APPLIEDIN_DISCOVERY", "on").lower() not in (
+        "off", "0", "false", "no")
+    log.info("daemon up: worker + web%s (poll every %ds)",
+             f" + discovery (every {DISCOVER_INTERVAL}s)" if discovery_on else " — DISCOVERY OFF",
+             POLL_INTERVAL)
+    if discovery_on:
+        threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
     threading.Thread(target=_worker_loop, daemon=True, name="worker").start()
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:

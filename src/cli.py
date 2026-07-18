@@ -4,8 +4,10 @@
     APPLIEDIN_MODE=cloud                          (EventBridge + SQS drive it)
 
 Daemon lifecycle (local):
-    start      Launch the daemon in the background (cron finder + queue worker
-               + dashboard) and print the dashboard URL.
+    start [--no-discover]
+               Launch the daemon in the background (cron finder + queue worker
+               + dashboard). --no-discover turns the crawler off: dashboard +
+               queue worker only, for testing the approval flow without crawling.
     stop       Stop the running daemon.
     status     Is the daemon up? + the pipeline board (what's in each state).
     logs       Tail the background daemon's log (Ctrl-C to stop following).
@@ -103,8 +105,10 @@ def _live_pid() -> int | None:
     return pid
 
 
-def start() -> dict:
-    """Launch the daemon detached, in the background."""
+def start(no_discover: bool = False) -> dict:
+    """Launch the daemon detached, in the background. With no_discover=True the
+    crawler/discovery is off — just the dashboard + queue worker (handy for
+    testing the approval workflow without the crawler churning)."""
     if (pid := _live_pid()) is not None:
         return {"status": "already running", "pid": pid, "dashboard": _dashboard(),
                 "hint": "use `appliedin stop` first to restart"}
@@ -116,6 +120,8 @@ def start() -> dict:
     local.mkdir(parents=True, exist_ok=True)
     logfile = local / "daemon.log"
     env = {**os.environ, "APPLIEDIN_MODE": os.environ.get("APPLIEDIN_MODE", "local")}
+    if no_discover:
+        env["APPLIEDIN_DISCOVERY"] = "off"
     with open(logfile, "a") as fh:
         proc = subprocess.Popen(  # noqa: S603 - our own daemon module
             [sys.executable, "-m", "daemon"],
@@ -124,7 +130,8 @@ def start() -> dict:
             env=env,
         )
     _pid_file().write_text(str(proc.pid))
-    return {"status": "started", "pid": proc.pid, "dashboard": _dashboard(), "log": str(logfile)}
+    return {"status": "started", "pid": proc.pid, "dashboard": _dashboard(),
+            "discovery": "off" if no_discover else "on", "log": str(logfile)}
 
 
 def stop() -> dict:
@@ -176,7 +183,10 @@ def resume(pk: str, answer: str) -> dict:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="appliedin", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("start", "stop", "status", "logs", "discover", "work", "run"):
+    st = sub.add_parser("start")
+    st.add_argument("--no-discover", action="store_true",
+                    help="dashboard + queue worker only, no crawler (for testing the approval flow)")
+    for name in ("stop", "status", "logs", "discover", "work", "run"):
         sub.add_parser(name)
     r = sub.add_parser("resume")
     r.add_argument("pk")
@@ -187,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
         logs()
         return
     if args.cmd == "start":
-        out = start()
+        out = start(no_discover=args.no_discover)
     elif args.cmd == "stop":
         out = stop()
     elif args.cmd == "status":
