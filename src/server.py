@@ -134,6 +134,7 @@ def create_app() -> FastAPI:
     def companies():
         """The watchlist company names — so the dashboard can offer a picker and
         run discovery for just the selected companies instead of all of them."""
+        from core import flags
         from discovery.handler import list_watchlist_companies
         return {"companies": list_watchlist_companies(),
                 "skipped": sorted(flags.skipped_companies())}
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     def skip_company(body: dict):
         """Toggle a company's skip state. Skipped companies sit out un-scoped
         Discover/Process runs; explicitly picking one in the UI overrides."""
+        from core import flags
         name = ((body or {}).get("name") or "").strip()
         if not name:
             return {"ok": False, "error": "name required"}
