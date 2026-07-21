@@ -356,7 +356,7 @@ button:disabled { cursor: default; }
   background: color-mix(in srgb, var(--run) 18%, transparent);
   color: var(--run);
 }
-.skippicker { left: auto; right: 0; }
+.skippicker { left: 0; right: auto; }
 .sp-item input { accent-color: var(--run); }
 .sp-item.skipped span { text-decoration: line-through; color: var(--faint); }
 .cp-none { padding: 16px 12px; font-size: 12.5px; color: var(--faint); text-align: center; }
