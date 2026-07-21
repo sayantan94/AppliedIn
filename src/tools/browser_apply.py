@@ -642,8 +642,13 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
 
             # Combobox widgets ignore synthetic value-setting entirely (Ashby's
             # Location). Drive each one with a REAL click → pick → type → pick.
+            # Belt-and-braces: a location field goes through the real-keystroke
+            # pass even when the combo heuristic missed it — synthetic fill can
+            # never commit a geocoder widget.
             combos = {f["label"]: fill_map[f["label"]] for f in fields
-                      if f.get("combo") and f.get("label") in fill_map}
+                      if (f.get("combo") or "location" in (f.get("label") or "").lower())
+                      and f.get("type") not in ("choice-group",)
+                      and f.get("label") in fill_map}
             if combos:
                 combos = {k: (v.split(",")[0].strip() if "location" in k.lower() else v)
                           for k, v in combos.items()}
@@ -738,6 +743,26 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                     return {"status": "applied", "confirmation": line[:120],
                             "screenshot_b64": shot, "drafted": drafted or None,
                             "fields": _ui_fields(state)}
+                # Server-validated portals (classic Lever) RELOAD the page on a
+                # rejected submit, wiping EVERY field — even ones that were fine.
+                # Detect the mass-wipe and refill the whole form before judging
+                # errors, or the gate blames fields we actually had answers for.
+                if attempt < _MAX_SUBMITS - 1:
+                    labels_now = {(f.get("label") or "").strip(): (f.get("value") or "")
+                                  for f in state}
+                    wiped = [k for k in fill_map if labels_now.get(k.strip()) == ""]
+                    if len(wiped) >= max(2, len(fill_map) // 2):
+                        _emit(pk, "response", agent="browser", url=url,
+                              detail=f"🔄 submit reset the form — refilling "
+                                     f"{len(wiped)} wiped field(s)")
+                        await page.evaluate(_FILL_JS, fill_map)
+                        await page.wait_for_timeout(700)
+                        if choice_map:
+                            await _set_choices(page, choice_map, pk, url)
+                        if combos:
+                            await _fix_fields(page, combos, pk, url)
+                        await _click_fields_pass(page, pk, url)
+                        continue
                 errors = await page.evaluate(_ERRORS_JS)
                 if not errors:
                     break  # the FORM is satisfied — CAPTCHA / final check next
@@ -966,13 +991,41 @@ def _fact_for(err: str, facts: dict) -> tuple[str, str] | None:
     return best
 
 
+_HAS_OPTIONS_JS = (
+    "() => !!document.querySelector('[role=option], [role=listbox] li, "
+    "[class*=\"dropdown\" i] li, [class*=\"suggestion\" i], [class*=\"result\" i] li')")
+
+# The widget's own status line — visible short text like "Loading…" or
+# "No location found. Try entering a different location" — tells us whether to
+# keep waiting (async lookup in flight) or retry with a different query.
+_COMBO_STATUS_JS = """
+() => {
+  const vis = e => !!(e.offsetParent !== null || e.getClientRects().length);
+  const txts = [...document.querySelectorAll('div, span, li, p, em')]
+    .filter(e => vis(e) && !e.querySelector('input,textarea,select')
+                 && (e.textContent || '').length < 90)
+    .map(e => (e.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase());
+  return {
+    loading: txts.some(t => /^(loading|searching)(…|\\.{3})?$/.test(t)),
+    empty: txts.some(t => /no .{0,12}(found|results?|matches)|try entering a different/.test(t)),
+  };
+}
+"""
+
+
 async def _fill_combobox(page, label: str, value: str, pk: str = "", url: str = "") -> bool:  # noqa: ANN001
-    """Robustly fill an autocomplete/combobox (Ashby Location, Greenhouse city
-    pickers) — the class of field synthetic value-setting can't touch. Locates the
-    REAL input by its resolved label, clicks it, types with actual keystrokes, then
-    polls for the async suggestion list and clicks the best match. Handles plain
-    text inputs too (types the value, no pick). Returns True iff the field ended
-    up with a value."""
+    """Robustly fill an autocomplete/combobox (Ashby/Lever Location, school
+    pickers) — the class of field synthetic value-setting can't touch. Locates
+    the REAL input by its resolved label, clicks it, types with actual
+    keystrokes, then WAITS OUT the widget's async 'Loading' state before
+    judging the suggestion list (a fixed short poll used to expire mid-geocode).
+    On a hard 'no results' it retries with a shorter prefix, and when the
+    QUESTION itself mandates a fallback option (Lever: «Please select "Other
+    (School Not Listed)" if …») it picks that before giving up. Handles plain
+    text inputs too (types the value, no pick). Returns True iff the field
+    ended up with a value."""
+    import re as _re
+
     try:
         handle = await page.evaluate_handle(_LOCATE_INPUT_JS, label)
         el = handle.as_element()
@@ -986,48 +1039,92 @@ async def _fill_combobox(page, label: str, value: str, pk: str = "", url: str = 
         await page.wait_for_timeout(250)
         is_auto = await el.evaluate("""e => !!(e.getAttribute('role') === 'combobox'
             || e.getAttribute('aria-autocomplete') || e.getAttribute('aria-haspopup')
-            || e.getAttribute('aria-controls') || e.closest('[role=combobox]'))""")
+            || e.getAttribute('aria-controls') || e.closest('[role=combobox]')
+            || /location|typeahead|autocomplete/i.test(
+                 (e.className || '') + ' ' + (e.name || '') + ' ' + (e.id || '')))""")
         # A city picker wants just the city token; a plain field wants the full value.
         typed = value.split(",")[0].strip() if (is_auto and "," in value) else value
-        try:
-            await el.fill("", timeout=1500)
-        except Exception:
-            pass
         # Strict dropdowns render every option on click — try a pick before typing.
         picked = await page.evaluate(_PICK_OPTION_JS, [value, typed])
         if picked:
             _emit(pk, "response", agent="browser", url=url, detail=f"📍 picked: {picked}")
             return True
-        await el.type(typed, delay=40, timeout=6000)
-        await page.wait_for_timeout(450)
-        for _ in range(7):  # suggestions arrive async — poll, then click the match
-            picked = await page.evaluate(_PICK_OPTION_JS, [value, typed])
-            if picked:
-                _emit(pk, "response", agent="browser", url=url, detail=f"📍 picked: {picked}")
-                await page.wait_for_timeout(200)
-                return True
-            has_opts = await page.evaluate(
-                "() => !!document.querySelector('[role=option], [role=listbox] li')")
-            if not has_opts:
-                break  # no dropdown at all → it's a plain text field
-            await page.wait_for_timeout(400)
+        # Type → wait out 'Loading' → pick; on a hard 'no results', retry with a
+        # shorter prefix (a widget can reject the full string yet match its head).
+        saw_dropdown = False
+        queries = [typed] + ([typed[:5]] if is_auto and len(typed) > 5 else [])
+        for q in queries:
+            try:
+                await el.fill("", timeout=1500)
+            except Exception:
+                pass
+            await el.type(q, delay=40, timeout=6000)
+            await page.wait_for_timeout(450)
+            idle = 0
+            for _ in range(16):  # ≤ ~8s per query — geocoders can be slow
+                picked = await page.evaluate(_PICK_OPTION_JS, [value, typed, q])
+                if picked:
+                    _emit(pk, "response", agent="browser", url=url, detail=f"📍 picked: {picked}")
+                    await page.wait_for_timeout(200)
+                    return True
+                st = await page.evaluate(_COMBO_STATUS_JS)
+                has_opts = await page.evaluate(_HAS_OPTIONS_JS)
+                if has_opts or st.get("loading") or st.get("empty"):
+                    saw_dropdown = True
+                if st.get("loading"):
+                    await page.wait_for_timeout(500)
+                    continue  # suggestions are still on their way — keep waiting
+                if st.get("empty"):
+                    break  # widget says 'no results' → try the shorter prefix
+                if has_opts:
+                    idle = 0
+                else:
+                    idle += 1
+                    if idle >= 4:
+                        break  # nothing is appearing — plain field or dead widget
+                await page.wait_for_timeout(400)
         val = (await el.evaluate("e => (e.value || '').trim()")) or ""
         if not is_auto and val:
             return True  # plain input: the typed value stuck
+        if is_auto and not saw_dropdown:
+            # The widget never opened anything — the combo heuristic likely
+            # over-matched a plain input; keep the typed text, never wipe it.
+            return bool(val)
         if is_auto:
+            # The question may mandate its own escape hatch («Please select
+            # "Other (School Not Listed)" if your school is not listed») —
+            # honor it before giving up on the field.
+            m = _re.search(r'select\s+["“]([^"”]{3,60})["”]', label, _re.I)
+            if m:
+                fb = m.group(1).strip()
+                try:
+                    await el.fill("", timeout=1500)
+                    await el.type(fb.split()[0], delay=40, timeout=6000)
+                except Exception:
+                    pass
+                for _ in range(10):
+                    await page.wait_for_timeout(400)
+                    picked = await page.evaluate(_PICK_OPTION_JS, [fb])
+                    if picked:
+                        _emit(pk, "response", agent="browser", url=url,
+                              detail=f"📍 fallback picked: {picked}")
+                        return True
             # Keyboard-commit the first FILTERED suggestion (handles widgets whose
-            # options aren't [role=option]) — but ACCEPT it only if what committed
-            # actually matches the city. Never blind-commit a random first item
-            # (that submits the wrong city, e.g. "Twelve Mile, Indiana").
-            await el.press("ArrowDown")
-            await page.wait_for_timeout(200)
-            await el.press("Enter")
-            await page.wait_for_timeout(250)
-            got = ((await el.evaluate("e => (e.value || e.textContent || '').trim()")) or "").lower()
-            city = value.split(",")[0].strip().lower()
-            if got and (typed.lower() in got or city in got):
-                _emit(pk, "response", agent="browser", url=url, detail=f"📍 selected: {got[:40]}")
-                return True
+            # options aren't [role=option]) — but ONLY when a suggestion list is
+            # actually visible (Enter on an empty/loading list commits nothing),
+            # and ACCEPT it only if what committed actually matches the city.
+            # Never blind-commit a random first item (that submits the wrong
+            # city, e.g. "Twelve Mile, Indiana").
+            if await page.evaluate(_HAS_OPTIONS_JS):
+                await el.press("ArrowDown")
+                await page.wait_for_timeout(200)
+                await el.press("Enter")
+                await page.wait_for_timeout(250)
+                got = ((await el.evaluate("e => (e.value || e.textContent || '').trim()")) or "").lower()
+                city = value.split(",")[0].strip().lower()
+                if got and (typed.lower() in got or city in got):
+                    _emit(pk, "response", agent="browser", url=url, detail=f"📍 selected: {got[:40]}")
+                    return True
             try:
                 await el.fill("", timeout=1000)  # clear a wrong/stray commit → gate honestly
             except Exception:
@@ -1184,11 +1281,17 @@ _READ_FORM_JS = """
       if (pq) lbl = pq;
     }
     if (!lbl) lbl = el.placeholder || el.name || el.type || el.tagName.toLowerCase();
+    // ARIA first; then bare widgets with no ARIA at all — classic Lever's
+    // location geocoder is a plain <input class="location-input"> whose only
+    // tell is its class/name/id, and missing it meant synthetic fill + a gate.
     const combo = !!(el.getAttribute('role') === 'combobox'
                      || el.getAttribute('aria-haspopup')
                      || el.getAttribute('aria-autocomplete')
                      || el.closest('[role="combobox"]')
-                     || /start typing/i.test(el.placeholder || ''));
+                     || /start typing/i.test(el.placeholder || '')
+                     || (el.tagName !== 'SELECT' && (el.type || '') !== 'file'
+                         && /location|typeahead|autocomplete/i.test(
+                              (el.className || '') + ' ' + (el.name || '') + ' ' + (el.id || ''))));
     out.push({
       label: lbl,
       combo,
@@ -1403,11 +1506,17 @@ _CLICK_PASS_JS = """
     if (!r.width || !r.height) continue;
     // Combobox/autocomplete widgets: a click re-opens the suggestion menu and
     // the blur can wipe the option we already picked — never touch them here.
+    // ARIA first; then bare widgets with no ARIA at all — classic Lever's
+    // location geocoder is a plain <input class="location-input"> whose only
+    // tell is its class/name/id, and missing it meant synthetic fill + a gate.
     const combo = !!(el.getAttribute('role') === 'combobox'
                      || el.getAttribute('aria-haspopup')
                      || el.getAttribute('aria-autocomplete')
                      || el.closest('[role="combobox"]')
-                     || /start typing/i.test(el.placeholder || ''));
+                     || /start typing/i.test(el.placeholder || '')
+                     || (el.tagName !== 'SELECT' && (el.type || '') !== 'file'
+                         && /location|typeahead|autocomplete/i.test(
+                              (el.className || '') + ' ' + (el.name || '') + ' ' + (el.id || ''))));
     if (combo) continue;
     el.setAttribute('data-appliedin-clickpass', String(n++));
   }
@@ -1592,7 +1701,8 @@ _PICK_OPTION_JS = """
   const structured = [...document.querySelectorAll(
     '[role="option"], [role="listbox"] li, [role="listbox"] button, ' +
     '[role="menu"] [role="menuitem"], [class*="option" i], [class*="suggestion" i], ' +
-    '[class*="autocomplete" i] li, [class*="result" i] li, [class*="menu" i] li')];
+    '[class*="autocomplete" i] li, [class*="result" i] li, [class*="menu" i] li, ' +
+    '[class*="dropdown" i] li')];
   let hit = structured.find(o => matches(norm(o.textContent)));
   if (!hit) {
     const clickable = [...document.querySelectorAll(
