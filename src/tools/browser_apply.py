@@ -229,6 +229,7 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
             return _done({"status": "uncertain", "screenshot_b64": shot,
                           "detail": "browser-use filled the form but its page was unavailable"})
         heal_facts = {**facts, **drafted}
+        await _click_fields_pass(page, pk, url)  # last fill step: click-commit every box/text field
         result = await _finalize_submit(page, heal_facts, drafted, pk, url, headed=headed)
         if "fields" not in result and (uf := _ui_fields(snapshot)):
             result["fields"] = uf
@@ -671,6 +672,9 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                       detail=f"🔁 refill after re-render: {list(refill)[:4]}")
                 await page.evaluate(_FILL_JS, refill)
                 await page.wait_for_timeout(800)
+
+            # Last fill step before the submit loop: click-commit every box/text field.
+            await _click_fields_pass(page, pk, url)
 
             import re as _re
 
@@ -1383,6 +1387,66 @@ _ERRORS_JS = """
              : (e.textContent || '')).replace(/\\s+/g, ' ').trim())
   .filter(t => t && t.length > 2 && t.length < 140))].slice(0, 6)
 """
+
+
+_CLICK_PASS_JS = """
+() => {
+  const els = [...document.querySelectorAll('input, textarea')];
+  let n = 0;
+  for (const el of els) {
+    const t = (el.type || '').toLowerCase();
+    // Only plain boxes/text fields — a click on any of these merely focuses.
+    if (['hidden', 'file', 'checkbox', 'radio', 'submit', 'button', 'reset',
+         'image', 'range', 'color'].includes(t)) continue;
+    if (el.disabled || el.readOnly) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    // Combobox/autocomplete widgets: a click re-opens the suggestion menu and
+    // the blur can wipe the option we already picked — never touch them here.
+    const combo = !!(el.getAttribute('role') === 'combobox'
+                     || el.getAttribute('aria-haspopup')
+                     || el.getAttribute('aria-autocomplete')
+                     || el.closest('[role="combobox"]')
+                     || /start typing/i.test(el.placeholder || ''));
+    if (combo) continue;
+    el.setAttribute('data-appliedin-clickpass', String(n++));
+  }
+  return n;
+}
+"""
+
+
+async def _click_fields_pass(page, pk: str, url: str) -> int:  # noqa: ANN001
+    """The LAST step of the fill phase (owner requirement): one REAL click on
+    every box/text field after the whole application is filled. Each click
+    focuses its field and thereby BLURS the previous one, firing the
+    change/blur handlers dynamic (React) forms need to commit a value.
+    Skips anything a click would mutate or pop open: checkboxes/radios
+    (toggle), file inputs (OS dialog), combobox/autocomplete widgets (menu
+    could wipe the picked value). Best-effort — a failed click never blocks
+    the submit."""
+    try:
+        total = await page.evaluate(_CLICK_PASS_JS)
+        clicked = 0
+        for i in range(total):
+            loc = page.locator(f'[data-appliedin-clickpass="{i}"]').first
+            try:
+                await loc.scroll_into_view_if_needed(timeout=1500)
+                await loc.click(timeout=2000)
+                clicked += 1
+            except Exception:
+                continue
+        await page.evaluate(
+            "() => { document.querySelectorAll('[data-appliedin-clickpass]')"
+            ".forEach(el => el.removeAttribute('data-appliedin-clickpass'));"
+            " const a = document.activeElement; if (a && a.blur) a.blur(); }")
+        if total:
+            _emit(pk, "response", agent="browser", url=url,
+                  detail=f"🖱 final pass: clicked {clicked}/{total} box/text field(s)")
+        return clicked
+    except Exception as exc:
+        log.debug("click-fields pass skipped: %s", exc)
+        return 0
 
 
 async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str,  # noqa: ANN001
