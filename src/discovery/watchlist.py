@@ -42,6 +42,8 @@ class Preferences(BaseModel):
     seniority: list[str] = []
     min_match_score: int = 7
     github: str = ""  # candidate's GitHub profile — extra context for tailoring
+    notes: str = ""   # free-text hard constraints, read by BOTH the title screen
+                      # and the JD scorer (e.g. no clearance, WA/CA only)
 
 
 def load_watchlist(path: str | Path) -> list[CompanyConfig]:

@@ -161,7 +161,8 @@ def crawl_company(
     html = _render_page(company.careers_url)
     if html is None:  # no browser / render failed -> plain fetch (static pages)
         own_client = client is None
-        client = client or httpx.Client(headers={"User-Agent": "AppliedIn/0.1"})
+        from .resolver import BROWSER_HEADERS
+        client = client or httpx.Client(headers=BROWSER_HEADERS)
         try:
             resp = client.get(company.careers_url, timeout=20, follow_redirects=True)
             resp.raise_for_status()

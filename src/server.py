@@ -22,6 +22,11 @@ from core.stores import make_stores
 
 _WEB = Path(__file__).resolve().parents[1] / "web"
 
+# In-process flags so the dashboard can show whether a manual run is active and
+# grey out its button. Background tasks run in this same process, so a plain dict
+# is enough — no need to round-trip through Redis for a transient UI hint.
+_RUNNING = {"discover": False, "process": False}
+
 
 def _closed_reason(row: dict) -> str | None:
     """A plain sentence for why a job is in a terminal state — so the UI can say
@@ -81,6 +86,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "jd_url": row.get("jd_url"),
         "screenshot_url": link("screenshot_s3_key"),
         "confirmation_id": row.get("confirmation_id"),
+        "discovered_at": row.get("discovered_at") or (events[0]["at"] if events else None),
         "updated_at": (events[-1]["at"] if events else None),
         "timeline": [{"label": e.get("detail") or e.get("step"), "at": e.get("at"), "done": True}
                      for e in events],
@@ -114,11 +120,68 @@ def create_app() -> FastAPI:
             counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
         from core import flags
-        return {"daily_cap": settings.daily_cap, "today_submitted": applied,
+        return {"today_submitted": applied,
                 "queue_age_seconds": None, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
                 "auto_min_score": settings.auto_min_score,
-                "counts_by_status": counts}
+                "counts_by_status": counts,
+                "discovering": _RUNNING["discover"], "processing": _RUNNING["process"],
+                # `found` = discovered but not yet processed; the number the
+                # 'Process applications' button will act on.
+                "found_waiting": counts.get("found", 0)}
+
+    @app.get("/companies")
+    def companies():
+        """The watchlist company names — so the dashboard can offer a picker and
+        run discovery for just the selected companies instead of all of them."""
+        from discovery.handler import list_watchlist_companies
+        return {"companies": list_watchlist_companies()}
+
+    @app.post("/actions/discover")
+    def discover(background: BackgroundTasks, body: dict | None = None):
+        """Run ONE discovery cycle now — find + enqueue new jobs as `found`.
+        Body may carry `{"companies": ["Ramp", ...]}` to scope the run to the
+        picked companies; omit/empty = the whole watchlist. Discover-only: it does
+        not score, tailor, or apply (that's /actions/process)."""
+        if _RUNNING["discover"]:
+            return {"ok": False, "status": "already_running"}
+        only = [c for c in ((body or {}).get("companies") or []) if isinstance(c, str)]
+
+        def _run() -> None:
+            from daemon import run_discovery_once
+            _RUNNING["discover"] = True
+            try:
+                run_discovery_once(only=only or None)
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger("server").exception("manual discovery failed")
+            finally:
+                _RUNNING["discover"] = False
+
+        background.add_task(_run)
+        return {"ok": True, "status": "discovering",
+                "companies": only or "all"}
+
+    @app.post("/actions/process")
+    def process(background: BackgroundTasks):
+        """Process the discovered backlog now — score + tailor every `found` job,
+        then apply the ones that qualify (up to the daily cap). One full pass."""
+        if _RUNNING["process"]:
+            return {"ok": False, "status": "already_running"}
+
+        def _run() -> None:
+            from daemon import process_backlog_once
+            _RUNNING["process"] = True
+            try:
+                process_backlog_once()
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger("server").exception("manual process failed")
+            finally:
+                _RUNNING["process"] = False
+
+        background.add_task(_run)
+        return {"ok": True, "status": "processing"}
 
     @app.post("/actions/resume/{pk}")
     def resume(pk: str, body: dict, background: BackgroundTasks):
@@ -253,15 +316,32 @@ def create_app() -> FastAPI:
 
     @app.get("/artifact/{key:path}")
     def artifact(key: str):
-        """Serve a stored artifact (résumé PDF, screenshot) to the dashboard."""
+        """Serve a stored artifact (résumé PDF, screenshot) to the dashboard.
+
+        In local mode the artifact is a real file on disk — serve it with
+        FileResponse so the browser gets Range support (HTTP 206), a Content-Length
+        and an `inline` disposition. Chrome's embedded PDF viewer (PDFium) probes
+        with a Range request and renders BLANK in an <iframe> when the server
+        ignores it and returns a plain 200 — which is exactly why the tailored
+        résumé wouldn't show. FileResponse fixes that; cloud falls back to bytes."""
         import mimetypes
 
+        ctype = mimetypes.guess_type(key)[0] or "application/octet-stream"
+        disp = "inline" if ctype in ("application/pdf",) or ctype.startswith("image/") \
+            else "attachment"
+        if settings.mode == "local":
+            from fastapi.responses import FileResponse
+            base = (Path(settings.local_dir) / "artifacts").resolve()
+            p = (base / key).resolve()
+            if p.is_file() and str(p).startswith(str(base) + "/"):  # no path traversal
+                return FileResponse(str(p), media_type=ctype, headers={
+                    "Content-Disposition": f'{disp}; filename="{p.name}"'})
         try:
             data = make_stores(settings).artifacts.get(key)
         except Exception:
             return Response(status_code=404)
-        ctype = mimetypes.guess_type(key)[0] or "application/octet-stream"
-        return Response(data, media_type=ctype)
+        return Response(data, media_type=ctype,
+                        headers={"Content-Disposition": disp})
 
     @app.get("/events")
     async def events():
@@ -294,9 +374,35 @@ def create_app() -> FastAPI:
     return app
 
 
+def _recover_stuck(settings) -> None:  # noqa: ANN001
+    """Self-heal orphaned applies on startup. A job left in `submitting` means an
+    apply was killed mid-flight (a prior run, a crash, a kill) and never reached a
+    terminal state — so it hangs forever in the 'Submitting' lane. Reset it to
+    `tailored` so it's un-stuck and re-appliable. Reset only (no auto re-queue) so
+    we never silently re-submit something that might already have gone through. The
+    daemon does this too (via _recover_orphans); the plain server must as well."""
+    import logging
+
+    from core.models import Status
+
+    try:
+        stores = make_stores(settings)
+        stuck = [r for r in stores.tracking.all()
+                 if r.get("status") == "submitting"
+                 and not str(r.get("pk", "")).startswith("meta#")]
+        for r in stuck:
+            stores.tracking.set_status(r["pk"], Status.TAILORED)
+        if stuck:
+            logging.getLogger("server").info(
+                "recovered %d orphaned 'submitting' job(s) -> tailored", len(stuck))
+    except Exception:  # noqa: BLE001 - never block startup on recovery
+        logging.getLogger("server").exception("orphan recovery failed")
+
+
 def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
     import uvicorn
 
+    _recover_stuck(get_settings())
     uvicorn.run(create_app(), host=host, port=port, log_level="warning")
 
 

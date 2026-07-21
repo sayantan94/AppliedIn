@@ -24,6 +24,18 @@ from core.models import DiscoveryMode
 
 log = get_logger(__name__)
 
+# Fetch as a real browser. The old "AppliedIn/0.1" UA got 403/406/429'd by
+# careers sites (OpenAI, Meta, Perplexity, Uber…), which ALSO blocked ATS
+# detection (a blocked page can't be scanned for its embedded ATS), dumping the
+# company into the slow crawl path. A normal Chrome UA + Accept headers fixes both.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,image/apng,*/*;q=0.8"),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 
 @dataclass
 class AtsMatch:
@@ -86,11 +98,16 @@ def _workday(host: str, path: str, url: str) -> AtsMatch | None:
 
 _URL_DETECTORS = (_greenhouse, _lever, _ashby, _smartrecruiters, _workday)
 
-# Signatures to look for inside a fetched custom careers page.
+# Signatures to look for inside a fetched custom careers page (many custom pages
+# embed or link their real ATS board). Only ATSes we have a feed adapter for.
 _PAGE_SIGNATURES = (
-    (re.compile(r"boards\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"), "greenhouse"),
+    (re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"),
+     "greenhouse"),
+    (re.compile(r"api\.greenhouse\.io/v1/boards/([a-z0-9_-]+)"), "greenhouse"),
     (re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)"), "lever"),
+    (re.compile(r"api\.lever\.co/v0/postings/([a-z0-9_-]+)"), "lever"),
     (re.compile(r"(?:jobs\.)?ashbyhq\.com/([a-z0-9_-]+)"), "ashby"),
+    (re.compile(r"api\.ashbyhq\.com/posting-api/job-board/([a-z0-9_-]+)"), "ashby"),
     (re.compile(r"api\.smartrecruiters\.com/v1/companies/([a-z0-9_-]+)"), "smartrecruiters"),
 )
 

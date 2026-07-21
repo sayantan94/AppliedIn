@@ -47,6 +47,29 @@ _MAX_STEPS = 22   # happy path is ~8 steps; a tight budget funds tools, not loop
 
 # System-level policy (better compliance than the task string) — forces the model
 # to use our deterministic tools and never wander off the application form.
+_TOK_STOP = {"the", "your", "you", "please", "a", "an", "of", "to", "for", "and", "or",
+             "is", "in", "on", "url", "no", "this", "that", "role", "enter", "type",
+             "select", "question", "optional", "required", "field", "answer", "what",
+             "which", "with", "are", "will", "do", "does", "all", "apply", "any"}
+
+
+def _toks(s: str) -> set:
+    """Significant lowercase word-tokens of a label (for fuzzy key↔label matching)."""
+    words = "".join(c if c.isalnum() else " " for c in (s or "").lower()).split()
+    return {t for t in words if len(t) > 2 and t not in _TOK_STOP}
+
+
+def _is_text_only(model: str) -> bool:
+    """True for models with NO vision — we send them no screenshots (image input
+    404s them). The Kimi K2 line is text-only; Kimi K2.5+/K3 are multimodal, so
+    they keep vision ON (better for dropdown/CAPTCHA-aware form filling)."""
+    m = (model or "").lower()
+    if "kimi-k2" in m and not any(v in m for v in ("k2.5", "k2.6", "k2.7")):
+        return True
+    return any(x in m for x in ("qwen2.5-coder", "deepseek-chat", "deepseek-v3",
+                                "-instruct-text", "kimi-dev", "moonlight"))
+
+
 _APPLY_POLICY = (
     "You are filling ONE job-application form. Hard rules:\n"
     "- Stay on the application page. NEVER click the company logo/name, 'View all "
@@ -141,8 +164,7 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
     # Only known TEXT-ONLY models get it off — sending them screenshots 404s with
     # "no endpoints support image input" (e.g. Kimi K2).
     m = model.lower()
-    text_only = any(x in m for x in ("kimi", "moonshotai/kimi", "qwen2.5-coder",
-                                     "deepseek-chat", "deepseek-v3", "-instruct-text"))
+    text_only = _is_text_only(model)
     use_vision = not text_only
     # Upload from a clean, human-named copy ("<Name> Resume.pdf"): the raw artifact
     # name (contains '#') is ugly to a recruiter and can trip the upload widget.
@@ -281,6 +303,65 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
 _SUCCESS_RX = (r"thank you|application (has been |was )?submitted|submitted successfully"
                r"|received your application|we('|’)ve received")
 
+# A portal rejecting the submit because the PRIMARY identity already hit its cap
+# ("You have reached your application limit", "you've already applied"). This is a
+# server-side block, not a fillable-field error — the owner asked that we re-try
+# such cases with a pre-approved SECOND profile (alternate email + phone).
+_LIMIT_RX = (r"reached your application limit|application limit|already applied"
+             r"|already submitted an application|limit applications|maximum number of applications")
+
+
+def _fallback_identity() -> dict:
+    """The owner's SECOND profile — an alternate email + phone used to re-submit
+    when a portal blocks the primary identity with an application-limit / already-
+    applied message. Read from .local/secrets.json (key 'fallback_profile'), with
+    env overrides (APPLIEDIN_FALLBACK_EMAIL / _PHONE). Empty dict = not configured,
+    in which case we never swap. We only ever use a pre-approved identity — never
+    an invented one."""
+    import os
+    from pathlib import Path
+
+    from core.config import get_settings
+
+    ident: dict = {}
+    try:
+        from core.storage.local import FileSecrets
+
+        fs = FileSecrets(Path(get_settings().local_dir) / "secrets.json")
+        ident = fs.get_json("fallback_profile") or {}
+    except Exception:  # noqa: BLE001 - cloud mode / missing file: just no fallback
+        ident = {}
+    email = os.environ.get("APPLIEDIN_FALLBACK_EMAIL") or ident.get("Email") or ident.get("email")
+    phone = os.environ.get("APPLIEDIN_FALLBACK_PHONE") or ident.get("Phone") or ident.get("phone")
+    out: dict = {}
+    if email:
+        out["Email"] = email
+    if phone:
+        out["Phone"] = phone
+    return out
+
+
+async def _resubmit_with_fallback(page, pk: str, url: str) -> bool:  # noqa: ANN001
+    """A portal blocked the primary identity (application-limit / already-applied).
+    Overwrite Email + Phone with the owner's configured SECOND profile so a re-submit
+    goes out under the alternate identity. Returns True if a swap was applied (caller
+    then re-clicks submit), False if no fallback is configured. Dismisses any blocking
+    overlay first so the form is interactable again."""
+    ident = _fallback_identity()
+    if not ident:
+        return False
+    _emit(pk, "response", agent="browser", url=url,
+          detail=f"⚠ application limit hit — retrying with fallback profile "
+                 f"({ident.get('Email', 'alternate identity')})")
+    try:
+        await page.keyboard.press("Escape")  # close the limit overlay if it's modal
+    except Exception:  # noqa: BLE001
+        pass
+    await page.wait_for_timeout(300)
+    await page.evaluate(_FILL_JS, ident)  # label-match overwrites even autofilled fields
+    await page.wait_for_timeout(600)
+    return True
+
 
 async def _agent_finish_residuals(page, residual_map: dict, model: str, pk: str,  # noqa: ANN001
                                   url: str, *, company: str = "", jd_text: str = "",
@@ -299,8 +380,7 @@ async def _agent_finish_residuals(page, residual_map: dict, model: str, pk: str,
         log.warning("browser-use unavailable for residual finish: %s", exc)
         return
     m = model.lower()
-    text_only = any(x in m for x in ("kimi", "moonshotai/kimi", "qwen2.5-coder",
-                                     "deepseek-chat", "deepseek-v3", "-instruct-text"))
+    text_only = _is_text_only(model)
     lines = "\n".join(f"- {k!r} = {v!r}" for k, v in residual_map.items())
     task = (
         "The job-application form on THIS page is already almost entirely filled. "
@@ -332,6 +412,98 @@ async def _agent_finish_residuals(page, residual_map: dict, model: str, pk: str,
     # Do NOT kill the session here — it wraps the scripted page we still submit on.
 
 
+async def _agent_finish_submit(page, facts: dict, drafted: dict, model: str, pk: str,  # noqa: ANN001
+                               url: str, upload_path: str, headed: bool, *, company: str,
+                               jd_text: str, resume_tex: str, github: str) -> dict:
+    """When the deterministic submit loop can't close a dynamic form (Ashby wipes
+    fields on re-render; a React combobox hides its value from our DOM read), hand
+    the FINISH + SUBMIT to a bounded browser-use agent on the SAME page. It has
+    vision ground-truth we don't, so it knows when the form is really ready and can
+    SEE the real confirmation. 'applied' still requires the confirmation text on the
+    live page — we never trust the agent's word alone. A CAPTCHA/account wall hands
+    off to you; a genuinely unknown field gates. Never solves a CAPTCHA."""
+    import re as _re
+
+    try:
+        from browser_use import Agent
+
+        from tools.browser_llm import make_llm
+    except Exception as exc:
+        return {"status": "uncertain", "detail": f"browser-use unavailable ({exc})"}
+    m = model.lower()
+    text_only = _is_text_only(model)
+    facts_str = "\n".join(f"- {q}: {a}" for q, a in {**facts, **drafted}.items() if a) or "(none)"
+    resume_line = ("Attach the REQUIRED résumé with the upload_resume action (NOT the "
+                   "optional 'Autofill from resume' box); confirm its filename shows.\n"
+                   if upload_path else "")
+    snapshot: list = []
+    task = (
+        f"This {company} job-application form is already open and mostly filled. "
+        f"FINISH and SUBMIT it (under 14 steps).\n{resume_line}"
+        f"Approved answers — type these VERBATIM only, never invent:\n{facts_str}\n\n"
+        "1. If a required field is empty, set it: fill_fields for text/dropdown, "
+        "select_choices for radios/checkboxes; for an autocomplete (Location) click "
+        "it, type the city, and click the matching suggestion (a more-qualified "
+        "option like 'Seattle, Washington, United States' for 'Seattle' IS correct).\n"
+        "2. call verify_form_filled and fix only what it flags.\n"
+        "3. Click Submit/Apply and watch the page.\n"
+        "4. If you SEE a confirmation ('application submitted', 'thank you'), finish "
+        "with:  APPLIED: <exact confirmation text>\n"
+        "Rules — never invent a value. If a required field has no approved answer, "
+        "STOP with:  MISSING: <question>. If a CAPTCHA challenge or a login/account "
+        "wall blocks submit, STOP with:  BLOCKED: <captcha or account> (never solve a "
+        "CAPTCHA). If you clicked submit but see no confirmation, STOP with:  "
+        "UNCERTAIN: <what the page shows>.")
+    controller = _apply_controller(upload_path, pk, url, snapshot_sink=snapshot,
+                                   drafted_sink=drafted, company=company, jd_text=jd_text,
+                                   resume_tex=resume_tex, github=github)
+    opts = {"llm": make_llm(model), "page": page, "use_vision": not text_only,
+            "max_actions_per_step": 2, "register_new_step_callback": _step_cb(pk, url),
+            "extend_system_message": _APPLY_POLICY,
+            "available_file_paths": [upload_path] if upload_path else None}
+    if controller is not None:
+        opts["controller"] = controller
+    _emit(pk, "response", agent="browser", url=url,
+          detail="🤖 browser-use finishing + submitting the form (vision)")
+    text, shot = "", None
+    try:
+        history = await Agent(task=task, **opts).run(max_steps=16)
+        text = (history.final_result() if hasattr(history, "final_result") else str(history)) or ""
+        shot = _last_screenshot(history)
+    except Exception as exc:
+        if _page_gone(exc):
+            return {"status": "uncertain",
+                    "detail": "the browser closed during submit — verify on the portal"}
+        log.warning("agent finish+submit failed: %s", exc)
+
+    # Ground truth: only call it applied if the LIVE page shows confirmation.
+    try:
+        body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
+    except Exception:
+        body = ""
+    conf_m = _re.search(_SUCCESS_RX, body, _re.I) or _re.search(_SUCCESS_RX, text, _re.I)
+    fields = _ui_fields(snapshot)
+    if conf_m:
+        line = next((ln.strip() for ln in body.splitlines()
+                     if conf_m.group(0).lower() in ln.lower()), conf_m.group(0))
+        return {"status": "applied", "confirmation": line[:120], "screenshot_b64": shot,
+                "drafted": drafted or None, "fields": fields}
+    up = text.upper()
+    if "BLOCKED:" in up:
+        q = text.split("BLOCKED:", 1)[1].strip()[:200]
+        reason = "captcha" if "captcha" in q.lower() else "no_account"
+        return {"status": "gate", "reason": reason, "screenshot_b64": shot,
+                "drafted": drafted or None, "fields": fields, "question": q}
+    if "MISSING:" in up:
+        q = text.split("MISSING:", 1)[1].strip()[:200]
+        return {"status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
+                "drafted": drafted or None, "fields": fields,
+                "question": f"I need an answer for: {q}"}
+    return {"status": "uncertain", "screenshot_b64": shot, "drafted": drafted or None,
+            "fields": fields,
+            "detail": (text[:200] or "browser-use finished without a visible confirmation")}
+
+
 async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                           pk: str = "", jd_text: str = "", resume_tex: str = "",
                           github: str = "", resume_path: str = "") -> dict | None:
@@ -353,13 +525,15 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
         page, closer, headed = await _launch(p)
 
         async def _maybe_assist(res: dict) -> dict:
-            """In a VISIBLE browser, hand a filled-but-blocked form to the human
-            (CAPTCHA / a stubborn widget), wait for them to finish, and upgrade to
-            a real 'applied' if they submit. Never touches the CAPTCHA itself."""
+            """Hold the VISIBLE window open for the human ONLY when it's a genuine
+            MUST — a CAPTCHA to solve or a login/2FA wall to sign in. Everything
+            else (an uncertain submit, a field we couldn't fill) returns as-is with
+            its screenshot, to be reviewed async on the 'Unable to do it' board —
+            we never pull you into a live window unless you're truly required."""
             if not (headed and get_settings().assist_captcha):
                 return res
-            if res.get("status") not in ("gate", "uncertain"):
-                return res
+            if res.get("reason") not in ("captcha", "no_account"):
+                return res  # not a must → don't block on you; surface it on the board
             conf = await _assist_wait(page, pk, url, res.get("question", ""),
                                       res.get("reason", ""))
             if not conf:
@@ -509,8 +683,15 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                            : (e.textContent || '')).replace(/\\s+/g, ' ').trim())
                 .filter(t => t && t.length > 2 && t.length < 140))].slice(0, 6)
             """
-            body, shot, errors = "", None, []
-            for attempt in (0, 1):  # submit → read the form's errors → fix → resubmit
+            # ReAct submit loop: submit → read the FORM's OWN validation errors →
+            # fix the flagged fields (browser-use for stubborn autocompletes) →
+            # RESUBMIT and let the form confirm. The form is the source of truth —
+            # we never gate on our own DOM read (a React combobox stores its value
+            # off the visible input, so reading it as "empty" would falsely gate a
+            # field that is in fact set).
+            body, shot, errors, state = "", None, [], []
+            _MAX_SUBMITS, handed_off, swapped = 3, False, False
+            for attempt in range(_MAX_SUBMITS):
                 clicked = await page.evaluate("""
                   () => {
                     const btns = [...document.querySelectorAll('button, input[type=submit]')];
@@ -526,77 +707,86 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
                 shot = base64.b64encode(await page.screenshot()).decode()
                 state = await page.evaluate(_READ_FORM_JS)
-                m = _re.search(_SUCCESS_RX, body, _re.I)
-                if m:
+                # Application-limit block is checked BEFORE success: a portal's limit
+                # page can literally say "Thank you for considering Ramp!" which
+                # matches _SUCCESS_RX — so it must be ruled out first or a rejection
+                # gets mislabeled as an applied. Retry ONCE with the next profile.
+                if _re.search(_LIMIT_RX, body, _re.I):
+                    if not swapped and await _resubmit_with_fallback(page, pk, url):
+                        swapped = True
+                        continue  # re-click submit under the alternate identity
                     line = next((ln.strip() for ln in body.splitlines()
-                                 if m.group(0).lower() in ln.lower()), m.group(0))
+                                 if _re.search(_LIMIT_RX, ln, _re.I)), "Application limit reached.")
+                    note = (" Retried with your fallback profile but it's still blocked."
+                            if swapped else " No fallback profile is configured to retry with.")
+                    return {"status": "failed", "reason": "application_limit",
+                            "detail": f"The portal blocked this application (limit reached): "
+                                      f"{line[:180]}.{note}",
+                            "screenshot_b64": shot, "drafted": drafted or None,
+                            "fields": _ui_fields(state)}
+                m = _re.search(_SUCCESS_RX, body, _re.I)
+                url_ok = page.url != url and bool(_re.search(
+                    r"confirmation|submitted|thank|success|application-complete", page.url, _re.I))
+                if m or url_ok:
+                    line = (next((ln.strip() for ln in body.splitlines()
+                                  if m and m.group(0).lower() in ln.lower()), None)
+                            or (m.group(0) if m else "Application submitted."))
                     return {"status": "applied", "confirmation": line[:120],
                             "screenshot_b64": shot, "drafted": drafted or None,
                             "fields": _ui_fields(state)}
                 errors = await page.evaluate(_ERRORS_JS)
                 if not errors:
-                    break  # nothing the form complains about — check CAPTCHA next
-                if attempt == 1:
-                    return await _maybe_assist({
-                        "status": "gate", "reason": "unknown_field",
-                        "screenshot_b64": shot, "drafted": drafted or None,
-                        "fields": _ui_fields(state),
-                        "question": "The form still rejects these — please set them in "
-                                    "the open window: " + "; ".join(errors)})
-                # SELF-HEAL: rebuild values for exactly the rejected fields — from the
-                # fill map, else the best-matching fact — and retype them for real.
+                    break  # the FORM is satisfied — CAPTCHA / final check next
+                if attempt == _MAX_SUBMITS - 1:
+                    break  # out of attempts; gate below on the form's remaining errors
+                # OBSERVE: which rejected fields do we actually have a value for?
                 fix_map: dict[str, str] = {}
+                unknown: list[str] = []
                 for err in errors:
                     hit = next(((k, v) for k, v in fill_map.items()
                                 if k.lower() in err.lower()), None) or _fact_for(err, facts)
                     if hit:
                         k, v = hit
-                        if "location" in err.lower():
-                            v = v.split(",")[0].strip()  # autocompletes want the city
-                        fix_map[k] = v
-                if not fix_map:
+                        fix_map[k] = v.split(",")[0].strip() if "location" in err.lower() else v
+                    else:
+                        unknown.append(err)
+                if not fix_map:  # nothing we can auto-fill — genuinely needs you
                     return await _maybe_assist({
                         "status": "gate", "reason": "unknown_field",
                         "screenshot_b64": shot, "drafted": drafted or None,
                         "fields": _ui_fields(state),
                         "question": "Please set these in the open window: "
-                                    + "; ".join(errors)})
+                                    + "; ".join(unknown or errors)})
+                # ACT: fix deterministically; hand stubborn fields to a short vision
+                # browser-use agent on THIS page ONCE. Then loop → RESUBMIT so the
+                # form (not our read) decides whether the fix took.
                 _emit(pk, "response", agent="browser", url=url,
                       detail=f"🔧 fixing rejected fields: {list(fix_map)[:4]}")
                 await _fix_fields(page, fix_map, pk, url)
                 await page.wait_for_timeout(800)
-                # TRUTH CHECK: never resubmit (and risk a bogus CAPTCHA verdict)
-                # while a healed field is verifiably still empty on the page.
-                still_empty, state2 = await _still_empty(list(fix_map))
-                if still_empty:
-                    # The form rejected these and the deterministic filler couldn't
-                    # set them (a stubborn Location autocomplete). Hand JUST these,
-                    # with their values, to a short vision browser-use agent on THIS
-                    # page — then re-check. Only a field it also can't set (value not
-                    # offered) reaches the human.
-                    residual = {k: fix_map[k] for k in still_empty if fix_map.get(k)}
+                if not handed_off:
+                    still = (await _still_empty(list(fix_map)))[0]
+                    residual = {k: fix_map[k] for k in still if fix_map.get(k)}
                     if residual:
                         await _agent_finish_residuals(page, residual, model, pk, url,
                                                       company=company, jd_text=jd_text,
                                                       resume_tex=resume_tex, github=github)
-                        await page.wait_for_timeout(600)
-                        still_empty, state2 = await _still_empty(list(fix_map))
-                if still_empty:
-                    return await _maybe_assist({
-                        "status": "gate", "reason": "unknown_field",
-                        "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
-                        "drafted": drafted or None, "fields": _ui_fields(state2),
-                        "question": "These fields resist automation on this form — "
-                                    "please set them manually when submitting: "
-                                    + "; ".join(still_empty[:4])})
+                        handed_off = True
 
-            # Diagnose the REAL blocker before ever blaming the CAPTCHA. Scan EVERY
-            # required field (not just the ones we mapped) for an empty value — an
-            # unfilled dropdown/choice that didn't commit is the usual culprit, and
-            # the CAPTCHA is almost always present but NOT what's stopping the submit.
+            if errors:  # deterministic loop couldn't close this (dynamic) form →
+                # hand the finish+submit to a vision browser-use agent on this page.
+                res = await _agent_finish_submit(
+                    page, {**facts, **drafted}, drafted, model, pk, url, upload_path,
+                    headed, company=company, jd_text=jd_text, resume_tex=resume_tex,
+                    github=github)
+                return await _maybe_assist(res)
+
+            # The form accepted the submit (no errors). Scan for a required field we
+            # can RELIABLY read as empty — but skip comboboxes: their value lives off
+            # the visible input, so trust the form's verdict over our read for those.
             state = await page.evaluate(_READ_FORM_JS)
             empty_req = [f for f in state if f.get("required") and not f.get("value")
-                         and f.get("type") != "file"]  # file inputs read empty even when attached
+                         and f.get("type") != "file" and not f.get("combo")]
             if empty_req:
                 labels = [f["label"] for f in empty_req]
                 stubborn = [f["label"] for f in empty_req
@@ -929,8 +1119,12 @@ _READ_FORM_JS = """
   const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
   const els = [...document.querySelectorAll('input, textarea, select')]
     .filter(el => el.type !== 'hidden');
-  const optLabel = el => norm((el.labels && el.labels[0] && el.labels[0].textContent)
-    || (el.closest('label') || {}).textContent || el.value || '');
+  const _short = t => { t = norm(t); return t && t.length < 80 ? t : ''; };
+  const optLabel = el => _short((el.labels && el.labels[0] && el.labels[0].textContent) || '')
+    || _short((el.closest('label') || {}).textContent || '')
+    || _short(el.nextElementSibling && el.nextElementSibling.textContent || '')
+    || _short(el.parentElement && el.parentElement.textContent || '')
+    || norm(el.value);
   // The QUESTION a radio/checkbox group answers: fieldset legend, else the
   // nearest ancestor's text element that is NOT an option label (no input inside).
   const questionOf = el => {
@@ -1123,7 +1317,7 @@ _FILL_JS = """
       if (kt.length) {
         let best = null, bestScore = 0, second = 0;
         for (const el of ctrls) {
-          if (!isText(el) || el.tagName === 'SELECT' || ntrim(el.value)) continue;
+          if (!isText(el) || ntrim(el.value)) continue;  // fuzzy also covers SELECTs now
           const lt = new Set(toks(labelOf(el)));
           if (!lt.size) continue;
           const overlap = kt.filter(t => lt.has(t)).length / kt.length;
@@ -1142,25 +1336,32 @@ _FILL_JS = """
 _LOCATE_CHOICE_JS = """
 ({q, v}) => {
   const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+  const short = t => { t = norm(t); return t && t.length < 80 ? t : ''; };
   const nq = norm(q), nv = norm(v);
+  if (!nq || !nv) return 'NOQUESTION';
   const qnode = [...document.querySelectorAll('legend,label,p,span,div,h3,h4')]
-    .find(e => e.querySelectorAll('input').length === 0 && norm(e.textContent).includes(nq));
-  let scope = qnode ? (qnode.closest('fieldset') || qnode.parentElement) : document.body;
+    .filter(e => !e.querySelector('input') && norm(e.textContent).includes(nq))
+    .sort((a, b) => a.textContent.length - b.textContent.length)[0];  // tightest node
+  if (!qnode) return 'NOQUESTION';
+  let scope = qnode.closest('fieldset') || qnode.parentElement;
   for (let i = 0; i < 6 && scope; i++) {
     const inputs = [...scope.querySelectorAll('input[type=radio], input[type=checkbox]')];
     if (inputs.length) {
-      for (const inp of inputs) {
-        const lbl = (inp.labels && inp.labels[0] && inp.labels[0].textContent)
-          || (inp.closest('label') || {}).textContent || inp.value || '';
-        if (norm(lbl) === nv || norm(lbl).startsWith(nv)) {
-          return (inp.labels && inp.labels[0]) || inp.closest('label') || inp;
-        }
-      }
-      return inputs[0];  // group found but no text match — first option as last resort
+      const optLbl = inp => short((inp.labels && inp.labels[0] && inp.labels[0].textContent) || '')
+        || short((inp.closest('label') || {}).textContent || '')
+        || short(inp.nextElementSibling && inp.nextElementSibling.textContent || '')
+        || short(inp.parentElement && inp.parentElement.textContent || '')
+        || norm(inp.value);
+      const hit = inputs.find(inp => { const l = optLbl(inp);
+        return l && (l === nv || l.includes(nv) || nv.includes(l)); });
+      if (!hit) return 'NOMATCH options: ' + inputs.slice(0, 12).map(optLbl)
+        .filter(Boolean).join(' | ').slice(0, 200);
+      if (hit.checked) return 'ALREADY';
+      return (hit.labels && hit.labels[0]) || hit.closest('label') || hit;
     }
     scope = scope.parentElement;
   }
-  return null;
+  return 'NOQUESTION';
 }
 """
 
@@ -1196,7 +1397,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
 
     from core.config import get_settings
 
-    body, shot = "", None
+    body, shot, swapped = "", None, False
     for attempt in (0, 1, 2):
         clicked = await page.evaluate(_SUBMIT_JS)
         if clicked:
@@ -1205,6 +1406,20 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
         body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
         shot = base64.b64encode(await page.screenshot()).decode()
         state = await page.evaluate(_READ_FORM_JS)
+        # Limit block BEFORE success — the limit page can contain "thank you",
+        # which would otherwise match _SUCCESS_RX and mislabel a rejection as applied.
+        if _re.search(_LIMIT_RX, body, _re.I):
+            if not swapped and await _resubmit_with_fallback(page, pk, url):
+                swapped = True
+                continue
+            line = next((ln.strip() for ln in body.splitlines()
+                         if _re.search(_LIMIT_RX, ln, _re.I)), "Application limit reached.")
+            note = (" Retried with your fallback profile but it's still blocked."
+                    if swapped else " No fallback profile is configured to retry with.")
+            return {"status": "failed", "reason": "application_limit", "screenshot_b64": shot,
+                    "detail": f"The portal blocked this application (limit reached): "
+                              f"{line[:180]}.{note}",
+                    "drafted": drafted or None, "fields": _ui_fields(state)}
         m = _re.search(_SUCCESS_RX, body, _re.I)
         if m:
             line = next((ln.strip() for ln in body.splitlines()
@@ -1241,10 +1456,11 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                  and f.get("type") != "file"]
     captcha = bool(_re.search(r"captcha", body, _re.I)) or bool(await page.locator(
         'iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count())
-    if headed and get_settings().assist_captcha:
-        note = ("set the " + ", ".join(f["label"] for f in empty_req[:3])
-                + (" field" if len(empty_req) == 1 else " fields")) if empty_req else ""
-        conf = await _assist_wait(page, pk, url, note, "captcha" if captcha else "")
+    # Only hold the window open for a REAL CAPTCHA (a genuine must). An empty field
+    # or an unconfirmed submit falls through to a board gate (with a screenshot) —
+    # we don't pull the human into a live window unless one is truly required.
+    if headed and get_settings().assist_captcha and captcha:
+        conf = await _assist_wait(page, pk, url, "", "captcha")
         if conf:
             st = await page.evaluate(_READ_FORM_JS)
             return {"status": "applied", "confirmation": conf,
@@ -1263,27 +1479,37 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
             "screenshot_b64": shot, "drafted": drafted or None, "fields": _ui_fields(state)}
 
 
-async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> list:  # noqa: ANN001
-    """Select radio/checkbox options with REAL Playwright clicks on the option
-    element — the only thing React-based groups (Ashby) reliably accept. `choices`
-    maps question text -> option to pick. Returns the questions it clicked."""
-    done = []
-    for q, v in choices.items():
-        try:
-            handle = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": v})
-            el = handle.as_element() if handle else None
-            if not el:
-                continue
-            await el.scroll_into_view_if_needed(timeout=2000)
-            await el.click(timeout=3000)
-            await page.wait_for_timeout(250)
-            done.append(q)
-        except Exception:
-            continue
-    if done and pk:
+async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict:  # noqa: ANN001
+    """Select radio/checkbox options with REAL Playwright clicks — the only thing
+    React groups (Ashby) accept. `choices` maps question -> option (str OR list for
+    'select all that apply'). Verifies each click by re-locating (ALREADY = success),
+    never clicks a wrong option, and never re-toggles an already-checked box. Returns
+    {question: 'set' | failure-detail}."""
+    out = {}
+    for q, vals in choices.items():
+        vals = vals if isinstance(vals, list) else [vals]
+        statuses = []
+        for v in vals:
+            try:
+                h = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": str(v)})
+                el = h.as_element()
+                if el is None:
+                    statuses.append(str(await h.json_value() or "NOQUESTION"))
+                    continue
+                await el.scroll_into_view_if_needed(timeout=2000)
+                await el.click(timeout=3000)
+                await page.wait_for_timeout(250)
+                h2 = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": str(v)})
+                statuses.append("set" if (h2.as_element() is None
+                                and await h2.json_value() == "ALREADY") else "click-no-effect")
+            except Exception as exc:  # noqa: BLE001
+                statuses.append(f"error:{exc}"[:120])
+        good = [s for s in statuses if s in ("set", "ALREADY")]
+        out[q] = "set" if (statuses and len(good) == len(statuses)) else "; ".join(statuses)[:200]
+    if pk and any(s == "set" for s in out.values()):
         _emit(pk, "response", agent="browser", url=url,
-              detail=f"◉ selected {len(done)} choice question(s)")
-    return done
+              detail=f"◉ selected {sum(1 for s in out.values() if s == 'set')} choice question(s)")
+    return out
 
 
 _PICK_OPTION_JS = """
@@ -1408,6 +1634,12 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
     except Exception:
         controller = Controller()
 
+    # Per-job state so the actions return DURABLE receipts (long_term_memory is the
+    # only field 0.5.9 persists — include_in_memory is dead) and so verify can trust
+    # a combo we set even when the DOM reads it empty (the Ashby re-fill-loop fix).
+    run_state = {"filled": {}, "verify_calls": 0, "last_missing": None,
+                 "notfound_prev": set(), "unmatchable": set(), "choice_prev": set()}
+
     @controller.registry.action(
         "Get the candidate's answer for an OPEN ENDED question (essay, 'why this "
         "role', 'tell us about…', 'share an example…'). A dedicated writer drafts it "
@@ -1451,14 +1683,28 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
             return ActionResult(extracted_content=f"fill_fields: bad fields_json ({exc}) — "
                                                   "pass a JSON object encoded as a string",
                                 include_in_memory=True)
+        # 0) AUTO-SKIP set or provably-dead keys — a re-send returns instantly, no loop.
+        skipped_bad = [k for k in mapping if k in run_state["unmatchable"]]
+        mapping = {k: v for k, v in mapping.items()
+                   if k not in run_state["filled"] and k not in run_state["unmatchable"]}
+        if not mapping:
+            return ActionResult(long_term_memory=(
+                "fill_fields: NOTHING TO DO — every key you sent is already SET or UNMATCHABLE"
+                + (f" (UNMATCHABLE: {', '.join(skipped_bad)[:250]})" if skipped_bad else "")
+                + ". NEXT STEP: click any still-empty field directly on the page (ONE attempt "
+                "each), then verify_form_filled, then click Submit."))
         try:
             page = await _page_of(browser_session)
             report = await page.evaluate(_FILL_JS, mapping)  # type: ignore[union-attr]
-            # Autocomplete comboboxes (e.g. Location) open an option list after
-            # typing — commit the option MATCHING our value so the right one sticks.
+            # Autocomplete comboboxes (Location) open a list — commit the matching option,
+            # but only while a popup is actually OPEN (never re-toggle already-set buttons).
             wanted = [v for v in mapping.values() if isinstance(v, str)]
+            _POPUP_JS = ("() => !!document.querySelector('[role=\"listbox\"], [role=\"option\"], "
+                         "[class*=\"popover\" i], [class*=\"autocomplete\" i] [class*=\"option\" i]')")
             for _ in range(3):
                 await page.wait_for_timeout(700)  # type: ignore[union-attr]
+                if not await page.evaluate(_POPUP_JS):  # type: ignore[union-attr]
+                    break
                 picked = await page.evaluate(_PICK_OPTION_JS, wanted)  # type: ignore[union-attr]
                 if not picked:
                     break
@@ -1466,31 +1712,112 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
         except Exception as exc:
             return ActionResult(extracted_content=f"fill_fields errored: {exc}",
                                 include_in_memory=True)
-        summary = "; ".join(report)[:600]
-        _emit(pk, "response", agent="browser", url=url,
-              detail=f"⚡ one-shot fill → {summary}"[:240])
-        return ActionResult(extracted_content=f"fill_fields result: {summary}",
-                            include_in_memory=True)
+        ok = [k for k in mapping if ("FILLED: " + k) in report]
+        missed = [k for k in mapping if ("NOT FOUND: " + k) in report]
+        # 1) RESCUE PASS: the model keys fields from the vision namespace, but _FILL_JS
+        # matches the CANONICAL _READ_FORM_JS label — token-map each miss to a real page
+        # label and re-fill (a canonical label always matches). Fixes the 23/31-miss loop.
+        state = []
+        if missed:
+            state = await page.evaluate(_READ_FORM_JS)  # type: ignore[union-attr]
+            canon = [f["label"] for f in state if not f["value"]]
+            for k in list(missed):
+                kt, best, score = _toks(k), None, 0.0
+                for lbl in canon:
+                    ov = len(kt & _toks(lbl)) / (len(kt) or 1)
+                    if ov > score:
+                        best, score = lbl, ov
+                if best and score >= 0.5:
+                    r2 = await page.evaluate(_FILL_JS, {best: mapping[k]})  # type: ignore[union-attr]
+                    report += r2
+                    if ("FILLED: " + best) in r2:
+                        ok.append(k)
+                        missed.remove(k)
+        # 2) TWO-STRIKE: still NOT FOUND after a rescue AND missed last call → dead forever.
+        run_state["unmatchable"].update(k for k in missed if k in run_state["notfound_prev"])
+        run_state["notfound_prev"] = set(missed)
+        run_state["filled"].update({k: mapping[k] for k in ok})
+        mem = [f"fill_fields SET {len(ok)}/{len(mapping)}: "
+               + "; ".join(f'{k}="{str(mapping[k])[:40]}"' for k in ok)[:400] + ". NEVER re-send a SET field."]
+        live = [k for k in missed if k not in run_state["unmatchable"]]
+        if live:
+            empty_labels = [f["label"] for f in state if not f["value"]][:15]
+            mem.append(f"NOT FOUND ({len(live)}): {', '.join(live)[:200]}. Retry these ONCE, but ONLY "
+                       f"with keys copied EXACTLY from these real page labels: {' | '.join(empty_labels)[:400]}")
+        if run_state["unmatchable"]:
+            mem.append(f"UNMATCHABLE ({len(run_state['unmatchable'])}): "
+                       f"{', '.join(sorted(run_state['unmatchable']))[:300]}. fill_fields FAILED TWICE on "
+                       "these — it can NEVER set them. Do NOT send them again under ANY wording. Instead: "
+                       "click each directly on the page (ONE attempt), then verify_form_filled and SUBMIT. "
+                       "Only if submit is blocked by one, finish  MISSING: <label>.")
+        _emit(pk, "response", agent="browser", url=url, detail=f"⚡ fill → {' | '.join(mem)}"[:240])
+        return ActionResult(extracted_content="fill detail: " + "; ".join(report),
+                            include_extracted_content_only_once=True,
+                            long_term_memory=" | ".join(mem)[:1200])
 
     @controller.registry.action(
-        "Select radio-button / checkbox answers. Pass choices_json: a JSON object "
-        "ENCODED AS A STRING mapping each question's text to the option to pick, e.g. "
-        '\'{"Are you authorized to work…": "Yes", "Do you require sponsorship…": "Yes"}\'. '
-        "Uses REAL clicks that React forms accept (Ashby). Use THIS for every "
-        "radio/checkbox question — do not click them individually.")
+        "Select radio-button / checkbox answers. choices_json: a JSON object ENCODED "
+        "AS A STRING mapping each question's EXACT text to the option to pick — for "
+        "'select all that apply' the value may be a JSON ARRAY of option texts, e.g. "
+        '\'{"Are you authorized…": "Yes", "Which country…": ["United States"]}\'. '
+        "Uses REAL clicks React forms accept. Use THIS for every radio/checkbox question.")
     async def select_choices(choices_json: str, browser_session) -> ActionResult:  # noqa: ANN001
         try:
             mapping = json.loads(choices_json)
             if not isinstance(mapping, dict):
                 raise ValueError("choices_json must encode a JSON object")
         except Exception as exc:
-            return ActionResult(extracted_content=f"select_choices: bad json ({exc})",
-                                include_in_memory=True)
+            return ActionResult(error=f"select_choices: bad json ({exc})")
+        # (i) AUTO-SKIP set/dead questions — a disobedient re-send returns instantly.
+        skipped_bad = [q for q in mapping if q in run_state["unmatchable"]]
+        mapping = {q: v for q, v in mapping.items()
+                   if q not in run_state["filled"] and q not in run_state["unmatchable"]}
+        if not mapping:
+            return ActionResult(long_term_memory=(
+                "select_choices: NOTHING TO DO — every question is already SET or UNMATCHABLE"
+                + (f" (UNMATCHABLE: {', '.join(skipped_bad)[:250]})" if skipped_bad else "")
+                + ". NEXT: click any still-empty choice on the page directly (ONE attempt each), "
+                "then verify_form_filled, then Submit."))
         page = await _page_of(browser_session)
-        done = await _set_choices(page, mapping, pk, url)
-        return ActionResult(
-            extracted_content=f"selected {len(done)}/{len(mapping)} choice question(s): "
-                              + ", ".join(done)[:200], include_in_memory=True)
+        status = await _set_choices(page, mapping, pk, url)
+        ok = [q for q, s in status.items() if s == "set"]
+        failed = {q: s for q, s in status.items() if s != "set"}
+        # (iii) RESCUE: re-key question to the canonical choice-group label, re-map the
+        # value to a REAL option text, and retry — fixes the paraphrased-key misses.
+        if failed:
+            groups = [f for f in await page.evaluate(_READ_FORM_JS) if f.get("type") == "choice-group"]
+            for q in list(failed):
+                kt, best, score = _toks(q), None, 0.0
+                for g in groups:
+                    ov = len(kt & _toks(g["label"])) / (len(kt) or 1)
+                    if ov > score:
+                        best, score = g, ov
+                if not best or score < 0.5:
+                    continue
+                raw = mapping[q] if isinstance(mapping[q], list) else [mapping[q]]
+                fixed = [next((o for o in best.get("options", [])
+                               if str(v).lower() in o.lower() or o.lower() in str(v).lower()), str(v))
+                         for v in raw]
+                if (await _set_choices(page, {best["label"]: fixed}, pk, url)).get(best["label"]) == "set":
+                    ok.append(q)
+                    failed.pop(q)
+                    run_state["filled"][best["label"]] = fixed  # canonical key → verify overlay hits
+        # (ii) TWO-STRIKE
+        run_state["unmatchable"].update(q for q in failed if q in run_state["choice_prev"])
+        run_state["choice_prev"] = set(failed)
+        run_state["filled"].update({q: mapping[q] for q in ok})
+        mem = [f"select_choices SET {len(ok)}/{len(status)}: "
+               + "; ".join(f'{q}="{mapping[q]}"' for q in ok)[:400] + ". NEVER re-send a SET question."]
+        live = {q: s for q, s in failed.items() if q not in run_state["unmatchable"]}
+        if live:
+            mem.append("FAILED: " + "; ".join(f"{q} -> {s}" for q, s in live.items())[:400]
+                       + ". Retry ONCE, copying the question AND option text EXACTLY as shown on the "
+                       "page (the '-> NOMATCH options:' list shows the REAL option texts).")
+        if run_state["unmatchable"]:
+            mem.append(f"UNMATCHABLE: {', '.join(sorted(run_state['unmatchable']))[:300]} — FAILED "
+                       "TWICE; NEVER send these to select_choices again. Click each directly on the "
+                       "page (ONE attempt), then verify_form_filled and SUBMIT.")
+        return ActionResult(long_term_memory=" | ".join(mem)[:1200])
 
     @controller.registry.action(
         "Verify the form's REAL state: returns every visible field with its actual "
@@ -1502,20 +1829,33 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
             page = await _page_of(browser_session)
             fields = await page.evaluate(_READ_FORM_JS)  # type: ignore[union-attr]
         except Exception as exc:
-            return ActionResult(extracted_content=f"verify errored: {exc}",
-                                include_in_memory=True)
+            return ActionResult(error=f"verify errored: {exc}")
         if snapshot_sink is not None:  # keep the latest reading for the dashboard
             snapshot_sink[:] = fields
-        lines = [f"- {f['label']} [{f['type']}]{' REQUIRED' if f['required'] else ''}: "
-                 f"{f['value'] or '(EMPTY)'}" for f in fields]
+        run_state["verify_calls"] += 1
+        # ONLY the remaining problems (never list OK/optional fields — that invites
+        # re-fills). A combo we already SET but the DOM reads empty (Ashby commits to
+        # a hidden input and clears the visible one) is NOT a problem — trust our receipt.
         empty_req = [f["label"] for f in fields
-                     if f["required"] and not f["value"] and f["type"] not in ("radio",)]
-        head = ("ALL required fields have values." if not empty_req else
-                f"EMPTY REQUIRED FIELDS — fill these before submitting: {', '.join(empty_req)}")
-        _emit(pk, "response", agent="browser", url=url,
-              detail=f"🔍 pre-submit check: {head}"[:240])
-        return ActionResult(extracted_content=head + "\n" + "\n".join(lines[:40]),
-                            include_in_memory=True)
+                     if f["required"] and not f["value"]
+                     and f["type"] not in ("radio", "file")
+                     and not (f.get("combo") and run_state["filled"].get(f["label"]))]
+        n_ok = sum(1 for f in fields if f["value"])
+        if not empty_req:
+            mem = (f"verify #{run_state['verify_calls']}: ALL REQUIRED FIELDS OK ({n_ok} "
+                   "filled). Form is COMPLETE — click Submit NOW. Do not fill anything else.")
+        elif run_state["verify_calls"] >= 3 or empty_req == run_state["last_missing"]:
+            mem = (f"verify #{run_state['verify_calls']}: still flags "
+                   f"{', '.join(empty_req)[:200]} but the repair budget is EXHAUSTED. STOP "
+                   "repairing — click Submit NOW and use the page's own validation errors, "
+                   "or finish with UNCERTAIN. Do NOT call fill_fields again.")
+        else:
+            run_state["last_missing"] = empty_req
+            mem = (f"verify #{run_state['verify_calls']}: fix ONLY these {len(empty_req)} "
+                   f"required fields: {', '.join(empty_req)[:300]}. ALL {n_ok} other fields "
+                   "are OK — never re-touch them.")
+        _emit(pk, "response", agent="browser", url=url, detail=f"🔍 pre-submit check: {mem}"[:240])
+        return ActionResult(long_term_memory=mem)
 
     if not resume_path:
         return controller
@@ -1534,11 +1874,25 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
                   detail=f"résumé upload ERRORED: {exc}")
             return ActionResult(extracted_content=f"résumé upload errored: {exc}",
                                 include_in_memory=True)
-        msg = (f"Attached the résumé PDF to {n} résumé field(s) on the page." if n
+        # Ashby/Greenhouse AUTO-FILL name/email/phone from the résumé (async). Wait,
+        # then read the form and record what got auto-filled so fill_fields SKIPS
+        # them — never re-type an auto-filled field.
+        autofilled = []
+        try:
+            await page.wait_for_timeout(1800)  # type: ignore[union-attr]
+            for f in await page.evaluate(_READ_FORM_JS):  # type: ignore[union-attr]
+                if f.get("value") and f.get("type") not in ("file", "radio", "checkbox"):
+                    run_state["filled"][f["label"]] = f["value"]
+                    autofilled.append(f["label"])
+        except Exception:  # noqa: BLE001
+            pass
+        msg = (f"Attached the résumé to {n} field(s)." if n
                else "No résumé file input was found on this page.")
-        log.info("upload_resume: %s", msg)
-        _emit(pk, "response", agent="browser", url=url, detail=f"📎 {msg}")
-        return ActionResult(extracted_content=msg, include_in_memory=True)
+        mem = (msg + (f" AUTO-FILLED from the résumé (do NOT re-fill these): "
+                      f"{', '.join(autofilled)[:250]}." if autofilled else ""))
+        log.info("upload_resume: %s", mem)
+        _emit(pk, "response", agent="browser", url=url, detail=f"📎 {mem}"[:240])
+        return ActionResult(extracted_content=msg, long_term_memory=mem[:600])
 
     return controller
 

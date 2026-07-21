@@ -32,3 +32,4 @@ resume/preview.pdf
 resume/base.tex
 resume/*.pdf
 output/
+.gstack/

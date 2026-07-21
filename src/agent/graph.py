@@ -199,6 +199,21 @@ def _skill(name: str) -> SkillToolset:
     return SkillToolset(skills=[load_skill_from_dir(_SKILLS / name)])
 
 
+def _prefs_notes_text() -> str:
+    """Candidate hard constraints from preferences.yaml, baked into the scorer
+    instruction at construction (they're global, so no per-job session state — and
+    a missing state var would crash the graph). Restart to pick up edits."""
+    try:
+        from pathlib import Path
+
+        from core.config import get_settings
+        from discovery.watchlist import load_preferences
+        notes = load_preferences(Path(get_settings().config_dir) / "preferences.yaml").notes
+        return notes.strip() or "(none)"
+    except Exception:
+        return "(none)"
+
+
 # --- agents ------------------------------------------------------------------
 scorer = LlmAgent(
     name="scorer", model=_model("scorer"),
@@ -206,6 +221,8 @@ scorer = LlmAgent(
     instruction=(
         "You are a senior technical recruiter scoring how well ONE candidate fits ONE role.\n\n"
         "CANDIDATE — résumé (LaTeX source):\n{base_latex}\n\n"
+        "CANDIDATE HARD CONSTRAINTS — if the role violates ANY of these, it is a "
+        "DEALBREAKER: score 1-2 and say which one:\n" + _prefs_notes_text() + "\n\n"
         "ROLE — {company}, job description / title:\n{jd_text}\n\n"
         "Score fit 0-10 weighing skills/stack overlap (highest), seniority fit, domain "
         "relevance, and hard dealbreakers (a real dealbreaker caps at 3). Anchors: "

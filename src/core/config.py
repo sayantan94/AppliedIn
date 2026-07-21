@@ -87,8 +87,10 @@ class Settings(BaseSettings):
 
     @property
     def litellm_model(self) -> str:
-        """Model string for ADK/LiteLLM (``anthropic/...`` or ``bedrock/...``)."""
-        return f"{self.llm_provider}/{self.llm_model}"
+        """Base model string for ADK/LiteLLM. Prefers the configured orchestrator
+        model so EVERY path — the agent fallback AND direct users like the discovery
+        crawler — uses it; only falls back to the mode default if it's unset."""
+        return self.orchestrator_model or f"{self.llm_provider}/{self.llm_model}"
 
     # Base model for ALL orchestration agents (a full LiteLLM string, e.g.
     # "openai/gpt-4.1-mini"). Empty => the mode default (litellm_model). The
@@ -119,12 +121,11 @@ class Settings(BaseSettings):
         return override or self.orchestrator_model or self.litellm_model
 
     # Guardrails
-    daily_cap: int = 5
     max_attempts: int = 2
 
     # Apply mode default (runtime-overridable from the dashboard — core.flags):
     # "gated" = approve each apply; "auto" = jobs scoring ≥ auto_min_score apply
-    # themselves up to daily_cap (find-and-apply while you sleep).
+    # themselves (find-and-apply while you sleep).
     apply_mode: str = "gated"
     auto_min_score: int = 8
 

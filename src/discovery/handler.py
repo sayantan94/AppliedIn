@@ -21,7 +21,7 @@ from core.stores import make_stores
 
 from .adapters import ADAPTERS
 from .relevance import relevant
-from .resolver import resolve
+from .resolver import BROWSER_HEADERS, resolve
 from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
 
 log = get_logger(__name__)
@@ -101,8 +101,19 @@ def discover_company(
     return enqueued
 
 
-def run_discovery() -> dict:
+def list_watchlist_companies() -> list[str]:
+    """The company names in the watchlist, in file order — so the UI can offer a
+    'run discovery for just these' picker instead of always sweeping all."""
+    config_dir = Path(get_settings().config_dir)
+    return [c.name for c in load_watchlist(config_dir / "watchlist.yaml")]
+
+
+def run_discovery(only: list[str] | None = None) -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
+
+    `only` scopes the run to specific companies (case-insensitive names, matched
+    against the watchlist); None/empty = the whole watchlist. The UI passes the
+    user's picked companies so discovery isn't always all-or-nothing.
 
     Mode-agnostic: stores come from the factory, so this is the SAME finder on
     a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
@@ -113,10 +124,15 @@ def run_discovery() -> dict:
     config_dir = Path(settings.config_dir)
     prefs = load_preferences(config_dir / "preferences.yaml")
     companies = load_watchlist(config_dir / "watchlist.yaml")
+    if only:
+        wanted = {n.strip().lower() for n in only if n and n.strip()}
+        companies = [c for c in companies if c.name.strip().lower() in wanted]
+        log.info("discovery scoped to %d/%s companies: %s",
+                 len(companies), "all", ", ".join(c.name for c in companies) or "(none matched)")
 
     total = crawl_total = 0
     crawl_companies: list[CompanyConfig] = []
-    with httpx.Client(headers={"User-Agent": "AppliedIn/0.1"}) as client:
+    with httpx.Client(headers=BROWSER_HEADERS) as client:
         for raw in companies:
             try:
                 company = resolve_company(raw, client)

@@ -19,6 +19,25 @@ def save_login(company: str, username: str, password: str, secrets: Any) -> None
     secrets.put_json(portal_secret(company), {"username": username, "password": password})
 
 
+# Un-filled placeholder markers in secrets.json — treated as "no credential" so the
+# applier hands off to the human to sign in rather than typing placeholder text.
+_PLACEHOLDER = ("replace_with", "replace-with", "placeholder", "your_apple", "your-apple",
+                "your_email", "your-email", "your_password", "your-password", "changeme",
+                "xxxx", "<", "example.com")
+
+
+def _unset(v: str | None) -> bool:
+    v = (v or "").strip().lower()
+    return not v or any(mark in v for mark in _PLACEHOLDER)
+
+
 def get_login(company: str, secrets: Any) -> dict | None:
-    """Return {'username', 'password'} for this company's portal, or None."""
-    return secrets.get_json(portal_secret(company))
+    """Return {'username', 'password'} for this company's portal, or None. An entry
+    still holding placeholder text (not yet filled in) counts as None — the applier
+    then hands off to the human to sign in in the browser window instead of trying
+    to type a placeholder. (Portals with 2FA — Apple/Google/Microsoft — should be
+    signed into once in the persistent window rather than stored here at all.)"""
+    creds = secrets.get_json(portal_secret(company))
+    if not creds or _unset(creds.get("username")) or _unset(creds.get("password")):
+        return None
+    return creds

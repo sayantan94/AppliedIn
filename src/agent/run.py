@@ -75,6 +75,18 @@ def _base_latex() -> str:
     return _sanitize(path.read_text()) if path.exists() else ""
 
 
+def _prefs_notes() -> str:
+    """Hard-constraint brief from preferences.yaml (no clearance, WA/CA only, …) —
+    fed to the scorer so JD-level dealbreakers are caught, not just title ones."""
+    from discovery.watchlist import load_preferences
+
+    try:
+        cfg = Path(get_settings().config_dir) / "preferences.yaml"
+        return load_preferences(cfg).notes.strip()
+    except Exception:
+        return ""
+
+
 def _github_context() -> str:
     """The candidate's public GitHub summary (cached), for tailoring context."""
     from discovery.watchlist import load_preferences
@@ -116,6 +128,7 @@ async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
         "pk": pk, "company": row.get("company", ""), "ats": row.get("ats", ""),
         "jd_url": row.get("jd_url", ""), "jd_text": jd_text,
         "base_latex": _base_latex(), "github_context": _github_context(),
+        "prefs_notes": _prefs_notes() or "(none)",
     }
     # create_session is async; a retry may find it already there.
     existing = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=pk)
@@ -196,6 +209,13 @@ def _save_output(pk: str, row: dict, jd_text: str, stores: Any) -> None:
     write_job_output(pk, company=row.get("company", ""), title=row.get("title", ""),
                      url=row.get("jd_url", ""), score=row.get("match_score"),
                      jd_text=jd_text, tex=tex, pdf=pdf)
+
+
+def apply_one(pk: str, stores: Any = None) -> dict:
+    """Sync entry for the apply worker: drive the browser apply for ONE queued job.
+    Runs in the apply thread so it never blocks the evaluate (score/tailor) worker."""
+    stores = stores or make_stores()
+    return _run(_apply_direct(pk, stores))
 
 
 def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
@@ -446,24 +466,9 @@ def _fail_reason(outcome: dict) -> str:
     return detail or "Could not confirm the application was submitted."
 
 
-def _today_applied(stores: Any) -> int:
-    """How many applications went out today (UTC) — enforces the daily cap."""
-    from datetime import UTC, datetime
-
-    today = datetime.now(UTC).date().isoformat()
-    n = 0
-    for s in (Status.APPLIED, Status.APPLIED_MANUAL):
-        for r in stores.tracking.query_status(s):
-            evs = r.get("events") or []
-            at = (evs[-1].get("at") or "") if evs else ""
-            if at[:10] == today:
-                n += 1
-    return n
-
-
 def _auto_decision(pk: str, stores: Any) -> str:
-    """When the applier asks for approval: 'go' (auto-apply now), 'cap' (daily
-    cap reached — park), or '' (gate to the human as usual)."""
+    """When the applier asks for approval: 'go' (auto-apply now) or '' (gate to
+    the human as usual)."""
     from core import flags
 
     if flags.apply_mode() != "auto" or flags.paused():
@@ -471,8 +476,6 @@ def _auto_decision(pk: str, stores: Any) -> str:
     score = (stores.tracking.get(pk) or {}).get("match_score")
     if score is None or int(score) < get_settings().auto_min_score:
         return ""  # not a confident enough match — a human still decides
-    if _today_applied(stores) >= get_settings().daily_cap:
-        return "cap"
     return "go"
 
 
@@ -488,7 +491,6 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
     last_author = None
     apply_result: Any = None  # the browser apply() return, if the applier ran it
     auto_go = False           # approval auto-granted → run _apply_direct after close
-    cap_hit = False           # daily cap reached → park as CAPPED
     # aclosing() closes the run generator in THIS context when we return early
     # (score-skip / gate) — otherwise ADK's OTel span detach fires in the wrong
     # context and prints a spurious traceback.
@@ -519,9 +521,6 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
                         if verdict == "go":
                             auto_go = True
                             break  # close the run cleanly, then apply directly
-                        if verdict == "cap":
-                            cap_hit = True
-                            break
                     # An HONEST gate reason — "approval" when it's just waiting for
                     # your go-ahead, "unknown_field" when it needs an answer.
                     reason = ("approval" if question.startswith("Ready to apply")
@@ -539,7 +538,7 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
                 emit("action", pk=pk, agent=author, detail=call.name,
                      input=_short(call.args or {}))
 
-            if auto_go or cap_hit:
+            if auto_go:
                 break  # leave the agent loop; aclosing() closes the generator
 
             for fr in event.get_function_responses() or []:  # tool result = OUTPUT
@@ -547,17 +546,20 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
                     apply_result = fr.response  # capture, to verify a real submit
                 emit("result", pk=pk, agent=author, detail=fr.name, output=_short(fr.response))
 
-    if cap_hit:
-        stores.tracking.set_status(pk, Status.CAPPED)
-        emit("running", pk=pk, agent="applier",
-             detail=f"daily cap reached ({get_settings().daily_cap}) — parked for tomorrow")
-        log.info("capped pk=%s", pk)
-        return {"result": "capped", "pk": pk}
     if auto_go:
+        # DECOUPLED: don't apply inline (a slow browser session would block the
+        # evaluate worker from scoring/tailoring the rest of the backlog). Hand the
+        # job to the apply queue; the separate apply worker submits it under the cap.
+        # Mark it TAILORED (ready to apply) — it LEAVES the `found` pool so it's
+        # never re-swept, but does NOT show as "applying" while it just waits in the
+        # apply queue. The apply worker flips it to SUBMITTING when it actually
+        # starts, so only the jobs truly in-flight read as submitting.
+        stores.tracking.set_status(pk, Status.TAILORED)
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
         emit("running", pk=pk, agent="applier",
-             detail="auto-approved (score ≥ threshold) — applying now…")
-        log.info("auto-applying pk=%s", pk)
-        return await _apply_direct(pk, stores)
+             detail="auto-approved (score ≥ threshold) — queued to apply")
+        log.info("queued-to-apply pk=%s", pk)
+        return {"result": "queued_apply", "pk": pk}
 
     # The run finished without gating. Only call it APPLIED if the browser agent
     # actually confirmed a submit — otherwise it FAILED (dead/404 posting, no form

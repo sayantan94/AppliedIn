@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 48 48" fill="none" role="img" aria-label="AppliedIn">
+  <title>AppliedIn</title>
+  <!-- Solid ink squircle with a bold "A + check" mark: the peak reads as an A
+       (Applied), the tick as accepted. Flat & monochrome to match the brand. -->
+  <rect x="2" y="2" width="44" height="44" rx="13" fill="#141417"/>
+  <g fill="none" stroke="#f4f4f5" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11.5 37 L24 11 L36.5 37"/>
+    <path d="M17 27 L21.5 31.5 L31.5 20"/>
+  </g>
+</svg>

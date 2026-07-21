@@ -47,25 +47,22 @@ def _discovery_loop() -> None:
 
 
 def _sweep_found(stores) -> None:  # noqa: ANN001
-    """AUTO mode only: when the queue is idle, feed a couple of waiting `found`
-    jobs back into it so the backlog keeps progressing overnight. Stops feeding
-    once today's applications hit the daily cap (jobs simply wait for tomorrow)."""
-    from agent.run import _today_applied
-    from core.config import get_settings
+    """When the evaluate queue is idle, feed waiting `found` jobs so the backlog
+    keeps getting scored + tailored 24/7 — the whole backlog gets assessed
+    continuously and the good ones queue up to apply."""
     from core.models import Status
 
-    if _today_applied(stores) >= get_settings().daily_cap:
-        return
     waiting = [r for r in stores.tracking.query_status(Status.FOUND)
                if not str(r.get("pk", "")).startswith("meta#")]
-    for row in waiting[:2]:  # small batches — pace the LLM spend
+    for row in waiting[:3]:  # small batches — pace the LLM spend
         stores.queue.enqueue(stores.tailor_queue, {"pk": row["pk"]})
         log.info("sweep: queued waiting job %s", row["pk"])
 
 
 def _worker_loop() -> None:
-    """The 'event source' — drain the queue and run the pipeline per job. Its own
-    thread, so a slow job (browser apply) never blocks discovery."""
+    """EVALUATE worker — drain the tailor queue and score + tailor each job (fast,
+    LLM-only). Auto-approved jobs are handed to the apply queue, NOT applied here,
+    so a slow browser apply never blocks the backlog. Runs 24/7."""
     from agent.run import run_job
     from core import flags
 
@@ -79,13 +76,182 @@ def _worker_loop() -> None:
             try:
                 log.info("pipeline: %s", run_job(item["pk"], stores))
             except Exception:
+                # NEVER get stuck: mark the job errored so it leaves the `found`
+                # pool and isn't re-swept into an infinite error loop. Move on.
                 log.exception("pipeline failed for %s", item.get("pk"))
-        if not items and flags.apply_mode() == "auto":
+                try:
+                    from core.models import Status
+                    stores.tracking.set_status(item["pk"], Status.ERROR,
+                                               error="pipeline error — see logs")
+                except Exception:
+                    log.exception("could not mark %s errored", item.get("pk"))
+        if not items:  # queue idle → keep the backlog moving (both modes)
             try:
                 _sweep_found(stores)
             except Exception:
                 log.exception("backlog sweep failed")
         time.sleep(POLL_INTERVAL)
+
+
+_APPLY_LANES = 3  # concurrent applications (each on its own Chrome profile)
+
+
+def _apply_loop() -> None:
+    """APPLY worker — its OWN thread, so slow browser applies never block the
+    evaluate worker. Submits up to _APPLY_LANES jobs CONCURRENTLY (each on its own
+    Chrome profile). All applies run in ONE event loop (never one asyncio.run per
+    thread — browser-use shares async objects that otherwise cross loops and
+    crash). Pause-aware. Runs 24/7."""
+    import asyncio
+
+    from agent.run import _apply_direct
+    from core import flags
+    from core.config import get_settings
+    from core.stores import make_stores as _mk
+    from tools.browser_apply import set_profile_override
+
+    stores = make_stores()
+    base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
+
+    async def _apply_batch(pks: list) -> None:
+        lanes: "asyncio.Queue[str]" = asyncio.Queue()
+        for i in range(_APPLY_LANES):
+            lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
+
+        async def _one(pk: str) -> None:
+            lane = await lanes.get()  # blocks until a lane frees → caps concurrency
+            try:
+                set_profile_override(lane)  # task-local → this apply's Chrome profile
+                log.info("apply: %s", await _apply_direct(pk, _mk()))
+            except Exception:
+                log.exception("apply failed for %s", pk)
+            finally:
+                lanes.put_nowait(lane)
+
+        await asyncio.gather(*(_one(pk) for pk in pks))
+
+    while True:
+        if flags.paused():
+            time.sleep(POLL_INTERVAL)
+            continue
+        items = stores.queue.drain(stores.apply_queue)
+        if not items:
+            time.sleep(POLL_INTERVAL)
+            continue
+        # Take only ONE lane-batch; re-queue the rest so they PERSIST in Redis
+        # (never held in memory — a restart mustn't strand them). Next cycle pops
+        # the next batch, re-checking pause each time.
+        batch = items[:_APPLY_LANES]
+        for rest in items[_APPLY_LANES:]:
+            stores.queue.enqueue(stores.apply_queue, rest)
+        try:
+            asyncio.run(_apply_batch([it["pk"] for it in batch]))
+        except Exception:
+            log.exception("apply batch failed")
+        time.sleep(POLL_INTERVAL)
+
+
+def run_discovery_once(only: list[str] | None = None) -> dict:
+    """ONE discovery cycle on demand (the UI 'Start discovery' button). `only`
+    scopes it to the companies the user picked (None/empty = the whole
+    watchlist). Finds + enqueues new jobs as `found`; does NOT score/tailor/apply
+    — that's what `process_backlog_once` (the 'Process applications' button) does.
+    Blocking — the web layer runs it in a background task so the click returns
+    instantly."""
+    from discovery.handler import run_discovery
+
+    log.info("manual discovery requested (companies=%s)", only or "all")
+    result = run_discovery(only=only)
+    log.info("manual discovery: %s", result)
+    return result
+
+
+def process_backlog_once() -> dict:
+    """One on-demand pass over the discovered backlog (the UI 'Process
+    applications' button): score + tailor EVERY waiting `found` job, then apply
+    everything that qualifies — _APPLY_LANES at a time, up to the daily cap.
+    Self-contained (does its own draining), so it works whether or not the 24/7
+    loops are running. Blocking — run it in a background thread."""
+    import asyncio
+
+    from agent.run import _apply_direct, run_job
+    from core.config import get_settings
+    from core.models import Status
+    from tools.browser_apply import set_profile_override
+
+    stores = make_stores()
+
+    # 1) EVALUATE — score + tailor every waiting `found` job. Qualifying jobs are
+    #    enqueued to the apply queue by run_job; low scorers are skipped there.
+    found = [r for r in stores.tracking.query_status(Status.FOUND)
+             if not str(r.get("pk", "")).startswith("meta#")]
+    evaluated = 0
+    for row in found:
+        try:
+            log.info("process: %s", run_job(row["pk"], stores))
+            evaluated += 1
+        except Exception:
+            log.exception("process: evaluate failed for %s", row.get("pk"))
+            try:
+                stores.tracking.set_status(row["pk"], Status.ERROR,
+                                           error="pipeline error — see logs")
+            except Exception:
+                log.exception("could not mark %s errored", row.get("pk"))
+
+    # 2) APPLY — drain the apply queue, _APPLY_LANES concurrently, until empty.
+    base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
+
+    async def _apply_batch(pks: list) -> None:
+        lanes: "asyncio.Queue[str]" = asyncio.Queue()
+        for i in range(_APPLY_LANES):
+            lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
+
+        async def _one(pk: str) -> None:
+            lane = await lanes.get()
+            try:
+                set_profile_override(lane)
+                log.info("process apply: %s", await _apply_direct(pk, make_stores()))
+            except Exception:
+                log.exception("process: apply failed for %s", pk)
+            finally:
+                lanes.put_nowait(lane)
+
+        await asyncio.gather(*(_one(pk) for pk in pks))
+
+    applied = 0
+    while True:
+        items = stores.queue.drain(stores.apply_queue)
+        if not items:
+            break
+        batch = items[:_APPLY_LANES]
+        for rest in items[_APPLY_LANES:]:
+            stores.queue.enqueue(stores.apply_queue, rest)  # persist the overflow
+        try:
+            asyncio.run(_apply_batch([it["pk"] for it in batch]))
+            applied += len(batch)
+        except Exception:
+            log.exception("process: apply batch failed")
+
+    result = {"evaluated": evaluated, "applied": applied}
+    log.info("process backlog done: %s", result)
+    return result
+
+
+def _recover_orphans(stores) -> None:  # noqa: ANN001
+    """On startup, any SUBMITTING job is an ORPHAN — its browser apply was killed
+    by the last restart, so it never finished. Reset it to TAILORED and re-queue it
+    so the apply worker retries it. Nothing stays stuck in 'applying' forever."""
+    from core.models import Status
+
+    n = 0
+    for r in stores.tracking.all():
+        pk = r.get("pk", "")
+        if not str(pk).startswith("meta#") and r.get("status") == "submitting":
+            stores.tracking.set_status(pk, Status.TAILORED)
+            stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+            n += 1
+    if n:
+        log.info("recovered %d orphaned 'submitting' job(s) → re-queued to apply", n)
 
 
 def main() -> None:
@@ -97,14 +263,16 @@ def main() -> None:
     if not hasattr(stores.queue, "drain"):
         raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
 
+    _recover_orphans(stores)  # never leave a killed apply stuck at 'submitting'
     discovery_on = os.environ.get("APPLIEDIN_DISCOVERY", "on").lower() not in (
         "off", "0", "false", "no")
-    log.info("daemon up: worker + web%s (poll every %ds)",
+    log.info("daemon up: evaluate + apply workers + web%s (poll every %ds)",
              f" + discovery (every {DISCOVER_INTERVAL}s)" if discovery_on else " — DISCOVERY OFF",
              POLL_INTERVAL)
     if discovery_on:
         threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
-    threading.Thread(target=_worker_loop, daemon=True, name="worker").start()
+    threading.Thread(target=_worker_loop, daemon=True, name="evaluate").start()
+    threading.Thread(target=_apply_loop, daemon=True, name="apply").start()
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)

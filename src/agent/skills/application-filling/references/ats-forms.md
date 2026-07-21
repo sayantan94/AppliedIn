@@ -1,33 +1,49 @@
-# ATS form navigation (reference)
+# ATS form quirks (reference)
 
-Per-ATS quirks for Step 1 (reading the form) and Step 4 (fill & submit).
-Consult when the form doesn't behave as expected.
+Per-ATS behaviour the scripted apply engine handles, and what a gate means when it
+doesn't. Consult when a form doesn't behave as expected.
 
-## Greenhouse
-- Standard fields: first/last name, email, phone, resume upload, LinkedIn.
-- EEO block (gender, race, veteran, disability) is a separate section near the
-  bottom — always present. These resolve from the answer bank; don't skip them.
-- Custom questions vary per company; treat any free-text box as gated.
+## Ashby (jobs.ashbyhq.com)
+- The form is behind an **"Application" tab** — click it before reading fields.
+- Two uploaders: an optional **"Autofill from resume"** box and the **required
+  Résumé** field. Upload the tailored PDF to the required one only.
+- **Location** is an autocomplete. It renders suggestions as `<button>` elements
+  (NOT `[role=option]`), so a plain option-list picker finds nothing. Type the
+  **city token** ("Seattle"), wait for the async list, and click the qualified
+  suggestion ("Seattle, Washington, United States") — a more-qualified option is
+  the same place and IS correct. Never commit a different city ("Settle").
+- A combobox stores its selected value **off the visible input** — verifying via
+  `input.value` reads empty even when it's set. Trust the form's submit-time
+  validation, not the DOM read, or a set field falsely gates.
+- **Cloudflare Turnstile** ("You need to enable JavaScript…" token field) is
+  usually present. It is a real CAPTCHA → gate to the human; never solve it.
+- Some questions are conditional (appear after another answer); the form is
+  re-read after fills, and the ReAct submit loop catches anything missed.
 
-## Lever
-- Single-page form. "Additional information" is a free-text box — gate it unless
-  the company's answer bank already has it.
-- Resume upload triggers auto-parse; verify the parsed fields, don't trust them.
+## Greenhouse (boards.greenhouse.io)
+- Standard fields + an **EEO block** (gender, race, veteran, disability) near the
+  bottom — resolve from the answer bank; don't skip.
+- Location is often a **Google-places autocomplete** — same city-token → pick-
+  suggestion handling as Ashby.
+- Custom free-text questions are drafted by the writer if unbanked, else gate.
 
-## Ashby
-- Multi-section. Some questions are conditional (appear after you answer another).
-  Re-read the form after each answer before deciding you're done.
+## Lever (jobs.lever.co)
+- Single-page form. "Additional information" is free-text — writer-drafted or gate.
+- Résumé upload triggers auto-parse; the pipeline fills fields itself rather than
+  trusting the parse.
 
-## Workday
-- Multi-page, per-tenant. Expect account creation, a resume-parse-and-correct
-  screen, and tenant-specific questionnaires.
-- If it demands account creation or 2FA you can't complete, `ask_human` and stop.
+## Workday (myworkdayjobs.com)
+- Multi-page, per-tenant. Expect an **account wall**, a résumé-parse-and-correct
+  screen, and tenant questionnaires. An account/2FA wall → `no_account` gate.
 
 ## SmartRecruiters
-- Consent/GDPR checkboxes are common — these are approved facts, not essays.
+- Consent / GDPR checkboxes are approved facts (checkbox picks), not essays.
 
 ## General
-- A required field with no approved answer ALWAYS gates. Never guess to get past
-  a "required" marker.
-- After submit, capture the confirmation number / "application received" text as
-  the confirmation id.
+- A required field with no approved answer and no writer-eligible prose → gate
+  (`unknown_field`). Never guess past a "required" marker.
+- The submit loop reads the form's OWN error messages to know what to fix; it
+  resubmits up to a few times, then gates on whatever the form still flags.
+- Success = confirmation text ("application submitted", "thank you") OR a redirect
+  to a confirmation URL. If the page closes before that, the result is `uncertain`
+  (verify on the portal) — the engine never resubmits on its own.

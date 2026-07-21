@@ -1,6 +1,8 @@
 # AppliedIn — Control (web dashboard)
 
-Static single-page dashboard for the AppliedIn pipeline.
+Static single-page dashboard for the AppliedIn pipeline. Plain HTML/CSS/ES
+modules — no build step. Brand matches [ai.sayantan.sh](https://ai.sayantan.sh):
+Inter, monochrome wireframe, light + dark.
 
 ## Views
 

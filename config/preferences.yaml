@@ -49,14 +49,26 @@ exclude_keywords:
   - ios
   - mobile
 
-# REQUIRED location: United States. Prefer Seattle / California (and US-remote);
-# the agent rejects postings clearly outside the US, allows blank/unknown.
+# REQUIRED location: Washington or California ONLY (on-site). US-remote is fine.
+# The agent rejects postings clearly outside WA/CA; a blank/unknown is allowed.
 locations:
-  - United States
-  - Remote (US)
   - Seattle
+  - Bellevue
+  - Washington
   - California
+  - Remote (US)
 remote_only: false
+
+# Free-text HARD CONSTRAINTS — read by BOTH the title screen and the JD scorer.
+# Anything violating these is rejected (scorer caps it at <=2). Add your own lines.
+notes: |
+  - No US security clearance: reject any role that REQUIRES an active or obtainable
+    clearance (Secret, Top Secret, TS/SCI, Public Trust, polygraph). If clearance
+    is not mentioned, it is fine.
+  - Location preference is Washington or California (Seattle, Bellevue, SF Bay Area,
+    LA). US-remote is fine. Reject a role ONLY if its location is CLEARLY a
+    different US state or another country. An unstated / unclear / "multiple
+    locations" listing is ACCEPTABLE — do not reject on a missing location.
 
 # Stage-2: minimum LLM relevance score (0-10) for a job to proceed to apply.
 min_match_score: 7

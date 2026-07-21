@@ -3,27 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AppliedIn — Control</title>
+    <title>AppliedIn</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
     <link
       rel="icon"
       type="image/svg+xml"
-      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect x='2' y='2' width='44' height='44' rx='13' fill='%23141417'/><g fill='none' stroke='%23f4f4f5' stroke-width='4.2' stroke-linecap='round' stroke-linejoin='round'><path d='M11.5 37 L24 11 L36.5 37'/><path d='M17 27 L21.5 31.5 L31.5 20'/></g></svg>"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect x='2' y='2' width='44' height='44' rx='13' fill='%230c100e'/><g fill='none' stroke='%233fd68f' stroke-width='4.2' stroke-linecap='round' stroke-linejoin='round'><path d='M11.5 37 L24 11 L36.5 37'/><path d='M17 27 L21.5 31.5 L31.5 20'/></g></svg>"
     />
   </head>
   <body>
-    <div class="layout">
-      <!-- Sidebar -->
-      <aside class="sidebar">
-        <div class="brand">
-          <span class="brand-glyph" aria-hidden="true">
-            <svg class="brand-logo" viewBox="0 0 48 48" width="30" height="30" fill="none"
+    <div class="shell">
+      <!-- ─── Control deck: the two primary actions + live vitals ─────────── -->
+      <header class="deck">
+        <div class="deck-row">
+          <div class="deck-brand">
+            <svg class="brand-logo" viewBox="0 0 48 48" width="32" height="32" fill="none"
               role="img" aria-label="AppliedIn">
               <rect class="lg-badge" x="2" y="2" width="44" height="44" rx="13" />
               <g class="lg-mark">
@@ -31,78 +31,181 @@
                 <path d="M17 27 L21.5 31.5 L31.5 20" />
               </g>
             </svg>
-          </span>
-          <span class="brand-name">AppliedIn</span>
+            <div class="brand-txt">
+              <span class="brand-name">AppliedIn</span>
+              <span class="brand-sub mono" id="env-pill">demo</span>
+            </div>
+            <span id="paused-pill" class="paused-pill mono" hidden>⏸ paused</span>
+          </div>
+
+          <div class="deck-actions">
+            <div class="disco" id="disco">
+              <button id="btn-discover" class="act act-discover"
+                title="Step 1 — scan the selected companies' job boards and queue new postings as “found”. Doesn't apply to anything.">
+                <span class="act-spin" aria-hidden="true"></span>
+                <svg class="act-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M15.8 15.8 L20.5 20.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+                <span class="act-label" id="discover-label">Discover · All</span>
+              </button>
+              <button id="btn-companies" class="act act-caret"
+                title="Choose which companies to scan"
+                aria-haspopup="true" aria-expanded="false" aria-label="Choose companies to scan">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                  <path d="M6 9.5 L12 15 L18 9.5" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+
+              <div id="copicker" class="copicker" hidden>
+                <div class="cp-head">
+                  <input id="cp-search" class="cp-search" type="search"
+                    placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="cp-tools">
+                  <button class="cp-lk" id="cp-all" type="button">Select all</button>
+                  <button class="cp-lk" id="cp-none" type="button">Clear</button>
+                  <span class="cp-state mono" id="cp-state">all</span>
+                </div>
+                <div class="cp-list" id="cp-list" aria-label="Companies"></div>
+                <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
+              </div>
+            </div>
+
+            <span class="act-arrow" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 12h15M14 6.5 19.5 12 14 17.5"/>
+              </svg>
+            </span>
+
+            <button id="btn-process" class="act act-process"
+              title="Step 2 — score + tailor every “found” job, then apply the ones that qualify.">
+              <span class="act-spin" aria-hidden="true"></span>
+              <svg class="act-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M13.2 2.8 5.4 13h5.4l-1.2 8.2L18.6 11h-5.5l.1-8.2z"
+                  stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+              <span class="act-label" id="process-label">Process applications</span>
+              <span class="act-badge mono" id="proc-badge" title="found jobs waiting to be processed">0</span>
+            </button>
+          </div>
+
+          <div class="deck-right">
+            <div class="deck-vitals">
+              <div class="vital" title="discovered jobs waiting for a Process run">
+                <span class="vital-n mono" id="v-wait">—</span>
+                <span class="vital-l">waiting</span>
+              </div>
+              <div class="vital" title="applications submitted today">
+                <span class="vital-n mono" id="v-cap">—</span>
+                <span class="vital-l">applied today</span>
+              </div>
+              <div class="vital" id="vital-needs" title="gated jobs waiting on your answer">
+                <span class="vital-n mono" id="v-needs">—</span>
+                <span class="vital-l">need you</span>
+              </div>
+            </div>
+
+            <div class="menu-wrap">
+              <button id="menu-btn" class="iconbtn" title="Settings"
+                aria-haspopup="true" aria-expanded="false" aria-label="Settings">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                  stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                  <path d="M4 7h9M19 7h1M4 12h2M12 12h8M4 17h11M21 17h-1"/>
+                  <circle cx="15.5" cy="7" r="2.1"/>
+                  <circle cx="8.5" cy="12" r="2.1"/>
+                  <circle cx="17.5" cy="17" r="2.1"/>
+                </svg>
+              </button>
+              <div id="menu" class="menu" hidden>
+                <div class="menu-t">Settings</div>
+                <button class="menu-item" id="m-pause"
+                  title="Pause/resume the background automation loops">
+                  <span>Automation loops</span>
+                  <span class="menu-state mono" id="m-pause-state">running</span>
+                </button>
+                <button class="menu-item" id="m-mode"
+                  title="gated: you approve each application · auto: applies by itself while you sleep">
+                  <span>Apply mode</span>
+                  <span class="menu-state mono" id="m-mode-state">gated</span>
+                </button>
+                <button class="menu-item" id="m-theme">
+                  <span>Theme</span>
+                  <span class="menu-state mono" id="m-theme-state">dark</span>
+                </button>
+                <div class="menu-div"></div>
+                <button class="menu-item danger" id="m-reset"
+                  title="Clears tracked jobs, queue, logs and stored artifacts. Keeps facts & logins.">
+                  <span>Reset pipeline…</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <nav class="nav" id="nav">
-          <a class="nav-item" data-route="live" href="#/live">
-            <span class="nav-ico">◉</span> Logs
-            <span class="nav-badge live-badge" id="nav-live-badge" hidden></span>
-          </a>
-          <a class="nav-item" data-route="pipeline" href="#/pipeline">
-            <span class="nav-ico">▤</span> Pipeline
-          </a>
-          <a class="nav-item" data-route="applications" href="#/applications">
-            <span class="nav-ico">≡</span> Applications
-          </a>
-          <a class="nav-item" data-route="review" href="#/review">
-            <span class="nav-ico">◈</span> Needs you
-            <span class="nav-badge" id="nav-review-badge" hidden></span>
-          </a>
-          <a class="nav-item" data-route="companies" href="#/companies">
-            <span class="nav-ico">◇</span> Companies
-          </a>
-          <a class="nav-item" data-route="answers" href="#/answers">
-            <span class="nav-ico">✎</span> Answer bank
-          </a>
-        </nav>
+        <p class="deck-help">
+          <b>Discover</b> finds new jobs from your company watchlist, then
+          <b>Process</b> scores them, tailors your résumé and applies.
+        </p>
+        <div class="deck-breakdown mono" id="breakdown"></div>
+        <div class="runbar" id="runbar" data-active="false" aria-hidden="true"></div>
+      </header>
 
-        <div class="sidebar-foot">
-          <button id="mode-btn" class="state-btn" data-mode="gated"
-            title="Apply mode — gated: you approve each · auto: applies while you sleep">
-            <span class="pip"></span><span id="mode-label">gated</span>
-          </button>
-          <button id="pipeline-toggle" class="state-btn" data-state="running">
-            <span class="pip"></span><span id="pipeline-label">running</span>
-          </button>
-          <button id="reset-btn" class="icon-btn" title="Reset pipeline data (keeps facts & logins)">⟲</button>
-          <button id="theme-btn" class="icon-btn" title="Toggle theme">◐</button>
-        </div>
-      </aside>
-
-      <!-- Main -->
-      <div class="main">
-        <header class="topbar">
-          <div class="crumb">
-            <span id="view-title">Pipeline</span>
-            <span id="view-desc" class="crumb-desc"></span>
+      <!-- ─── Board: work area + live activity ────────────────────────────── -->
+      <div class="board">
+        <main class="work">
+          <div class="workbar">
+            <nav class="tabs" id="tabs" aria-label="Views">
+              <button class="tab active" data-tab="pipeline">Pipeline</button>
+              <button class="tab" data-tab="apps">Applications
+                <span class="tab-n mono" id="tab-n-apps">0</span></button>
+              <button class="tab" data-tab="needs">Needs you
+                <span class="tab-n mono amber" id="tab-n-needs" hidden>0</span></button>
+              <button class="tab" data-tab="stuck">Unable to do it
+                <span class="tab-n mono red" id="tab-n-stuck" hidden>0</span></button>
+              <button class="tab" data-tab="logs">Logs
+                <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
+            </nav>
+            <div class="workbar-right">
+              <select id="co-filter" class="cofilter" title="Show one company only"
+                aria-label="Filter by company">
+                <option value="">All companies</option>
+              </select>
+              <input id="search" class="search" type="search"
+                placeholder="Search company or role…" autocomplete="off" spellcheck="false" />
+              <button id="refresh-btn" class="iconbtn" title="Refresh now" aria-label="Refresh">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <path d="M20 12a8 8 0 1 1-2.34-5.66"/>
+                  <path d="M20 4v4h-4"/>
+                </svg>
+              </button>
+            </div>
           </div>
-          <div class="topbar-right">
-            <input
-              id="search"
-              class="search"
-              type="search"
-              placeholder="search company or role…"
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <span id="clock" class="clock">--:--:--</span>
+          <section id="pane" class="pane"></section>
+        </main>
+
+        <aside class="feedpanel" aria-label="Live activity">
+          <div class="feed-head">
+            <span class="feed-dot" id="feed-dot" data-state="off"></span>
+            <span class="feed-title">Live activity</span>
+            <span class="feed-hint mono" id="feed-hint">connecting…</span>
           </div>
-        </header>
-
-        <main id="view" class="view"></main>
-
-        <footer class="foot">
-          <span id="foot-count">—</span>
-          <span class="foot-sep">/</span>
-          <span id="foot-updated">syncing…</span>
-          <span class="foot-env" id="foot-env">demo</span>
-        </footer>
+          <div id="feed" class="feed"></div>
+        </aside>
       </div>
+
+      <footer class="foot mono">
+        <span id="foot-count">—</span>
+        <span class="foot-sep">·</span>
+        <span id="foot-updated">syncing…</span>
+        <span class="foot-env" id="foot-env">demo</span>
+      </footer>
     </div>
 
-    <!-- Application detail drawer -->
+    <!-- ─── Application detail drawer ───────────────────────────────────── -->
     <div id="scrim" class="scrim" hidden></div>
     <aside id="drawer" class="drawer" hidden aria-label="Application detail">
       <div class="drawer-head">
@@ -110,18 +213,18 @@
           <div id="drawer-title" class="drawer-title">—</div>
           <div id="drawer-sub" class="drawer-sub">—</div>
         </div>
-        <button id="drawer-close" class="drawer-close" title="Close">✕</button>
+        <button id="drawer-close" class="drawer-close" title="Close" aria-label="Close">✕</button>
       </div>
       <div id="drawer-body" class="drawer-body"></div>
     </aside>
 
-    <!-- Résumé viewer -->
+    <!-- ─── Résumé viewer ───────────────────────────────────────────────── -->
     <div id="rmodal" class="rmodal" hidden>
       <div class="rmodal-bar">
-        <span id="rmodal-title" class="rmodal-title">résumé</span>
+        <span id="rmodal-title" class="rmodal-title mono">résumé</span>
         <div class="rmodal-actions">
           <a id="rmodal-download" class="btn" target="_blank" rel="noopener" href="#">Open PDF</a>
-          <button id="rmodal-close" class="drawer-close" title="Close">✕</button>
+          <button id="rmodal-close" class="drawer-close" title="Close" aria-label="Close">✕</button>
         </div>
       </div>
       <div id="rmodal-body" class="rmodal-body"></div>
