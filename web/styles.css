@@ -316,7 +316,7 @@ button:disabled { cursor: default; }
   padding: 2px 4px;
   border-radius: var(--r-sm);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.4;
 }
 .cp-item:hover .cp-skip, .cp-item.skipped .cp-skip { opacity: 1; }
 .cp-skip:hover { color: var(--fg); background: var(--card); }
