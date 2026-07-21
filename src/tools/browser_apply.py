@@ -761,13 +761,25 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         _emit(pk, "response", agent="browser", url=url,
                               detail=f"🔄 submit reset the form — refilling "
                                      f"{len(wiped)} wiped field(s)")
-                        await page.evaluate(_FILL_JS, fill_map)
-                        await page.wait_for_timeout(700)
-                        if choice_map:
-                            await _set_choices(page, choice_map, pk, url)
-                        if combos:
-                            await _fix_fields(page, combos, pk, url)
-                        await _click_fields_pass(page, pk, url)
+
+                        # Same hard ceiling as the finalize path: a page mid-
+                        # navigation can block evaluate() forever.
+                        async def _refill_all() -> None:
+                            await page.evaluate(_FILL_JS, fill_map)
+                            await page.wait_for_timeout(700)
+                            if choice_map:
+                                await _set_choices(page, choice_map, pk, url)
+                            if combos:
+                                await _fix_fields(page, combos, pk, url)
+                            await _click_fields_pass(page, pk, url)
+                        try:
+                            await asyncio.wait_for(_refill_all(), timeout=150)
+                        except TimeoutError:
+                            log.warning("refill after form reset timed out — resubmitting anyway")
+                        except Exception as exc:
+                            if _page_gone(exc):
+                                raise
+                            log.warning("refill after form reset failed (%s) — resubmitting", exc)
                         continue
                 errors = await page.evaluate(_ERRORS_JS)
                 if not errors:
@@ -1629,17 +1641,32 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                 else:
                     text_fix[f["label"]] = v
             if len(text_fix) + len(choice_fix2) + len(combo_fix) >= 2:
+                import asyncio as _aio
+
                 _emit(pk, "response", agent="browser", url=url,
                       detail=f"🔄 submit reset the form — restoring "
                              f"{len(text_fix) + len(choice_fix2) + len(combo_fix)} field(s)")
-                if text_fix:
-                    await page.evaluate(_FILL_JS, text_fix)
-                    await page.wait_for_timeout(700)
-                if choice_fix2:
-                    await _set_choices(page, choice_fix2, pk, url)
-                if combo_fix:
-                    await _fix_fields(page, combo_fix, pk, url)
-                await _click_fields_pass(page, pk, url)
+
+                # HARD ceiling: evaluate() on a page that is mid-navigation
+                # (Lever reloads on submit) can block forever and wedge the
+                # whole apply lane — a timed-out restore just resubmits.
+                async def _restore() -> None:
+                    if text_fix:
+                        await page.evaluate(_FILL_JS, text_fix)
+                        await page.wait_for_timeout(700)
+                    if choice_fix2:
+                        await _set_choices(page, choice_fix2, pk, url)
+                    if combo_fix:
+                        await _fix_fields(page, combo_fix, pk, url)
+                    await _click_fields_pass(page, pk, url)
+                try:
+                    await _aio.wait_for(_restore(), timeout=150)
+                except TimeoutError:
+                    log.warning("restore after form reset timed out — resubmitting anyway")
+                except Exception as exc:
+                    if _page_gone(exc):
+                        raise
+                    log.warning("restore after form reset failed (%s) — resubmitting", exc)
                 continue
         errors = await page.evaluate(_ERRORS_JS)
         if not errors or attempt >= 2:
