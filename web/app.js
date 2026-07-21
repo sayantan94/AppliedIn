@@ -178,11 +178,18 @@ const pickedAll = () =>
 const discoverScope = () => (pickedAll() ? [] : [...state.picked]);
 
 function renderDiscoverLabel() {
+  // ONE company selection scopes BOTH actions: Discover scans just the picked
+  // companies, and Process runs the pipeline on just their discovered jobs.
   const el = $("#discover-label");
-  if (state.stats.discovering) { el.textContent = "Discovering…"; return; }
-  el.textContent = pickedAll()
+  if (state.stats.discovering) el.textContent = "Discovering…";
+  else el.textContent = pickedAll()
     ? "Discover · All"
     : `Discover · ${state.picked.size} selected`;
+  const pl = $("#process-label");
+  if (state.stats.processing) pl.textContent = "Processing…";
+  else pl.textContent = pickedAll()
+    ? "Process applications"
+    : `Process · ${state.picked.size} selected`;
 }
 
 function renderPicker() {
@@ -209,8 +216,8 @@ function renderPickerState() {
   const n = state.picked.size, total = state.companies.length;
   $("#cp-state").textContent = pickedAll() ? `all ${total}` : `${n} of ${total}`;
   $("#cp-foot").innerHTML = pickedAll()
-    ? `Next discovery scans the <b>whole watchlist</b>${total ? ` (${total} companies)` : ""}.`
-    : `Next discovery scans <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`;
+    ? `Discover + Process run on the <b>whole watchlist</b>${total ? ` (${total} companies)` : ""}.`
+    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`;
 }
 
 function renderDeck() {
@@ -240,7 +247,7 @@ function renderDeck() {
   renderDiscoverLabel();
   proc.disabled = !!s.processing;
   proc.classList.toggle("running", !!s.processing);
-  $("#process-label").textContent = s.processing ? "Processing…" : "Process applications";
+  renderDiscoverLabel();  // both action labels reflect run-state + company scope
   const badge = $("#proc-badge");
   badge.textContent = waiting;
   badge.classList.toggle("zero", !waiting);
@@ -817,13 +824,15 @@ async function runDiscover() {
 async function runProcess() {
   if (demoGuard() || state.stats.processing) return;
   const n = state.stats.found_waiting ?? 0;
+  const scope = discoverScope();  // same picked companies as Discover
   state.stats.processing = true;    // optimistic; poll confirms
   renderDeck();
-  const d = await post("/actions/process");
+  const d = await post("/actions/process", { companies: scope });
   if (d && d.status === "already_running") toast("A processing run is already going.");
-  else if (d && d.ok) toast(n
-    ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
-    : "Processing run started.");
+  else if (d && d.ok) toast(scope.length
+    ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · apply.`
+    : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
+        : "Processing run started.");
   else if (!d) { state.stats.processing = false; renderDeck(); }
   pollStats();
 }
@@ -1128,6 +1137,27 @@ function wire() {
     state.picked.clear();
     renderPicker(); renderDiscoverLabel();
   });
+  // Add a company to the watchlist from the picker; the finder resolves its
+  // ATS on the first discovery. The new company starts picked so "add → run
+  // on just this one" is two clicks.
+  const addCompany = async () => {
+    if (demoGuard()) return;
+    const name = $("#cp-add-name").value.trim();
+    if (!name) { toast("Give the company a name first."); return; }
+    const d = await post("/actions/watchlist",
+                         { name, careers_url: $("#cp-add-url").value.trim() });
+    if (d && d.ok) {
+      $("#cp-add-name").value = ""; $("#cp-add-url").value = "";
+      await loadCompanies();
+      state.picked.add(name);
+      renderPicker(); renderDiscoverLabel();
+      toast(`${name} added to the watchlist — and selected.`);
+    } else if (d) toast(d.error || "Could not add the company.");
+  };
+  $("#cp-add-btn").addEventListener("click", addCompany);
+  $("#cp-add-url").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
+  $("#cp-add-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
+
   $("#cp-list").addEventListener("change", (e) => {
     const cb = e.target;
     if (!cb.matches('input[type="checkbox"]')) return;

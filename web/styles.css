@@ -306,6 +306,22 @@ button:disabled { cursor: default; }
   background: var(--card);
 }
 .cp-foot b { color: var(--fg); font-weight: 600; }
+.cp-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  background: var(--card);
+}
+.cp-add .cp-search { flex: 1; min-width: 0; }
+.cp-add-btn {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+}
+.cp-add-btn:hover { text-decoration: none; border-color: var(--scan); }
 
 /* vitals cluster */
 .deck-right { display: flex; align-items: center; gap: 16px; }

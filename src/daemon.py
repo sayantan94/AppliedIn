@@ -166,10 +166,13 @@ def run_discovery_once(only: list[str] | None = None) -> dict:
     return result
 
 
-def process_backlog_once() -> dict:
+def process_backlog_once(companies: list | None = None) -> dict:
     """One on-demand pass over the discovered backlog (the UI 'Process
     applications' button): score + tailor EVERY waiting `found` job, then apply
     everything that qualifies — _APPLY_LANES at a time, up to the daily cap.
+    ``companies`` (names, case-insensitive) scopes the pass to just those
+    companies' jobs — everything else stays untouched in the backlog/queue for a
+    later run. None/empty = the whole backlog.
     Self-contained (does its own draining), so it works whether or not the 24/7
     loops are running. Blocking — run it in a background thread."""
     import asyncio
@@ -180,11 +183,15 @@ def process_backlog_once() -> dict:
     from tools.browser_apply import set_profile_override
 
     stores = make_stores()
+    sel = {c.strip().lower() for c in (companies or []) if c and c.strip()}
 
     # 1) EVALUATE — score + tailor every waiting `found` job. Qualifying jobs are
     #    enqueued to the apply queue by run_job; low scorers are skipped there.
     found = [r for r in stores.tracking.query_status(Status.FOUND)
              if not str(r.get("pk", "")).startswith("meta#")]
+    if sel:
+        found = [r for r in found
+                 if (r.get("company") or "").strip().lower() in sel]
     evaluated = 0
     for row in found:
         try:
@@ -223,6 +230,19 @@ def process_backlog_once() -> dict:
         items = stores.queue.drain(stores.apply_queue)
         if not items:
             break
+        if sel:
+            # Scoped run: apply only the selected companies' jobs; everything
+            # else goes straight back on the queue for a later (or full) pass.
+            keep, defer = [], []
+            for it in items:
+                row = stores.tracking.get(it.get("pk", "")) or {}
+                (keep if (row.get("company") or "").strip().lower() in sel
+                 else defer).append(it)
+            for it in defer:
+                stores.queue.enqueue(stores.apply_queue, it)
+            if not keep:
+                break  # only out-of-scope jobs remain — leave them queued
+            items = keep
         batch = items[:_APPLY_LANES]
         for rest in items[_APPLY_LANES:]:
             stores.queue.enqueue(stores.apply_queue, rest)  # persist the overflow

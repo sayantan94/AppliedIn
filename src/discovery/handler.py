@@ -108,6 +108,46 @@ def list_watchlist_companies() -> list[str]:
     return [c.name for c in load_watchlist(config_dir / "watchlist.yaml")]
 
 
+def add_watchlist_company(name: str, careers_url: str = "") -> dict:
+    """Append a company to watchlist.yaml (the dashboard's 'Add company').
+
+    Appends a properly-quoted YAML entry (mode: gated — new portals always start
+    gated) and round-trips the file through the loader afterwards; if the write
+    somehow broke parsing, the original file is restored and an error returned.
+    ats/board stay unset — the finder auto-resolves them on the first discover,
+    same as any hand-added entry."""
+    import yaml as _yaml
+
+    name = (name or "").strip()
+    careers_url = (careers_url or "").strip()
+    if not name:
+        return {"ok": False, "error": "Company name is required."}
+    if careers_url and not careers_url.lower().startswith(("http://", "https://")):
+        careers_url = "https://" + careers_url
+    path = Path(get_settings().config_dir) / "watchlist.yaml"
+    existing = load_watchlist(path)
+    if any(c.name.strip().lower() == name.lower() for c in existing):
+        return {"ok": False, "error": f"{name} is already on the watchlist."}
+
+    entry: dict = {"name": name}
+    if careers_url:
+        entry["careers_url"] = careers_url
+    entry["mode"] = "gated"
+    block = _yaml.safe_dump([entry], default_flow_style=False,
+                            sort_keys=False, allow_unicode=True)
+    original = path.read_text()
+    with path.open("a") as f:
+        f.write("\n" + "".join(f"  {ln}\n" for ln in block.splitlines()))
+    try:
+        load_watchlist(path)  # round-trip: the file must still parse
+    except Exception as exc:
+        path.write_text(original)
+        log.error("add_watchlist_company: entry broke the yaml (%s) — restored", exc)
+        return {"ok": False, "error": "Could not add the company (bad characters?)."}
+    log.info("watchlist: added %s (%s)", name, careers_url or "no careers URL yet")
+    return {"ok": True, "companies": list_watchlist_companies()}
+
+
 def run_discovery(only: list[str] | None = None) -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
 

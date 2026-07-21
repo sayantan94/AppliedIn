@@ -282,8 +282,14 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
         "and finish your response with exactly:"
         "  MISSING: <the field's QUESTION or LABEL text — never its placeholder like "
         "'Start typing…'>\n"
-        "- If the portal requires creating an account, or shows a CAPTCHA challenge "
-        "you would have to solve, STOP and finish with:  BLOCKED: <reason>\n"
+        "- If a sign-in wall says it EMAILED a verification code to the candidate, "
+        "call fetch_email_code and type the code it returns (NO_CODE → wait ~20s, "
+        "retry once). Only a code sent by SMS / an authenticator app / a trusted "
+        "device is a hard blocker.\n"
+        "- If the portal requires creating an account, shows a CAPTCHA challenge "
+        "you would have to solve, or wants a verification code you cannot fetch "
+        "(SMS / authenticator / trusted device), STOP and finish with:  "
+        "BLOCKED: <reason>\n"
         "- BEFORE submitting, call verify_form_filled — dynamic forms silently wipe "
         "fields when they re-render, so never trust that a field you typed earlier "
         "still holds its value. If it reports an empty REQUIRED field, re-fill that "
@@ -533,8 +539,8 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             we never pull you into a live window unless you're truly required."""
             if not (headed and get_settings().assist_captcha):
                 return res
-            if res.get("reason") not in ("captcha", "no_account"):
-                return res  # not a must → don't block on you; surface it on the board
+            if res.get("reason") not in ("captcha", "no_account", "unknown_field"):
+                return res  # not actionable in a window — surface it on the board
             conf = await _assist_wait(page, pk, url, res.get("question", ""),
                                       res.get("reason", ""))
             if not conf:
@@ -930,7 +936,9 @@ async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
 
     from core.config import get_settings
 
-    secs = int(getattr(get_settings(), "assist_wait_seconds", 240))
+    # No expiry by owner request: the window stays open and watched (6h horizon
+    # as a leak backstop) — closing the window is how the human releases it.
+    secs = int(getattr(get_settings(), "assist_wait_seconds", 21600))
     if reason == "captcha":
         ask = "solve the CAPTCHA and click Submit"
     elif note:
@@ -938,8 +946,9 @@ async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
     else:
         ask = "finish anything the form still needs and click Submit"
     _emit(pk, "gate", agent="applier", url=url,
-          detail=f"🙋 Over to you: the application is filled in the open browser "
-                 f"window — {ask}. Watching for confirmation for up to {secs // 60} min…")
+          detail=f"🙋 Over to you: the application is filled in the open Chrome "
+                 f"window — {ask}. No rush: the window stays open and I'll watch "
+                 f"until you finish (or close it).")
     try:
         await page.bring_to_front()
     except Exception:
@@ -1599,6 +1608,39 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                          if m.group(0).lower() in ln.lower()), m.group(0))
             return {"status": "applied", "confirmation": line[:120], "screenshot_b64": shot,
                     "drafted": drafted or None, "fields": _ui_fields(state)}
+        # Server-validated portals (classic Lever) RELOAD the page on a rejected
+        # submit, wiping EVERY field — even ones that were fine. Rebuild a fix
+        # map for ALL empty required fields from the facts and restore text,
+        # choices AND combos, then loop to resubmit; without this the terminal
+        # gate blames fields we actually had answers for.
+        if attempt < 2:
+            empty_now = [f for f in state if f.get("required") and not f.get("value")
+                         and f.get("type") not in ("file",)]
+            text_fix, choice_fix2, combo_fix = {}, {}, {}
+            for f in empty_now:
+                hit = _fact_for(f.get("label", ""), facts)
+                if not hit:
+                    continue
+                _, v = hit
+                if f.get("type") == "choice-group":
+                    choice_fix2[f["label"]] = v
+                elif f.get("combo"):
+                    combo_fix[f["label"]] = v
+                else:
+                    text_fix[f["label"]] = v
+            if len(text_fix) + len(choice_fix2) + len(combo_fix) >= 2:
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"🔄 submit reset the form — restoring "
+                             f"{len(text_fix) + len(choice_fix2) + len(combo_fix)} field(s)")
+                if text_fix:
+                    await page.evaluate(_FILL_JS, text_fix)
+                    await page.wait_for_timeout(700)
+                if choice_fix2:
+                    await _set_choices(page, choice_fix2, pk, url)
+                if combo_fix:
+                    await _fix_fields(page, combo_fix, pk, url)
+                await _click_fields_pass(page, pk, url)
+                continue
         errors = await page.evaluate(_ERRORS_JS)
         if not errors or attempt >= 2:
             break
@@ -1641,6 +1683,18 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                     "drafted": drafted or None, "fields": _ui_fields(st)}
     if empty_req:
         labels = [f["label"] for f in empty_req]
+        # The gate says "in the window" — so actually HOLD the window open (no
+        # expiry) and watch for the human to finish, instead of killing it and
+        # pointing at a window that no longer exists.
+        if headed and get_settings().assist_captcha:
+            conf = await _assist_wait(
+                page, pk, url,
+                "set " + "; ".join(l[:60] for l in labels[:4]), "")
+            if conf:
+                st = await page.evaluate(_READ_FORM_JS)
+                return {"status": "applied", "confirmation": conf,
+                        "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
+                        "drafted": drafted or None, "fields": _ui_fields(st)}
         return {"status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
                 "drafted": drafted or None, "fields": _ui_fields(state),
                 "question": "Set these and submit in the window: " + "; ".join(labels[:5])}
@@ -1837,6 +1891,33 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
         _emit(pk, "response", agent="writer", url=url,
               detail=f"drafted answer → {question[:70]}")
         return ActionResult(extracted_content=answer, include_in_memory=True)
+
+    @controller.registry.action(
+        "Fetch a login/verification code the portal JUST EMAILED to the candidate. "
+        "Call this when a sign-in wall says it emailed a code (check the wall's own "
+        "words). Returns the digits to type, or NO_CODE when nothing has arrived — "
+        "then wait ~20 seconds and call it ONCE more. Codes sent by SMS, an "
+        "authenticator app, or to a trusted device ('sent to your Apple devices') "
+        "can NEVER be fetched — report those as BLOCKED instead.")
+    async def fetch_email_code() -> ActionResult:
+        import asyncio
+
+        from core.stores import make_stores
+        from tools.gmail import fetch_code
+
+        try:
+            code = await asyncio.to_thread(
+                fetch_code,
+                'newer_than:1h (verification OR verify OR code OR passcode OR "one-time")',
+                make_stores().secrets)
+        except Exception as exc:
+            log.warning("fetch_email_code failed: %s", exc)
+            code = None
+        _emit(pk, "response", agent="browser", url=url,
+              detail=("📧 fetched an emailed verification code" if code
+                      else "📧 no fresh verification code in the inbox"))
+        return ActionResult(extracted_content=code or "NO_CODE",
+                            include_in_memory=True)
 
     @controller.registry.action(
         "Fill MANY form fields in ONE shot. Pass fields_json: a JSON object ENCODED "

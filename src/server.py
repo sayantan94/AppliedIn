@@ -137,6 +137,14 @@ def create_app() -> FastAPI:
         from discovery.handler import list_watchlist_companies
         return {"companies": list_watchlist_companies()}
 
+    @app.post("/actions/watchlist")
+    def watchlist_add(body: dict):
+        """Add a company to the watchlist (name + optional careers URL). The
+        finder auto-resolves its ATS/board on the first discovery run."""
+        from discovery.handler import add_watchlist_company
+        return add_watchlist_company((body or {}).get("name", ""),
+                                     (body or {}).get("careers_url", ""))
+
     @app.post("/actions/discover")
     def discover(background: BackgroundTasks, body: dict | None = None):
         """Run ONE discovery cycle now — find + enqueue new jobs as `found`.
@@ -163,17 +171,21 @@ def create_app() -> FastAPI:
                 "companies": only or "all"}
 
     @app.post("/actions/process")
-    def process(background: BackgroundTasks):
+    def process(background: BackgroundTasks, body: dict | None = None):
         """Process the discovered backlog now — score + tailor every `found` job,
-        then apply the ones that qualify (up to the daily cap). One full pass."""
+        then apply the ones that qualify (up to the daily cap). One full pass.
+        Body may carry {companies:[names]} to run the pass on JUST those
+        companies' jobs — the rest of the backlog stays untouched for later."""
         if _RUNNING["process"]:
             return {"ok": False, "status": "already_running"}
+        companies = [c for c in ((body or {}).get("companies") or [])
+                     if isinstance(c, str) and c.strip()]
 
         def _run() -> None:
             from daemon import process_backlog_once
             _RUNNING["process"] = True
             try:
-                process_backlog_once()
+                process_backlog_once(companies=companies)
             except Exception:  # noqa: BLE001
                 import logging
                 logging.getLogger("server").exception("manual process failed")
@@ -181,7 +193,7 @@ def create_app() -> FastAPI:
                 _RUNNING["process"] = False
 
         background.add_task(_run)
-        return {"ok": True, "status": "processing"}
+        return {"ok": True, "status": "processing", "companies": companies}
 
     @app.post("/actions/resume/{pk}")
     def resume(pk: str, body: dict, background: BackgroundTasks):
