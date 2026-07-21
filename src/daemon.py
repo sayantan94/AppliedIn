@@ -182,16 +182,24 @@ def process_backlog_once(companies: list | None = None) -> dict:
     from core.models import Status
     from tools.browser_apply import set_profile_override
 
+    from core import flags as _flags
+
     stores = make_stores()
     sel = {c.strip().lower() for c in (companies or []) if c and c.strip()}
+    # Un-scoped runs honor the owner's per-company skip toggles; an explicit
+    # selection overrides a skip (picking a skipped company means it).
+    skipped = set() if sel else _flags.skipped_companies()
+
+    def _in_scope(company: str) -> bool:
+        n = (company or "").strip().lower()
+        return (n in sel) if sel else (n not in skipped)
 
     # 1) EVALUATE — score + tailor every waiting `found` job. Qualifying jobs are
     #    enqueued to the apply queue by run_job; low scorers are skipped there.
     found = [r for r in stores.tracking.query_status(Status.FOUND)
              if not str(r.get("pk", "")).startswith("meta#")]
-    if sel:
-        found = [r for r in found
-                 if (r.get("company") or "").strip().lower() in sel]
+    if sel or skipped:
+        found = [r for r in found if _in_scope(r.get("company"))]
     evaluated = 0
     for row in found:
         try:
@@ -230,14 +238,13 @@ def process_backlog_once(companies: list | None = None) -> dict:
         items = stores.queue.drain(stores.apply_queue)
         if not items:
             break
-        if sel:
-            # Scoped run: apply only the selected companies' jobs; everything
-            # else goes straight back on the queue for a later (or full) pass.
+        if sel or skipped:
+            # Scoped/skip-filtered run: apply only in-scope companies' jobs;
+            # everything else goes straight back on the queue for a later pass.
             keep, defer = [], []
             for it in items:
                 row = stores.tracking.get(it.get("pk", "")) or {}
-                (keep if (row.get("company") or "").strip().lower() in sel
-                 else defer).append(it)
+                (keep if _in_scope(row.get("company")) else defer).append(it)
             for it in defer:
                 stores.queue.enqueue(stores.apply_queue, it)
             if not keep:

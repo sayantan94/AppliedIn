@@ -317,6 +317,12 @@ _SUCCESS_RX = (r"thank you|application (has been |was )?submitted|submitted succ
 _LIMIT_RX = (r"reached your application limit|application limit|already applied"
              r"|already submitted an application|limit applications|maximum number of applications")
 
+# Lever's anti-bot tripwire: "Your application submission was flagged as possible
+# spam. If you believe this was a mistake, please submit your application again."
+# A plain resubmit clears it (the owner confirmed clicking retry works) — so we
+# retry within the attempt budget instead of gating.
+_SPAM_RX = r"flagged as (possible |potential )?spam|please submit your application again"
+
 
 def _fallback_identity() -> dict:
     """The owner's SECOND profile — an alternate email + phone used to re-submit
@@ -737,6 +743,16 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                     return {"status": "failed", "reason": "application_limit",
                             "detail": f"The portal blocked this application (limit reached): "
                                       f"{line[:180]}.{note}",
+                            "screenshot_b64": shot, "drafted": drafted or None,
+                            "fields": _ui_fields(state)}
+                if _re.search(_SPAM_RX, body, _re.I):
+                    if attempt < _MAX_SUBMITS - 1:
+                        _emit(pk, "response", agent="browser", url=url,
+                              detail="⚠️ portal flagged the submit as possible spam — resubmitting")
+                        continue
+                    return {"status": "uncertain",
+                            "detail": "The portal kept flagging the submission as possible "
+                                      "spam — hit Retry on the board in a little while.",
                             "screenshot_b64": shot, "drafted": drafted or None,
                             "fields": _ui_fields(state)}
                 m = _re.search(_SUCCESS_RX, body, _re.I)
@@ -1614,6 +1630,16 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                     "detail": f"The portal blocked this application (limit reached): "
                               f"{line[:180]}.{note}",
                     "drafted": drafted or None, "fields": _ui_fields(state)}
+        if _re.search(_SPAM_RX, body, _re.I):
+            if attempt < 2:
+                _emit(pk, "response", agent="browser", url=url,
+                      detail="⚠️ portal flagged the submit as possible spam — resubmitting")
+                continue
+            return {"status": "uncertain",
+                    "detail": "The portal kept flagging the submission as possible spam — "
+                              "hit Retry on the board in a little while.",
+                    "screenshot_b64": shot, "drafted": drafted or None,
+                    "fields": _ui_fields(state)}
         m = _re.search(_SUCCESS_RX, body, _re.I)
         if m:
             line = next((ln.strip() for ln in body.splitlines()

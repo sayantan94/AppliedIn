@@ -297,6 +297,31 @@ button:disabled { cursor: default; }
   margin: 0;
   cursor: pointer;
 }
+.cp-name {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  cursor: pointer;
+}
+.cp-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-skip {
+  flex: none;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  opacity: 0;
+}
+.cp-item:hover .cp-skip, .cp-item.skipped .cp-skip { opacity: 1; }
+.cp-skip:hover { color: var(--fg); background: var(--card); }
+.cp-item.skipped .cp-name span { text-decoration: line-through; color: var(--faint); }
+.cp-skipnote { color: var(--faint); }
 .cp-none { padding: 16px 12px; font-size: 12.5px; color: var(--faint); text-align: center; }
 .cp-foot {
   border-top: 1px solid var(--border);

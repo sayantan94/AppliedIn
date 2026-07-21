@@ -169,6 +169,18 @@ def run_discovery(only: list[str] | None = None) -> dict:
         companies = [c for c in companies if c.name.strip().lower() in wanted]
         log.info("discovery scoped to %d/%s companies: %s",
                  len(companies), "all", ", ".join(c.name for c in companies) or "(none matched)")
+    else:
+        # Un-scoped run: honor the owner's skip toggles. An explicit pick
+        # (`only`) overrides a skip — checking a skipped company means it.
+        from core import flags as _flags
+        skipped = _flags.skipped_companies()
+        if skipped:
+            before = len(companies)
+            companies = [c for c in companies
+                         if c.name.strip().lower() not in skipped]
+            if before != len(companies):
+                log.info("discovery: excluding %d skipped company(ies)",
+                         before - len(companies))
 
     total = crawl_total = 0
     crawl_companies: list[CompanyConfig] = []

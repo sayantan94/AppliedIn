@@ -51,5 +51,30 @@ def apply_mode() -> str:
     return mode if mode in ("gated", "auto") else "gated"
 
 
+def skipped_companies() -> set:
+    """Companies (lowercase names) the owner excluded via the picker's skip
+    toggles. Skipped companies sit out discovery AND processing whenever the
+    run is un-scoped; explicitly picking one in the UI overrides the skip."""
+    import json
+
+    try:
+        return {str(x).strip().lower()
+                for x in json.loads(get_flag("skip_companies", "[]") or "[]") if x}
+    except Exception:
+        return set()
+
+
+def set_company_skip(name: str, skip: bool) -> set:
+    """Flip one company's skip state; returns the updated skip set."""
+    import json
+
+    cur = skipped_companies()
+    key = (name or "").strip().lower()
+    if key:
+        (cur.add if skip else cur.discard)(key)
+    set_flag("skip_companies", json.dumps(sorted(cur)))
+    return cur
+
+
 def paused() -> bool:
     return get_flag("paused", "no") == "yes"

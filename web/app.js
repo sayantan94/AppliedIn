@@ -25,6 +25,7 @@ const state = {
   coFilter: "",       // board filter: show one company only ("" = all)
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
+  skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
   coQuery: "",        // search inside the company picker
   mode: "gated",
   paused: false,
@@ -201,9 +202,17 @@ function renderPicker() {
     const q = state.coQuery.trim().toLowerCase();
     const rows = state.companies
       .filter((c) => !q || c.toLowerCase().includes(q))
-      .map((c) => `<label class="cp-item">
-          <input type="checkbox" value="${esc(c)}" ${state.picked.has(c) ? "checked" : ""}>
-          <span>${esc(c)}</span></label>`)
+      .map((c) => {
+        const sk = state.skipped.has(c.toLowerCase());
+        return `<div class="cp-item ${sk ? "skipped" : ""}">
+          <label class="cp-name">
+            <input type="checkbox" value="${esc(c)}" ${state.picked.has(c) ? "checked" : ""}>
+            <span>${esc(c)}</span></label>
+          <button class="cp-skip" type="button" data-name="${esc(c)}" data-skip="${sk ? 0 : 1}"
+            title="${sk ? "Bring this company back into Discover + Process"
+                        : "Skip this company — Discover + Process pass over it"}">${sk ? "↺" : "⊘"}</button>
+        </div>`;
+      })
       .join("");
     list.innerHTML = rows || `<div class="cp-none">No companies match “${esc(state.coQuery)}”.</div>`;
   }
@@ -215,9 +224,11 @@ function renderPicker() {
 function renderPickerState() {
   const n = state.picked.size, total = state.companies.length;
   $("#cp-state").textContent = pickedAll() ? `all ${total}` : `${n} of ${total}`;
-  $("#cp-foot").innerHTML = pickedAll()
-    ? `Discover + Process run on the <b>whole watchlist</b>${total ? ` (${total} companies)` : ""}.`
-    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`;
+  const sk = state.skipped.size;
+  const skNote = sk ? ` <span class="cp-skipnote">· ${sk} skipped</span>` : "";
+  $("#cp-foot").innerHTML = (pickedAll()
+    ? `Discover + Process run on the <b>whole watchlist</b>${total ? ` (${total - sk} of ${total} companies)` : ""}.`
+    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`) + skNote;
 }
 
 function renderDeck() {
@@ -749,6 +760,7 @@ async function loadCompanies() {
     try {
       const r = await fetch(api("/companies"), { headers: auth.header() }).then((r) => r.json());
       state.companies = Array.isArray(r.companies) ? r.companies : [];
+      state.skipped = new Set((r.skipped || []).map((s) => String(s).toLowerCase()));
     } catch { /* backend away — fall back below */ }
     if (!state.companies.length) {
       state.companies = [...new Set(state.apps.map((a) => a.company).filter(Boolean))];
@@ -1158,6 +1170,18 @@ function wire() {
   $("#cp-add-url").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
   $("#cp-add-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
 
+  $("#cp-list").addEventListener("click", async (e) => {
+    const b = e.target.closest(".cp-skip");
+    if (!b || demoGuard()) return;
+    const name = b.dataset.name, skip = b.dataset.skip === "1";
+    const d = await post("/actions/skip-company", { name, skip });
+    if (d && d.ok) {
+      state.skipped = new Set((d.skipped || []).map((s) => String(s).toLowerCase()));
+      renderPicker(); renderDiscoverLabel();
+      toast(skip ? `${name} skipped — un-scoped runs pass over it.`
+                 : `${name} is back in rotation.`);
+    }
+  });
   $("#cp-list").addEventListener("change", (e) => {
     const cb = e.target;
     if (!cb.matches('input[type="checkbox"]')) return;
