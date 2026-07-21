@@ -176,6 +176,20 @@
                 <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
             </nav>
             <div class="workbar-right">
+              <div class="skipmgr" id="skipmgr">
+                <button id="btn-skips" class="skipbtn" aria-haspopup="true" aria-expanded="false"
+                  title="Choose companies Discover + Process should skip">⊘ Skip companies<span
+                    id="skip-count" class="skip-count mono" hidden>0</span></button>
+                <div id="skippicker" class="copicker skippicker" hidden>
+                  <div class="cp-head">
+                    <input id="sp-search" class="cp-search" type="search"
+                      placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div class="cp-list" id="sp-list" aria-label="Skip companies"></div>
+                  <div class="cp-foot">Checked = <b>skipped</b> — Discover + Process pass over
+                    them. Uncheck to bring a company back.</div>
+                </div>
+              </div>
               <select id="co-filter" class="cofilter" title="Show one company only"
                 aria-label="Filter by company">
                 <option value="">All companies</option>

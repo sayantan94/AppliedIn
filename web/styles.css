@@ -322,6 +322,43 @@ button:disabled { cursor: default; }
 .cp-skip:hover { color: var(--fg); background: var(--card); }
 .cp-item.skipped .cp-name span { text-decoration: line-through; color: var(--faint); }
 .cp-skipnote { color: var(--faint); }
+
+/* Dedicated toolbar control: the first-class "Skip companies" manager. */
+.skipmgr { position: relative; display: inline-flex; }
+.skipbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.skipbtn:hover { border-color: var(--border-2); color: var(--fg); }
+.skipbtn.on {
+  color: var(--run);
+  border-color: color-mix(in srgb, var(--run) 45%, transparent);
+  background: color-mix(in srgb, var(--run) 8%, var(--card));
+}
+.skip-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--run) 18%, transparent);
+  color: var(--run);
+}
+.skippicker { left: auto; right: 0; }
+.sp-item input { accent-color: var(--run); }
+.sp-item.skipped span { text-decoration: line-through; color: var(--faint); }
 .cp-none { padding: 16px 12px; font-size: 12.5px; color: var(--faint); text-align: center; }
 .cp-foot {
   border-top: 1px solid var(--border);

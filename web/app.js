@@ -231,6 +231,25 @@ function renderPickerState() {
     : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`) + skNote;
 }
 
+function renderSkipPicker() {
+  const list = $("#sp-list");
+  if (!list) return;
+  const q = (state.spQuery || "").trim().toLowerCase();
+  const rows = state.companies
+    .filter((c) => !q || c.toLowerCase().includes(q))
+    .map((c) => {
+      const sk = state.skipped.has(c.toLowerCase());
+      return `<label class="cp-item sp-item ${sk ? "skipped" : ""}">
+        <input type="checkbox" value="${esc(c)}" ${sk ? "checked" : ""}>
+        <span>${esc(c)}</span></label>`;
+    }).join("");
+  list.innerHTML = rows || `<div class="cp-none">No companies match.</div>`;
+  const n = state.skipped.size, badge = $("#skip-count");
+  if (badge) { badge.hidden = !n; badge.textContent = n; }
+  const b = $("#btn-skips");
+  if (b) b.classList.toggle("on", n > 0);
+}
+
 function renderDeck() {
   const s = state.stats || {};
   const c = s.counts_by_status || {};
@@ -768,6 +787,7 @@ async function loadCompanies() {
   }
   state.picked = new Set([...state.picked].filter((c) => state.companies.includes(c)));
   renderPicker();
+  renderSkipPicker();
   renderDiscoverLabel();
 }
 
@@ -1177,7 +1197,7 @@ function wire() {
     const d = await post("/actions/skip-company", { name, skip });
     if (d && d.ok) {
       state.skipped = new Set((d.skipped || []).map((s) => String(s).toLowerCase()));
-      renderPicker(); renderDiscoverLabel();
+      renderPicker(); renderSkipPicker(); renderDiscoverLabel();
       toast(skip ? `${name} skipped — un-scoped runs pass over it.`
                  : `${name} is back in rotation.`);
     }
@@ -1195,6 +1215,41 @@ function wire() {
     state.tab = t.dataset.tab;
     renderTabs();
     renderPane();
+  });
+
+  const sp = $("#skippicker"), spBtn = $("#btn-skips");
+  const closeSp = () => {
+    if (sp.hidden) return;
+    sp.hidden = true;
+    spBtn.setAttribute("aria-expanded", "false");
+  };
+  spBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = sp.hidden;
+    sp.hidden = !show;
+    spBtn.setAttribute("aria-expanded", String(show));
+    if (show) { renderSkipPicker(); $("#sp-search").focus(); }
+  });
+  sp.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", (e) => {
+    if (!sp.hidden && !e.target.closest(".skipmgr")) closeSp();
+  });
+  $("#sp-search").addEventListener("input", (e) => {
+    state.spQuery = e.target.value;
+    renderSkipPicker();
+  });
+  $("#sp-list").addEventListener("change", async (e) => {
+    const cb = e.target;
+    if (!cb.matches('input[type="checkbox"]')) return;
+    if (demoGuard()) { cb.checked = !cb.checked; return; }
+    const name = cb.value, skip = cb.checked;
+    const d = await post("/actions/skip-company", { name, skip });
+    if (d && d.ok) {
+      state.skipped = new Set((d.skipped || []).map((s) => String(s).toLowerCase()));
+      renderSkipPicker(); renderPicker(); renderDiscoverLabel();
+      toast(skip ? `${name} skipped — Discover + Process pass over it.`
+                 : `${name} is back in rotation.`);
+    } else cb.checked = !skip;
   });
 
   $("#co-filter").addEventListener("change", (e) => {
