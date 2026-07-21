@@ -1747,8 +1747,12 @@ _PICK_OPTION_JS = """
   // Never click a form-action control — only a suggestion whose text matches a
   // value we're setting (either direction: 'Seattle' ⊂ 'Seattle, WA, USA').
   const ACTION = /^(submit|apply|continue|next|back|previous|cancel|close|clear|search|save|done|remove|upload|browse|add|sign|log)\\b/;
+  // Short values ("No", "Yes") must match EXACTLY or as a whole word — plain
+  // substring matching made "No" pick "Lebanon+961" in a phone-country list.
   const matches = t => t && t.length < 80 && !ACTION.test(t)
-                       && vals.some(v => v.includes(t) || t.includes(v));
+                       && vals.some(v => v.length >= 4
+                         ? (v.includes(t) || t.includes(v))
+                         : (t === v || t.split(/[^a-z0-9+]+/).includes(v)));
   // Prefer real listbox/menu options; then fall back to ANY visible clickable a
   // combobox popup might render suggestions as — Ashby uses <button> elements, so
   // '[role=option]/li'-only found nothing and Location never got picked.
