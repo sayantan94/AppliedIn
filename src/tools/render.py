@@ -62,6 +62,12 @@ def sanitize_latex(tex: str) -> str:
     retry, so a document that compiles is never rewritten."""
     import re
 
+    # Literal "\n" written as TEXT (model artifact for a newline) — as a TeX
+    # token `\n` is the undefined control word "n" whenever no letter follows,
+    # so this match is never a real command (\newcommand etc. keep their
+    # letters). Whole-document: the artifact lands inside preamble macros too.
+    tex = re.sub(r"\\n(?![a-zA-Z])", "\n", tex)
+
     marker = "\\begin{document}"
     at = tex.find(marker)
     if at == -1:
@@ -69,10 +75,15 @@ def sanitize_latex(tex: str) -> str:
     head, body = tex[: at + len(marker)], tex[at + len(marker):]
     body = re.sub(r"(?<!\\)\$", r"\\$", body)          # $500K → \$500K
     body = re.sub(r"(?<=\d)\s?%", r"\\%", body)        # 30% → 30\% (digit-bound only)
-    body = re.sub(r"(?<!\\)&", r"\\&", body)           # AT&T, "Open Source & Projects" —
-    # body-level & is always text in these résumés (tabular &s live in preamble macros)
     body = re.sub(r"(?<!\\)#(?=\d)", r"\\#", body)     # #1 → \#1
-    return head + body
+    # & is text (AT&T, "Open Source & Projects") EXCEPT in tabular rows, where
+    # it's the alignment tab — those lines end with \\ (the header block).
+    fixed_lines = []
+    for ln in body.splitlines():
+        if "tabular" not in ln and not ln.rstrip().endswith("\\\\"):
+            ln = re.sub(r"(?<!\\)&", r"\\&", ln)
+        fixed_lines.append(ln)
+    return head + "\n".join(fixed_lines) + ("\n" if body.endswith("\n") else "")
 
 
 def render_pdf(latex_source: str) -> bytes:
