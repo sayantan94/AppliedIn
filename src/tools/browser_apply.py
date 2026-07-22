@@ -883,19 +883,10 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                                                       resume_tex=resume_tex, github=github)
                         handed_off = True
 
-            if errors:  # deterministic loop couldn't close this (dynamic) form →
-                # hand the finish+submit to a vision browser-use agent on this page.
-                res = await _agent_finish_submit(
-                    page, {**facts, **drafted}, drafted, model, pk, url, upload_path,
-                    headed, company=company, jd_text=jd_text, resume_tex=resume_tex,
-                    github=github)
-                return await _maybe_assist(res)
-
-            # The form accepted the submit (no errors). A VISIBLE confirmation is
-            # authoritative — Ashby keeps its hCaptcha iframe in the DOM even after
-            # a successful submit, so we must confirm success (text / url /
-            # structural / vision) BEFORE gating on a "CAPTCHA" or re-submitting.
-            # This is what stops an already-applied job from false-gating.
+            # SUCCESS is authoritative first — Ashby keeps its hCaptcha iframe in
+            # the DOM even after a successful submit, so confirm (text / url /
+            # structural / vision) BEFORE anything else, or an applied job
+            # false-gates and gets re-submitted.
             conf = await _applied_signal(page, url, body, model=model, allow_vision=True)
             if conf:
                 st = await page.evaluate(_READ_FORM_JS)
@@ -903,47 +894,23 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
                         "drafted": drafted or None, "fields": _ui_fields(st)}
 
-            # Scan for a required field we can RELIABLY read as empty — but skip
-            # comboboxes: their value lives off the visible input, so trust the
-            # form's verdict over our read for those.
-            state = await page.evaluate(_READ_FORM_JS)
-            empty_req = [f for f in state if f.get("required") and not f.get("value")
-                         and f.get("type") != "file" and not f.get("combo")]
-            if empty_req:
-                labels = [f["label"] for f in empty_req]
-                stubborn = [f["label"] for f in empty_req
-                            if f.get("combo") or f.get("type") == "choice-group"]
-                q = "Some required fields didn't fill automatically"
-                if stubborn:
-                    q += (" — a dropdown/choice needs a manual pick: "
-                          + "; ".join(stubborn[:3]))
-                q += ". Set these and submit: " + "; ".join(labels[:5])
-                return await _maybe_assist({
-                    "status": "gate", "reason": "unknown_field",
-                    "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
-                    "drafted": drafted or None, "fields": _ui_fields(state),
-                    "question": q})
-            # A REAL captcha block = the challenge is present AND the submit
-            # control is still on the page (we're still on the form, not a
-            # confirmation). A leftover Ashby iframe on a submitted page is not a
-            # blocker — success was already returned above if it applied.
-            has_submit = bool(await page.locator(
-                'button:has-text("Submit"), input[type=submit]').count())
-            if has_submit and (_re.search(r"captcha", body, _re.I) or await page.locator(
-                    'iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count()):
-                return await _maybe_assist({
-                    "status": "gate", "reason": "captcha", "screenshot_b64": shot,
-                    "drafted": drafted or None, "fields": _ui_fields(state),
-                    "question": "All fields are filled — only the CAPTCHA remains. "
-                                "Solve it in the open window and submit."})
-            errs = [f["label"] for f in await page.evaluate(_READ_FORM_JS)
-                    if f.get("required") and not f.get("value")
-                    and f.get("type") not in ("radio", "checkbox", "file")]
-            detail = (f"submit clicked but no confirmation; still-empty required: {errs[:4]}"
-                      if errs else "submit clicked but no confirmation text appeared")
-            return await _maybe_assist({
-                "status": "uncertain", "detail": detail[:200], "screenshot_b64": shot,
-                "drafted": drafted or None, "fields": _ui_fields(state)})
+            # ENFORCED scripted → agent escalation: whenever the deterministic path
+            # cannot CONFIRM a submission — form errors it couldn't fix, a stubborn
+            # dropdown, or an unconfirmed submit — hand the live, already-filled
+            # page to the vision browser-use agent to finish + submit + confirm.
+            # The agent is smarter about confirmations/dropdowns and gates to the
+            # human ONLY when it genuinely hits a CAPTCHA or account wall (via
+            # BLOCKED:), never on a leftover iframe. This is the intended
+            # fast-path-then-escalate design — the scripted path never gates the
+            # human directly on its own read.
+            _emit(pk, "response", agent="browser", url=url,
+                  detail="🤝 scripted couldn't confirm — handing the filled form to "
+                         "the vision agent to finish + submit")
+            res = await _agent_finish_submit(
+                page, {**facts, **drafted}, drafted, model, pk, url, upload_path,
+                headed, company=company, jd_text=jd_text, resume_tex=resume_tex,
+                github=github)
+            return await _maybe_assist(res)
         finally:
             await closer()
 
