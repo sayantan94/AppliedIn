@@ -1043,11 +1043,12 @@ a.rowlk, button.rowlk { display: inline-block; }
 }
 .btn-primary:hover { filter: brightness(1.06); }
 .btn-amber {
-  background: var(--run);
-  color: var(--ink-on-run);
-  border-color: color-mix(in srgb, var(--ink-on-run) 12%, var(--run));
+  background: color-mix(in srgb, var(--run) 12%, transparent);
+  color: var(--run);
+  border-color: color-mix(in srgb, var(--run) 50%, transparent);
+  font-weight: 600;
 }
-.btn-amber:hover { filter: brightness(1.05); }
+.btn-amber:hover { background: color-mix(in srgb, var(--run) 22%, transparent); }
 .btn-ghost { border-color: var(--border); color: var(--muted); }
 .btn-ghost:hover { color: var(--fg); border-color: var(--border-2); }
 .btn-danger {
