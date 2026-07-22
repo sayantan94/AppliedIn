@@ -115,6 +115,23 @@ def list_watchlist_companies() -> list[str]:
     return [c.name for c in load_watchlist(config_dir / "watchlist.yaml")]
 
 
+def company_for_url(url: str) -> str:
+    """If a job URL belongs to a watchlist company's ATS (same host + org slug),
+    return that company's proper name (so a single-role tailor of a Rivian Ashby
+    URL is labeled 'Rivian', not 'Rivianvw.Tech'). Else ''."""
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    host, seg = (u.hostname or "").lower(), [p for p in u.path.split("/") if p]
+    org = (seg[0].lower() if seg else "")
+    for c in load_watchlist(Path(get_settings().config_dir) / "watchlist.yaml"):
+        cu = urlparse(c.careers_url or "")
+        ch, cseg = (cu.hostname or "").lower(), [p for p in cu.path.split("/") if p]
+        corg = (cseg[0].lower() if cseg else "")
+        if host and host == ch and (not corg or corg == org):
+            return c.name
+    return ""
+
+
 def add_watchlist_company(name: str, careers_url: str = "") -> dict:
     """Append a company to watchlist.yaml (the dashboard's 'Add company').
 

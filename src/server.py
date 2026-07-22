@@ -279,16 +279,18 @@ def create_app() -> FastAPI:
             url = "https://" + url
         if not url:
             return {"ok": False, "error": "a job URL is required"}
-        company = ((body or {}).get("company") or "").strip()
-        title = ((body or {}).get("title") or "").strip() or "Role from URL"
-        if not company:  # infer from the host (jobs.ashbyhq.com/rivian → rivian)
+        from core.models import JobRecord
+        from discovery.handler import company_for_url
+        # Proper company: a watchlist match by ATS host beats the ugly URL slug.
+        company = ((body or {}).get("company") or "").strip() or company_for_url(url)
+        if not company:
             host = urlparse(url).hostname or ""
             parts = [p for p in urlparse(url).path.split("/") if p]
-            company = (parts[0] if "ashbyhq" in host or "greenhouse" in host or "lever" in host
-                       else host.split(".")[-2] if "." in host else host) or "Company"
-            company = company.replace("-", " ").title()
+            slug = (parts[0] if "ashbyhq" in host or "greenhouse" in host or "lever" in host
+                    else host.split(".")[-2] if "." in host else host) or "Company"
+            company = slug.replace("-", " ").replace(".", " ").title()
+        title = ((body or {}).get("title") or "").strip() or "Role from URL"
 
-        from core.models import JobRecord
         job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
         stores = make_stores(settings)
         job = JobRecord(company=company, job_id=job_id, title=title,
@@ -302,10 +304,20 @@ def create_app() -> FastAPI:
             import logging
             from agent.run import run_job
             from core.events import emit
+            from tools.jd import fetch_jd_meta
+            nonlocal company, title
             _RUNNING["process"] = True
             try:
+                # Fetch the page to get the REAL title (and company if still unknown)
+                # so the card reads "Rivian / Staff SWE - AI Platform", not
+                # "Rivianvw.Tech / Role from URL".
+                meta = fetch_jd_meta(url)
+                if meta.get("title"):
+                    title = meta["title"]
+                    stores.tracking.set_status(pk, Status.FOUND, title=title,
+                                               jd_text=meta.get("text") or title)
                 emit("running", agent="workflow", company=company, pk=pk,
-                     detail=f"▶ single-role: scoring + tailoring for {title} @ {company}…")
+                     detail=f"▶ single-role: scoring + tailoring {title} @ {company}…")
                 run_job(pk, stores)
                 emit("applied", agent="workflow", company=company, pk=pk,
                      detail=f"{company}: résumé tailored — approve on the board to apply")
