@@ -5,6 +5,16 @@ to each one, and applies through the company's portal — pausing for you only a
 the moments that need a human (approving a submission, or a fact it hasn't been
 told). One codebase, two modes: local on your Mac, or cloud on AWS.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/01-pipeline.png">
+  <img src="docs/screenshots/02-pipeline-light.png" alt="AppliedIn — the pipeline board: jobs flow found → tailored → applied, with a live feed of every agent step" width="100%">
+</picture>
+
+*The console (demo data): jobs flow **found → tailored → applied** across the
+board, every agent step streams to the live feed, and the pipeline stops for
+you exactly where you want it to — a one-click **▶ Apply** on each tailored
+job, or fully automatic while you sleep.*
+
 ## How it works
 
 The pipeline is Google ADK agents over a durable queue. Discovery finds jobs and
