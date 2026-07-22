@@ -337,17 +337,24 @@ function renderCoFilter() {
 }
 
 // --- Pipeline board (kanban lanes by status) -------------------------------
+// Tailored-and-waiting-for-approval IS tailored in the owner's mental model —
+// show those in the Tailored lane, not buried among 100+ question gates.
+const isApprovalGate = (r) =>
+  r.status === "needs_human" && (r.gate_question || "").startsWith("Ready to apply");
+
 const LANES = [
   { label: "Found",      st: ["found"],                cls: "ln-found",
     hint: "Discovered — waiting for a Process run" },
   { label: "Tailored",   st: ["tailored"],             cls: "ln-ready",
-    hint: "Scored, résumé tailored — ready to apply" },
+    match: (r) => r.status === "tailored" || isApprovalGate(r),
+    hint: "Résumé tailored — includes jobs waiting on your apply approval" },
   { label: "Submitting", st: ["submitting"],           cls: "ln-live",
     hint: "The browser is filling the application now" },
   { label: "Applied",    st: ["applied", "applied_manual"], cls: "ln-ok",
     hint: "Submitted — confirmation captured" },
   { label: "Needs you",  st: ["needs_human"],          cls: "ln-warn",
-    hint: "Paused on a question or approval — answer in the Needs-you tab" },
+    match: (r) => r.status === "needs_human" && !isApprovalGate(r),
+    hint: "Paused on a question — answer in the Needs-you tab" },
   { label: "Flagged",    st: ["failed"],               cls: "ln-flag",
     match: (r) => r.status === "failed" && r.fail_kind === "spam_flagged",
     hint: "The portal called the submit 'possible spam' — Retry re-runs it with human-style clicks" },
