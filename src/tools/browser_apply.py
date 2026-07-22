@@ -616,7 +616,18 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 except Exception:
                     continue
 
-            fields = await page.evaluate(_READ_FORM_JS)
+            # URL-type skill: a known ATS (Ashby/…) gets structure-aware
+            # extraction — far more reliable than the generic scrape (Ashby's
+            # Location combobox and field labels, etc.). Falls back to generic.
+            from tools.ats import detect_ats, extract_fields
+            ats = detect_ats(url)
+            fields = (await extract_fields(page, ats)) if ats else None
+            if fields:
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"🧩 using the {ats} skill: extracted {len(fields)} field(s) "
+                             f"from the {ats} form")
+            else:
+                fields = await page.evaluate(_READ_FORM_JS)
             fillable = [f for f in fields if f.get("type") not in ("submit", "button")]
             if len([f for f in fillable if f.get("type") not in ("file",)]) < 2:
                 return None  # no real form here — let the agent loop try
