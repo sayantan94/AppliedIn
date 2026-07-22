@@ -69,7 +69,8 @@ def sanitize_latex(tex: str) -> str:
     head, body = tex[: at + len(marker)], tex[at + len(marker):]
     body = re.sub(r"(?<!\\)\$", r"\\$", body)          # $500K → \$500K
     body = re.sub(r"(?<=\d)\s?%", r"\\%", body)        # 30% → 30\% (digit-bound only)
-    body = re.sub(r"(?<=\w)&(?=\w)", r"\\&", body)     # AT&T → AT\&T (word-bound only)
+    body = re.sub(r"(?<!\\)&", r"\\&", body)           # AT&T, "Open Source & Projects" —
+    # body-level & is always text in these résumés (tabular &s live in preamble macros)
     body = re.sub(r"(?<!\\)#(?=\d)", r"\\#", body)     # #1 → \#1
     return head + body
 
