@@ -77,6 +77,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "status": row.get("status", ""),
         "match_score": row.get("match_score"),
         "gate_reason": row.get("gate_reason"),
+        "fail_kind": row.get("fail_kind") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
         "closed_reason": _closed_reason(row),

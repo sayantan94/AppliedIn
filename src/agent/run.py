@@ -331,7 +331,8 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.info("gated pk=%s: %s", pk, q)
         return {"result": "gated", "pk": pk, "question": q}
     reason = _fail_reason(result)
-    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason)
+    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason,
+                               fail_kind=result.get("reason") or "")
     emit("error", pk=pk, agent="applier", detail=reason, url=jd_url)
     log.info("failed pk=%s: %s", pk, reason)
     return {"result": "failed", "pk": pk, "reason": reason}
@@ -365,7 +366,7 @@ def retry_job(pk: str, stores: Any = None) -> dict:
     if row is None:
         return {"result": "missing", "pk": pk}
     _run(_reset_session(pk))  # drop the finished session so the re-run starts clean
-    stores.tracking.set_status(pk, Status.FOUND, fail_reason="",
+    stores.tracking.set_status(pk, Status.FOUND, fail_reason="", fail_kind="",
                                gate_pending=None, gate_call_id=None, skip_reason="")
     from core.events import emit
     emit("running", pk=pk, detail=f"retry · {row.get('title','')} @ {row.get('company','')}",
@@ -574,7 +575,8 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
         return {"result": "done", "pk": pk}
 
     reason = _fail_reason(outcome)
-    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason)
+    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason,
+                               fail_kind=outcome.get("reason") or "")
     emit("error", pk=pk, agent="applier", detail=reason, url=final.get("jd_url"),
          screenshot=_art_url(final.get("screenshot_s3_key")))
     log.info("failed pk=%s: %s", pk, reason)

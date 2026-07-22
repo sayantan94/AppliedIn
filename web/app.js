@@ -336,16 +336,24 @@ const LANES = [
     hint: "Submitted — confirmation captured" },
   { label: "Needs you",  st: ["needs_human"],          cls: "ln-warn",
     hint: "Paused on a question or approval — answer in the Needs-you tab" },
+  { label: "Flagged",    st: ["failed"],               cls: "ln-flag",
+    match: (r) => r.status === "failed" && r.fail_kind === "spam_flagged",
+    hint: "The portal called the submit 'possible spam' — Retry re-runs it with human-style clicks" },
   { label: "Unable",     st: ["failed", "error", "job_gone", "uncertain"], cls: "ln-bad",
+    match: (r) => ["failed", "error", "job_gone", "uncertain"].includes(r.status)
+                  && r.fail_kind !== "spam_flagged",
     hint: "The automation couldn't finish — reason & screenshot inside" },
 ];
 
 function laneCard(r) {
+  const retry = r.status === "failed" && r.fail_kind === "spam_flagged"
+    ? `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
+         title="Re-run this application with human-style clicks">↻ Retry</button>` : "";
   return `<div class="kcard" data-open="${esc(r.pk)}" role="button" tabindex="0"
       title="Open details">
     <div class="kc-co">${esc(r.company)}</div>
     <div class="kc-role">${esc(r.title)}</div>
-    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}</div>
+    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${retry}</div>
   </div>`;
 }
 function viewPipeline() {
@@ -356,7 +364,7 @@ function viewPipeline() {
   }
   let shown = 0;
   const lanes = LANES.map((l) => {
-    const rows = visible(state.apps.filter((r) => l.st.includes(r.status)));
+    const rows = visible(state.apps.filter((r) => l.match ? l.match(r) : l.st.includes(r.status)));
     shown += rows.length;
     return `<div class="klane ${l.cls}">
       <div class="kl-head" title="${esc(l.hint)}">

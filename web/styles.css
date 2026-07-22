@@ -701,6 +701,7 @@ button:disabled { cursor: default; }
 .klane.ln-live .kl-dot { background: var(--run); animation: wippulse 1.4s ease-in-out infinite; }
 .klane.ln-ok .kl-dot { background: var(--scan); }
 .klane.ln-warn .kl-dot { background: var(--run); }
+.klane.ln-flag .kl-dot { background: var(--info); }
 .klane.ln-bad .kl-dot { background: var(--bad); }
 .kl-name { font-size: 12.5px; font-weight: 600; }
 .kl-n {
@@ -1588,3 +1589,16 @@ a.rowlk, button.rowlk { display: inline-block; }
   * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
   .runbar[data-active="true"] { animation: none; }
 }
+
+/* Flagged-lane retry: one click re-runs the application with human-style clicks. */
+.kc-retry {
+  margin-left: auto;
+  border: 1px solid color-mix(in srgb, var(--info) 45%, transparent);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
+  color: var(--info);
+  border-radius: var(--r-sm);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+}
+.kc-retry:hover { background: color-mix(in srgb, var(--info) 20%, transparent); }

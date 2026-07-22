@@ -713,13 +713,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             body, shot, errors, state = "", None, [], []
             _MAX_SUBMITS, handed_off, swapped = 3, False, False
             for attempt in range(_MAX_SUBMITS):
-                clicked = await page.evaluate("""
-                  () => {
-                    const btns = [...document.querySelectorAll('button, input[type=submit]')];
-                    const b = btns.find(x => /submit|apply/i.test(x.textContent || x.value || ''));
-                    if (b) { b.click(); return (b.textContent || b.value || '').trim(); }
-                    return '';
-                  }""")
+                clicked = await _click_submit(page)
                 if not clicked:
                     return None  # no submit control — not a scripted-friendly form
                 _emit(pk, "response", agent="browser", url=url, detail=f"⏎ clicked: {clicked}")
@@ -750,9 +744,10 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         _emit(pk, "response", agent="browser", url=url,
                               detail="⚠️ portal flagged the submit as possible spam — resubmitting")
                         continue
-                    return {"status": "uncertain",
-                            "detail": "The portal kept flagging the submission as possible "
-                                      "spam — hit Retry on the board in a little while.",
+                    return {"status": "failed", "reason": "spam_flagged",
+                            "detail": "The portal flagged the submission as possible spam "
+                                      "twice. Retry from the Flagged lane re-runs it with "
+                                      "human-style clicks — waiting a few minutes helps.",
                             "screenshot_b64": shot, "drafted": drafted or None,
                             "fields": _ui_fields(state)}
                 m = _re.search(_SUCCESS_RX, body, _re.I)
@@ -1519,6 +1514,34 @@ _SUBMIT_JS = """
 }
 """
 
+
+async def _click_submit(page, pk: str = "", url: str = "") -> str:  # noqa: ANN001
+    """Press the submit control with a REAL trusted mouse click — portals'
+    anti-bot heuristics (Lever's 'possible spam') discount synthetic JS clicks,
+    so the click that submits must look human. Falls back to the JS click only
+    when no visible submit control can be located."""
+    import re as _re
+
+    for sel in ('button:has-text("Submit application")',
+                'button:has-text("Submit")', 'input[type="submit"]',
+                'button:has-text("Apply")'):
+        try:
+            el = page.locator(sel).first
+            txt = ((await el.text_content(timeout=800)) or
+                   (await el.get_attribute("value")) or "").strip()
+            if _re.search(r"linkedin|indeed|dropbox|google|autofill|with\s", txt, _re.I):
+                continue  # third-party "Apply with …" buttons are not the submit
+            await el.scroll_into_view_if_needed(timeout=1500)
+            await el.click(timeout=2500)
+            return txt or "Submit"
+        except Exception:
+            continue
+    try:
+        return await page.evaluate(_SUBMIT_JS)
+    except Exception:
+        return ""
+
+
 _ERRORS_JS = """
 () => [...new Set([...document.querySelectorAll(
          '[class*="error" i], [role="alert"], [aria-invalid="true"]')]
@@ -1609,7 +1632,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
 
     body, shot, swapped = "", None, False
     for attempt in (0, 1, 2):
-        clicked = await page.evaluate(_SUBMIT_JS)
+        clicked = await _click_submit(page)
         if clicked:
             _emit(pk, "response", agent="browser", url=url, detail=f"⏎ clicked: {clicked}")
         await page.wait_for_timeout(5000)
@@ -1635,9 +1658,10 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                 _emit(pk, "response", agent="browser", url=url,
                       detail="⚠️ portal flagged the submit as possible spam — resubmitting")
                 continue
-            return {"status": "uncertain",
-                    "detail": "The portal kept flagging the submission as possible spam — "
-                              "hit Retry on the board in a little while.",
+            return {"status": "failed", "reason": "spam_flagged",
+                    "detail": "The portal flagged the submission as possible spam twice. "
+                              "Retry from the Flagged lane re-runs it with human-style "
+                              "clicks — waiting a few minutes helps.",
                     "screenshot_b64": shot, "drafted": drafted or None,
                     "fields": _ui_fields(state)}
         m = _re.search(_SUCCESS_RX, body, _re.I)
