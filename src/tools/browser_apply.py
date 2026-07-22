@@ -70,6 +70,16 @@ def _is_text_only(model: str) -> bool:
                                 "-instruct-text", "kimi-dev", "moonlight"))
 
 
+_ATS_DOMAINS = [
+    "*.oraclecloud.com", "*.myworkdayjobs.com", "*.myworkdaysite.com",
+    "*.greenhouse.io", "*.lever.co", "*.ashbyhq.com", "*.icims.com",
+    "*.smartrecruiters.com", "*.jobvite.com", "*.bamboohr.com", "*.taleo.net",
+    "*.successfactors.com", "*.workable.com", "*.breezy.hr", "*.recruitee.com",
+    "*.eightfold.ai", "*.paylocity.com", "*.jobs2web.com", "*.avature.net",
+    "*.brassring.com", "*.hire.lever.co",
+]
+
+
 _APPLY_POLICY = (
     "You are filling ONE job-application form. Hard rules:\n"
     "- Stay on the application page. NEVER click the company logo/name, 'View all "
@@ -179,6 +189,11 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
     files = [upload_path] if upload_path else None
     host = urlparse(url).hostname or ""
     allowed = list({host, f"*.{'.'.join(host.split('.')[-2:])}" if host else ""} - {""})
+    # Careers pages routinely redirect to an EXTERNAL ATS to host the real form
+    # (Uber → Oracle Cloud, others → Workday/Greenhouse/…). The fence stops the
+    # agent wandering to the company homepage, but it must let these legit
+    # application hosts through, or the apply can never reach the form.
+    allowed += _ATS_DOMAINS
     # Deterministic helpers: upload_resume sets the file straight onto the page's
     # résumé input(s); verify_form_filled reads the ACTUAL field values from the
     # DOM right before submit (dynamic forms wipe fields on re-render, and the
@@ -264,10 +279,13 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
         f"{resume_line}"
         f"Fill the form using ONLY these approved answers:\n{facts_str}\n\n"
         "You have DETERMINISTIC tools — USE THEM; do not click or type fields one by "
-        "one, and never navigate away from this application page.\n"
+        "one. Do not wander to the company homepage or other jobs.\n"
         "WORKFLOW (aim for under 12 steps):\n"
-        "1. Open the application form (click the 'Application' tab if present). Stay "
-        "on this page — never click links to the company homepage or other jobs.\n"
+        "1. Open the application form (click the 'Application' tab or the primary "
+        "'Apply' / 'Apply now' button if present). This often REDIRECTS to the "
+        "company's ATS on another domain (e.g. Oracle/Workday/Greenhouse) — that is "
+        "EXPECTED and allowed; follow it and fill the form there. Only avoid links "
+        "to the homepage, 'view all jobs', or unrelated pages.\n"
         "2. upload_resume (if a résumé field exists).\n"
         "3. For EVERY open-ended question (textarea / 'tell us about…' / 'why…') with "
         "no approved answer above, call draft_essay_answer FIRST and use its text.\n"
