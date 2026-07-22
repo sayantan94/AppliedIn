@@ -226,9 +226,12 @@ function renderPickerState() {
   $("#cp-state").textContent = pickedAll() ? `all ${total}` : `${n} of ${total}`;
   const sk = state.skipped.size;
   const skNote = sk ? ` <span class="cp-skipnote">· ${sk} skipped</span>` : "";
+  const one = n === 1 ? [...state.picked][0] : null;
+  const runOne = one ? ` <button class="cp-lk cp-runone" data-runone="${esc(one)}"
+      title="Discover ${esc(one)}'s postings, then score + tailor them — stops before applying">▶ Discover&nbsp;+&nbsp;tailor ${esc(one)}</button>` : "";
   $("#cp-foot").innerHTML = (pickedAll()
     ? `Discover + Process run on the <b>whole watchlist</b>${total ? ` (${total - sk} of ${total} companies)` : ""}.`
-    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`) + skNote;
+    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`) + skNote + runOne;
 }
 
 function renderSkipPicker() {
@@ -887,6 +890,15 @@ async function runDiscover() {
   else if (!d) { state.stats.discovering = false; renderDeck(); }
   pollStats();
 }
+async function runCompany(name, careersUrl) {
+  if (demoGuard()) return;
+  const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
+  if (d && d.status === "already_running") toast("A run is already going — wait for it to finish.");
+  else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
+  else if (d) toast(d.error || "Could not start the run.");
+  pollStats();
+}
+
 async function runProcess() {
   if (demoGuard() || state.stats.processing) return;
   const n = state.stats.found_waiting ?? 0;
@@ -1221,6 +1233,19 @@ function wire() {
     } else if (d) toast(d.error || "Could not add the company.");
   };
   $("#cp-add-btn").addEventListener("click", addCompany);
+  $("#cp-add-run").addEventListener("click", async () => {
+    if (demoGuard()) return;
+    const name = $("#cp-add-name").value.trim();
+    if (!name) { toast("Give the company a name first."); return; }
+    const url = $("#cp-add-url").value.trim();
+    $("#cp-add-name").value = ""; $("#cp-add-url").value = "";
+    await runCompany(name, url);   // endpoint adds it to the watchlist if new
+    await loadCompanies();
+  });
+  $("#cp-foot").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-runone]");
+    if (b) runCompany(b.dataset.runone);
+  });
   $("#cp-add-url").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
   $("#cp-add-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
 

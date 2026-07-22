@@ -1646,3 +1646,14 @@ a.rowlk, button.rowlk { display: inline-block; }
   color: var(--scan);
 }
 .kc-apply:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
+
+/* One-company end-to-end run, offered when exactly one company is picked. */
+.cp-runone {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--scan);
+  border: 1px solid color-mix(in srgb, var(--scan) 40%, transparent);
+  border-radius: var(--r-sm);
+  padding: 3px 9px;
+}
+.cp-runone:hover { text-decoration: none; background: color-mix(in srgb, var(--scan) 12%, transparent); }

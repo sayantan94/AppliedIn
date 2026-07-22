@@ -159,6 +159,52 @@ def create_app() -> FastAPI:
         skipped = flags.set_company_skip(name, bool((body or {}).get("skip")))
         return {"ok": True, "skipped": sorted(skipped)}
 
+    @app.post("/actions/run-company")
+    def run_company(body: dict, background: BackgroundTasks):
+        """One-company end-to-end workflow: (add to watchlist if new) → discover
+        just that company → score + tailor its findings. In gated apply mode the
+        run STOPS at tailored/approval — nothing is submitted."""
+        name = ((body or {}).get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name required"}
+        if _RUNNING["discover"] or _RUNNING["process"]:
+            return {"ok": False, "status": "already_running"}
+        careers_url = ((body or {}).get("careers_url") or "").strip()
+        from discovery.handler import add_watchlist_company, list_watchlist_companies
+        if name.lower() not in (c.lower() for c in list_watchlist_companies()):
+            added = add_watchlist_company(name, careers_url)
+            if not added.get("ok"):
+                return added
+
+        def _run() -> None:
+            import logging
+            from core.events import emit
+            from daemon import process_backlog_once
+            from discovery.handler import run_discovery
+            _RUNNING["discover"] = True
+            try:
+                emit("running", agent="daemon", pk=f"meta#run#{name.lower()}",
+                     detail=f"▶ one-company run: discovering {name}…")
+                found = run_discovery(only=[name])
+                emit("response", agent="daemon", pk=f"meta#run#{name.lower()}",
+                     detail=f"{name}: discovery done ({found.get('enqueued', 0) or found.get('crawled', 0) or 0} new) — scoring + tailoring…")
+            except Exception:
+                logging.getLogger("server").exception("run-company discover failed")
+            finally:
+                _RUNNING["discover"] = False
+            _RUNNING["process"] = True
+            try:
+                process_backlog_once(companies=[name])
+                emit("response", agent="daemon", pk=f"meta#run#{name.lower()}",
+                     detail=f"✅ {name}: run complete — tailored jobs await your approval on the board")
+            except Exception:
+                logging.getLogger("server").exception("run-company process failed")
+            finally:
+                _RUNNING["process"] = False
+
+        background.add_task(_run)
+        return {"ok": True, "status": "running", "company": name}
+
     @app.post("/actions/watchlist")
     def watchlist_add(body: dict):
         """Add a company to the watchlist (name + optional careers URL). The
