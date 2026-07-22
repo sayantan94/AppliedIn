@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # and submit — the automation just detects the real confirmation. Never solves
     # a CAPTCHA itself. Seconds to wait for the human before giving up.
     assist_captcha: bool = True
-    assist_wait_seconds: int = 240
+    assist_wait_seconds: int = 21600  # hold the human-handoff window ~6h — closing it releases
 
     @property
     def llm_provider(self) -> str:
