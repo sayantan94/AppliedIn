@@ -1728,3 +1728,22 @@ a.rowlk, button.rowlk { display: inline-block; }
   padding: 5px 11px;
 }
 .cp-role-foot .cp-add-btn:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }
+
+/* Run-now (found card) + Run-all (Found lane header) */
+.kc-run {
+  border-color: color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+  color: var(--scan);
+}
+.kc-run:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
+.kl-runall {
+  margin-left: auto;
+  border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 12%, transparent);
+  color: var(--scan);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+}
+.kl-runall:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }

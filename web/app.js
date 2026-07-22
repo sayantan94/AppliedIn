@@ -398,6 +398,9 @@ function laneCard(r) {
   } else if (canApply(r)) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Approve — the browser applies with the tailored résumé">▶ Apply</button>`;
+  } else if (r.status === "found") {
+    retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
+       title="Score + tailor this job now (stops at ready-to-apply)">▶ Run now</button>`;
   }
   return `<div class="kcard" data-open="${esc(r.pk)}" role="button" tabindex="0"
       title="Open details">
@@ -416,10 +419,13 @@ function viewPipeline() {
   const lanes = LANES.map((l) => {
     const rows = visible(state.apps.filter((r) => l.match ? l.match(r) : l.st.includes(r.status)));
     shown += rows.length;
+    const runAll = (l.label === "Found" && rows.length)
+      ? `<button class="kl-runall" data-run-all="1" title="Score + tailor all ${rows.length} found jobs (stops each at ready-to-apply)">▶ Run all</button>`
+      : "";
     return `<div class="klane ${l.cls}">
       <div class="kl-head" title="${esc(l.hint)}">
         <span class="kl-dot"></span><span class="kl-name">${l.label}</span>
-        <span class="kl-n mono">${rows.length}</span>
+        <span class="kl-n mono">${rows.length}</span>${runAll}
       </div>
       <div class="kl-cards">${rows.map(laneCard).join("") || `<div class="kl-empty">—</div>`}</div>
     </div>`;
@@ -1432,6 +1438,18 @@ function wire() {
     const res = e.target.closest("[data-resume]");
     if (res) { openResume(res.dataset.resume); return; }
     if (e.target.closest("[data-approve-all]")) { approveAll(); return; }
+    const runAllBtn = e.target.closest("[data-run-all]");
+    if (runAllBtn) { e.stopPropagation(); runProcess(); return; }
+    const runNow = e.target.closest('[data-act="run-now"]');
+    if (runNow) {
+      e.stopPropagation();
+      if (!demoGuard()) {
+        post(`/actions/run-job/${encodeURIComponent(runNow.dataset.pk)}`);
+        toast("Running — scoring + tailoring this job now.");
+        pollStats();
+      }
+      return;
+    }
     const act = e.target.closest("[data-act]");
     if (act) { paneAction(act.dataset.act, act.dataset.pk); return; }
     const open = e.target.closest("[data-open]");

@@ -246,6 +246,25 @@ def create_app() -> FastAPI:
                 moved += 1
         return {"ok": True, "filters": flags.company_filters(), "reconciled": moved}
 
+    @app.post("/actions/run-job/{pk}")
+    def run_one_job(pk: str, background: BackgroundTasks):
+        """Run ONE found/tailored job through score + tailor right now (the card's
+        'Run now'). Gated apply mode stops it at ready-to-apply."""
+        row = make_stores(settings).tracking.get(pk)
+        if not row:
+            return {"ok": False, "error": "unknown job"}
+
+        def _run() -> None:
+            import logging
+            from agent.run import run_job
+            try:
+                run_job(pk, make_stores(settings))
+            except Exception:
+                logging.getLogger("server").exception("run-job failed for %s", pk)
+
+        background.add_task(_run)
+        return {"ok": True, "status": "running", "pk": pk}
+
     @app.post("/actions/apply-role")
     def apply_role(body: dict, background: BackgroundTasks):
         """Single-role workflow: paste a job URL (Greenhouse/Lever/Ashby/…) — we
