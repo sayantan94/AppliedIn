@@ -344,8 +344,16 @@ _SUCCESS_RX = (
 # ("You have reached your application limit", "you've already applied"). This is a
 # server-side block, not a fillable-field error — the owner asked that we re-try
 # such cases with a pre-approved SECOND profile (alternate email + phone).
-_LIMIT_RX = (r"reached your application limit|application limit|already applied"
-             r"|already submitted an application|limit applications|maximum number of applications")
+_LIMIT_RX = (
+    # ONLY genuine "you are blocked" phrasing — NOT descriptive page notices like
+    # "This job has application limits" or "maximum N applications per day" (those
+    # falsely tripped the fallback-profile resubmit).
+    r"reached your application limit|reached the application limit"
+    r"|application limit (has been |was )?reached|application limit reached"
+    r"|you'?ve already applied|you have already applied|already applied to this (job|role|position)"
+    r"|you have already submitted|already submitted an application (to|for)"
+    r"|you have reached the maximum|you'?ve reached the maximum"
+    r"|exceeded (the |your )?(maximum|application)")
 
 # Lever's anti-bot tripwire: "Your application submission was flagged as possible
 # spam. If you believe this was a mistake, please submit your application again."
