@@ -1738,6 +1738,8 @@ a.rowlk, button.rowlk { display: inline-block; }
 .kc-run:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
 .kl-runall {
   margin-left: auto;
+  flex: none;
+  white-space: nowrap;
   border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
   background: color-mix(in srgb, var(--scan) 12%, transparent);
   color: var(--scan);
