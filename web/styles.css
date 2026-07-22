@@ -1627,3 +1627,9 @@ a.rowlk, button.rowlk { display: inline-block; }
   padding: 3px 10px;
 }
 .lb-x:hover { background: color-mix(in srgb, var(--bad) 18%, transparent); }
+.kc-apply {
+  border-color: color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+  color: var(--scan);
+}
+.kc-apply:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }

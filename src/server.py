@@ -257,7 +257,10 @@ def create_app() -> FastAPI:
         company = (body.get("company") or "").strip().lower()
         stores = make_stores(settings)
         pks = []
-        for r in stores.tracking.query_status(Status.NEEDS_HUMAN):
+        # Approval gates live on TAILORED rows (tailoring done, awaiting the
+        # go-ahead); stragglers from the old flow may still sit in needs_human.
+        for r in [*stores.tracking.query_status(Status.TAILORED),
+                  *stores.tracking.query_status(Status.NEEDS_HUMAN)]:
             if company and company != "__all__" and (r.get("company") or "").lower() != company:
                 continue
             q = (r.get("gate_pending") or {}).get("question", "")

@@ -541,7 +541,13 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
                     # your go-ahead, "unknown_field" when it needs an answer.
                     reason = ("approval" if question.startswith("Ready to apply")
                               else "unknown_field")
-                    stores.tracking.set_status(pk, Status.NEEDS_HUMAN,
+                    # A pure approval is NOT a question: the job has FINISHED
+                    # tailoring and only waits for the go-ahead, so it stays
+                    # TAILORED (the board's Tailored lane) with the gate fields
+                    # set for one-click approval. Real questions gate needs_human.
+                    gate_status = (Status.TAILORED if reason == "approval"
+                                   else Status.NEEDS_HUMAN)
+                    stores.tracking.set_status(pk, gate_status,
                                                gate_reason=reason,
                                                gate_pending={"question": question},
                                                gate_call_id=call.id,

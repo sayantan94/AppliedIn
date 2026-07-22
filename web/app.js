@@ -337,23 +337,20 @@ function renderCoFilter() {
 }
 
 // --- Pipeline board (kanban lanes by status) -------------------------------
-// Tailored-and-waiting-for-approval IS tailored in the owner's mental model —
-// show those in the Tailored lane, not buried among 100+ question gates.
-const isApprovalGate = (r) =>
-  r.status === "needs_human" && (r.gate_question || "").startsWith("Ready to apply");
+const awaitsApproval = (r) => r.gate_reason === "approval" && !!r.gate_question;
 
 const LANES = [
   { label: "Found",      st: ["found"],                cls: "ln-found",
     hint: "Discovered — waiting for a Process run" },
-  { label: "Tailored",   st: ["tailored"],             cls: "ln-ready",
-    match: (r) => r.status === "tailored" || isApprovalGate(r),
-    hint: "Résumé tailored — includes jobs waiting on your apply approval" },
+  { label: "Tailored",   st: ["tailored", "needs_human"], cls: "ln-ready",
+    match: (r) => r.status === "tailored" || (r.status === "needs_human" && awaitsApproval(r)),
+    hint: "Résumé tailored — the apply itself waits for your ▶ approval" },
   { label: "Submitting", st: ["submitting"],           cls: "ln-live",
     hint: "The browser is filling the application now" },
   { label: "Applied",    st: ["applied", "applied_manual"], cls: "ln-ok",
     hint: "Submitted — confirmation captured" },
   { label: "Needs you",  st: ["needs_human"],          cls: "ln-warn",
-    match: (r) => r.status === "needs_human" && !isApprovalGate(r),
+    match: (r) => r.status === "needs_human" && !awaitsApproval(r),
     hint: "Paused on a question — answer in the Needs-you tab" },
   { label: "Flagged",    st: ["failed"],               cls: "ln-flag",
     match: (r) => r.status === "failed" && r.fail_kind === "spam_flagged",
@@ -365,9 +362,14 @@ const LANES = [
 ];
 
 function laneCard(r) {
-  const retry = r.status === "failed" && r.fail_kind === "spam_flagged"
-    ? `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
-         title="Re-run this application with human-style clicks">↻ Retry</button>` : "";
+  let retry = "";
+  if (r.status === "failed" && r.fail_kind === "spam_flagged") {
+    retry = `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
+       title="Re-run this application with human-style clicks">↻ Retry</button>`;
+  } else if (awaitsApproval(r)) {
+    retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
+       title="Approve — the browser applies with the tailored résumé">▶ Apply</button>`;
+  }
   return `<div class="kcard" data-open="${esc(r.pk)}" role="button" tabindex="0"
       title="Open details">
     <div class="kc-co">${esc(r.company)}</div>
@@ -394,6 +396,11 @@ function viewPipeline() {
     </div>`;
   }).join("");
   if (!shown && filtersActive()) return emptyFiltered();
+  const nApprove = visible(state.apps.filter(awaitsApproval)).length;
+  const approveNote = nApprove ? `<div class="pane-note">
+    <span>${nApprove} tailored job${nApprove === 1 ? "" : "s"} await${nApprove === 1 ? "s" : ""} your apply approval.</span>
+    <button class="btn btn-amber" data-approve-all="1">Approve all ${nApprove}</button>
+  </div>` : "";
   const base = byCompany(state.apps);
   const hidden = [["skipped", "skipped"], ["capped", "capped"]]
     .map(([k, l]) => [base.filter((r) => r.status === k).length, l])
@@ -401,7 +408,7 @@ function viewPipeline() {
     .map(([n, l]) => `${n} ${l}`);
   const note = hidden.length
     ? `<div class="knote">Not on the board: ${hidden.join(" · ")} — see the Applications tab.</div>` : "";
-  return `<div class="kboard">${lanes}</div>${note}`;
+  return `${approveNote}<div class="kboard">${lanes}</div>${note}`;
 }
 
 // --- Applications table ----------------------------------------------------
@@ -975,7 +982,7 @@ function openDrawer(pk) {
     `<div class="tl"><div class="tl-dot ${t.done ? "done" : ""}"></div>
       <div><div class="tl-label">${esc(t.label)}</div><div class="tl-time">${when(t.at)}</div></div></div>`).join("");
 
-  const gate = r.status === "needs_human" ? `
+  const gate = (r.status === "needs_human" || awaitsApproval(r)) ? `
     <div class="section gate-box">
       <div class="section-t">⏸ ${esc(gateLabel(r.gate_reason))}</div>
       <div class="gate-q md">${md(r.gate_question || defaultGateText(r))}</div>
