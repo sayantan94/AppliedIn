@@ -314,8 +314,10 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
 
 # --- scripted apply: code drives, the model only maps + writes -----------------
 
-_SUCCESS_RX = (r"thank you|application (has been |was )?submitted|submitted successfully"
-               r"|received your application|we('|’)ve received")
+_SUCCESS_RX = (r"thank you|thanks for applying|application (has been |was )?"
+               r"(submitted|received|sent)|submitted successfully|successfully (applied|submitted)"
+               r"|application (is )?complete|received your application|we('|’)ve received"
+               r"|your application (has been|was) (submitted|received)")
 
 # A portal rejecting the submit because the PRIMARY identity already hit its cap
 # ("You have reached your application limit", "you've already applied"). This is a
@@ -1762,13 +1764,37 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
             await _set_choices(page, choice_fix, pk, url)
         await page.wait_for_timeout(900)
 
-    # Terminal: name the real blocker (empty required field, or a genuine CAPTCHA),
-    # and in a visible window hand off to the human to finish + submit.
+    # Terminal: re-read the LIVE page (the loop's `body` predates the final
+    # submit). A visible confirmation is AUTHORITATIVE — Ashby keeps the hCaptcha
+    # iframe in the DOM even after a successful submit, so we must never gate
+    # "solve the CAPTCHA" over a page that already shows "thank you". Checking
+    # success here first is what prevents a double-submit.
+    try:
+        body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
+    except Exception:
+        pass
+    m = _re.search(_SUCCESS_RX, body, _re.I)
+    url_ok = page.url != url and bool(_re.search(
+        r"confirmation|submitted|thank|success|application-complete", page.url, _re.I))
+    if m or url_ok:
+        line = (next((ln.strip() for ln in body.splitlines()
+                      if m and m.group(0).lower() in ln.lower()), None)
+                or (m.group(0) if m else "Application submitted (confirmation page)."))
+        st = await page.evaluate(_READ_FORM_JS)
+        return {"status": "applied", "confirmation": line[:120],
+                "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
+                "drafted": drafted or None, "fields": _ui_fields(st)}
+
     state = await page.evaluate(_READ_FORM_JS)
     empty_req = [f for f in state if f.get("required") and not f.get("value")
                  and f.get("type") != "file"]
-    captcha = bool(_re.search(r"captcha", body, _re.I)) or bool(await page.locator(
-        'iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count())
+    # A REAL captcha block = the challenge is present AND the submit control is
+    # still there (i.e. we're still on the form). A leftover iframe on a
+    # confirmation page is not a blocker (success was already returned above).
+    has_submit = bool(await page.locator(
+        'button:has-text("Submit"), input[type=submit]').count())
+    captcha = has_submit and (bool(_re.search(r"captcha", body, _re.I)) or bool(
+        await page.locator('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count()))
     # Only hold the window open for a REAL CAPTCHA (a genuine must). An empty field
     # or an unconfirmed submit falls through to a board gate (with a screenshot) —
     # we don't pull the human into a live window unless one is truly required.

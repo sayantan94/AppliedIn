@@ -277,6 +277,18 @@ def create_app() -> FastAPI:
         background.add_task(resume_job, pk, body.get("answer", ""))
         return {"ok": True, "status": "resuming"}
 
+    @app.post("/actions/mark-applied/{pk}")
+    def mark_applied(pk: str, body: dict | None = None):
+        """Human confirms an application went through out-of-band (got the email
+        / saw the ACK). Marks it applied and clears any gate — the safe fix for a
+        mis-detected submit, and it prevents a resubmit."""
+        note = ((body or {}).get("note") or "").strip() or "Confirmed by you (email / on-screen ACK)."
+        make_stores(settings).tracking.set_status(
+            pk, Status.APPLIED, confirmation_id=note, gate_reason="", gate_pending=None)
+        from core.events import emit
+        emit("applied", pk=pk, agent="applier", detail="Marked applied by you — no resubmit.")
+        return {"ok": True}
+
     @app.post("/actions/skip/{pk}")
     def skip(pk: str):
         make_stores(settings).tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")

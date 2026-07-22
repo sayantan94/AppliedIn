@@ -940,6 +940,9 @@ function paneAction(act, pk) {
   } else if (act === "retry") {
     post(`/actions/retry/${encodeURIComponent(pk)}`);
     toast("Retrying — re-running the pipeline for this job.");
+  } else if (act === "mark-applied") {
+    post(`/actions/mark-applied/${encodeURIComponent(pk)}`);
+    toast("Marked applied — won't resubmit.");
   }
   scheduleReload();
 }
@@ -1013,6 +1016,8 @@ function openDrawer(pk) {
         placeholder="Type your answer, or leave blank to approve &amp; continue…"></textarea>
       <div class="drawer-actions">
         <button class="btn btn-primary" data-act="answer" data-pk="${esc(r.pk)}">Approve &amp; continue</button>
+        <button class="btn btn-ghost" data-act="mark-applied" data-pk="${esc(r.pk)}"
+          title="It already went through (you got the email / saw the confirmation) — mark applied, don't resubmit">✓ Already applied</button>
         <button class="btn btn-ghost" data-act="skip" data-pk="${esc(r.pk)}">Skip</button>
       </div>
     </div>` : "";
