@@ -183,11 +183,15 @@ def create_app() -> FastAPI:
             from discovery.handler import run_discovery
             _RUNNING["discover"] = True
             try:
-                emit("running", agent="daemon", pk=f"meta#run#{name.lower()}",
-                     detail=f"▶ one-company run: discovering {name}…")
+                emit("running", agent="workflow", company=name,
+                     pk=f"meta#run#{name.lower()}",
+                     detail=f"▶ {name}: one-company run — discovering…")
                 found = run_discovery(only=[name])
-                emit("response", agent="daemon", pk=f"meta#run#{name.lower()}",
-                     detail=f"{name}: discovery done ({found.get('enqueued', 0) or found.get('crawled', 0) or 0} new) — scoring + tailoring…")
+                n_new = (found.get("enqueued") or 0) + (found.get("crawled") or 0)
+                emit("running", agent="workflow", company=name,
+                     pk=f"meta#run#{name.lower()}",
+                     detail=f"{name}: discovery finished — {n_new} new posting(s); "
+                            f"scoring + tailoring the backlog…")
             except Exception:
                 logging.getLogger("server").exception("run-company discover failed")
             finally:
@@ -195,8 +199,10 @@ def create_app() -> FastAPI:
             _RUNNING["process"] = True
             try:
                 process_backlog_once(companies=[name])
-                emit("response", agent="daemon", pk=f"meta#run#{name.lower()}",
-                     detail=f"✅ {name}: run complete — tailored jobs await your approval on the board")
+                emit("applied", agent="workflow", company=name,
+                     pk=f"meta#run#{name.lower()}",
+                     detail=f"{name}: one-company run complete — tailored jobs "
+                            f"await your approval on the board")
             except Exception:
                 logging.getLogger("server").exception("run-company process failed")
             finally:

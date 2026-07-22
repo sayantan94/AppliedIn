@@ -627,8 +627,8 @@ function renderAll() {
 
 // --- live activity feed ----------------------------------------------------
 const STAGE_LABEL = { scorer: "score", tailor: "tailor", critic: "critique",
-  applier: "apply", browser: "browser", writer: "writer",
-  tailor_critique: "tailor", appliedin_pipeline: "pipeline" };
+  applier: "apply", browser: "browser", writer: "writer", workflow: "workflow",
+  daemon: "pipeline", tailor_critique: "tailor", appliedin_pipeline: "pipeline" };
 const KIND = {
   response:   { mark: "model",  cls: "k-model" },
   input:      { mark: "input",  cls: "k-in" },
@@ -665,10 +665,11 @@ function smartRaw(e, raw) {
 function feedItem(e) {
   const t = e.at ? new Date(e.at).toLocaleTimeString("en-GB") : "";
   const app = e.pk ? state.apps.find((a) => a.pk === e.pk) : null;
-  const co = app ? app.company : "";
+  const co = app ? app.company : (e.company || "");
   const stage = STAGE_LABEL[e.agent] || e.agent || "";
-  const coChip = co
-    ? `<span class="fe-co" data-open="${esc(e.pk)}" title="open ${esc(co)}">${esc(co)}</span>` : "";
+  const coChip = !co ? ""
+    : app ? `<span class="fe-co" data-open="${esc(e.pk)}" title="open ${esc(co)}">${esc(co)}</span>`
+          : `<span class="fe-co">${esc(co)}</span>`;
   if (e.kind === "step") {
     return `<div class="fe fe-step mono">
       <span>${esc(STAGE_LABEL[e.detail] || e.detail || stage)}</span>${coChip}</div>`;
