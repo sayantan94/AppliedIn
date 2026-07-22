@@ -71,6 +71,13 @@ def discover_company(
         return 0
 
     matched = relevant(fetched, prefs)
+    # Per-company title filter (dashboard): e.g. Rivian → only "Staff" titles.
+    from core import flags as _flags
+    kws = _flags.company_filter(company.name)
+    if kws:
+        before = len(matched)
+        matched = [j for j in matched if _flags.title_matches_filter(j.title, kws)]
+        log.info("%s: title filter %s kept %d/%d", company.name, kws, len(matched), before)
     log.info("%s: fetched %d postings, %d relevant", company.name, len(fetched), len(matched))
     if fetched and not matched:
         sample = ", ".join(j.title for j in fetched[:3])

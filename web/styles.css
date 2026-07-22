@@ -1658,3 +1658,36 @@ a.rowlk, button.rowlk { display: inline-block; }
 }
 .cp-runone:hover { text-decoration: none; background: color-mix(in srgb, var(--scan) 12%, transparent); }
 .klane.ln-captcha .kl-dot { background: var(--info); animation: wippulse 1.4s ease-in-out infinite; }
+
+/* Single-role tailor panel + per-company title filter input */
+.cp-role {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  background: var(--card);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.cp-role-t {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.cp-role .cp-search { flex: 1; min-width: 0; }
+.sp-filter {
+  flex: none;
+  width: 132px;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--card-2);
+  color: var(--fg);
+  outline: none;
+}
+.sp-filter:focus { border-color: var(--run); }
+.sp-filter::placeholder { color: var(--faint); }

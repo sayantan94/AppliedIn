@@ -88,6 +88,48 @@ def skipped_companies() -> set:
         return set()
 
 
+def company_filters() -> dict:
+    """Per-company title keyword filters: {company_lower: [kw, ...]}. A company
+    with a filter only keeps postings whose title contains one of its keywords
+    (case-insensitive), overriding the global title prefs for that company. Set
+    via the dashboard; empty = use the global prefs."""
+    import json
+
+    try:
+        raw = json.loads(get_flag("company_filters", "{}") or "{}")
+        return {str(k).lower(): [str(x) for x in v if str(x).strip()]
+                for k, v in raw.items() if v}
+    except Exception:
+        return {}
+
+
+def company_filter(company: str) -> list:
+    return company_filters().get((company or "").strip().lower(), [])
+
+
+def set_company_filter(name: str, keywords: list) -> dict:
+    """Set (or clear, with an empty list) a company's title filter."""
+    import json
+
+    cur = company_filters()
+    key = (name or "").strip().lower()
+    kws = [k.strip() for k in (keywords or []) if k and k.strip()]
+    if kws:
+        cur[key] = kws
+    else:
+        cur.pop(key, None)
+    set_flag("company_filters", json.dumps(cur))
+    return cur
+
+
+def title_matches_filter(title: str, keywords: list) -> bool:
+    """True if no filter, or the title contains one of the keywords."""
+    if not keywords:
+        return True
+    t = (title or "").lower()
+    return any(k.lower() in t for k in keywords)
+
+
 def set_company_skip(name: str, skip: bool) -> set:
     """Flip one company's skip state; returns the updated skip set."""
     import json

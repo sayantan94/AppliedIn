@@ -139,7 +139,8 @@ def create_app() -> FastAPI:
         from core import flags
         from discovery.handler import list_watchlist_companies
         return {"companies": list_watchlist_companies(),
-                "skipped": sorted(flags.skipped_companies())}
+                "skipped": sorted(flags.skipped_companies()),
+                "filters": flags.company_filters()}
 
     @app.post("/actions/clear-llm-error")
     def clear_llm_error():
@@ -210,6 +211,92 @@ def create_app() -> FastAPI:
 
         background.add_task(_run)
         return {"ok": True, "status": "running", "company": name}
+
+    @app.post("/actions/company-filter")
+    def company_filter(body: dict):
+        """Set a company's title filter (e.g. Rivian -> only 'Staff' titles).
+        `titles` may be a list or a comma/newline-separated string; empty clears
+        it. Retroactively skips already-found jobs that no longer match, and
+        un-skips ones that do — so the board reflects the filter immediately."""
+        from core import flags
+        name = ((body or {}).get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name required"}
+        raw = (body or {}).get("titles", [])
+        kws = ([k for k in raw] if isinstance(raw, list)
+               else [k for k in raw.replace("\n", ",").split(",")])
+        kws = [k.strip() for k in kws if k and k.strip()]
+        flags.set_company_filter(name, kws)
+
+        # Reconcile the current backlog for this company.
+        stores = make_stores(settings)
+        low = name.lower()
+        moved = 0
+        for r in stores.tracking.all():
+            if (r.get("company") or "").lower() != low:
+                continue
+            st, title = r.get("status"), r.get("title") or ""
+            ok = flags.title_matches_filter(title, kws)
+            if st == "found" and not ok:
+                stores.tracking.set_status(r["pk"], Status.SKIPPED,
+                                           skip_reason="title_filter")
+                moved += 1
+            elif st == "skipped" and r.get("skip_reason") == "title_filter" and ok:
+                stores.tracking.set_status(r["pk"], Status.FOUND, skip_reason="")
+                moved += 1
+        return {"ok": True, "filters": flags.company_filters(), "reconciled": moved}
+
+    @app.post("/actions/apply-role")
+    def apply_role(body: dict, background: BackgroundTasks):
+        """Single-role workflow: paste a job URL (Greenhouse/Lever/Ashby/…) — we
+        create the row, fetch the JD, score + tailor a résumé to it, and (in
+        gated mode) stop at 'ready to apply' so you approve the submit. No
+        discovery, no watchlist needed — one role, straight to a tailored résumé."""
+        import hashlib
+        from urllib.parse import urlparse
+
+        url = ((body or {}).get("url") or "").strip()
+        if url and not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url
+        if not url:
+            return {"ok": False, "error": "a job URL is required"}
+        company = ((body or {}).get("company") or "").strip()
+        title = ((body or {}).get("title") or "").strip() or "Role from URL"
+        if not company:  # infer from the host (jobs.ashbyhq.com/rivian → rivian)
+            host = urlparse(url).hostname or ""
+            parts = [p for p in urlparse(url).path.split("/") if p]
+            company = (parts[0] if "ashbyhq" in host or "greenhouse" in host or "lever" in host
+                       else host.split(".")[-2] if "." in host else host) or "Company"
+            company = company.replace("-", " ").title()
+
+        from core.models import JobRecord
+        job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
+        stores = make_stores(settings)
+        job = JobRecord(company=company, job_id=job_id, title=title,
+                        jd_url=url, jd_text=title, ats="custom")
+        pk = job.pk
+        is_new = stores.tracking.put_new(job)
+        if not is_new:  # already tracked — re-tailor it from scratch
+            stores.tracking.set_status(pk, Status.FOUND, skip_reason="", fail_kind="")
+
+        def _run() -> None:
+            import logging
+            from agent.run import run_job
+            from core.events import emit
+            _RUNNING["process"] = True
+            try:
+                emit("running", agent="workflow", company=company, pk=pk,
+                     detail=f"▶ single-role: scoring + tailoring for {title} @ {company}…")
+                run_job(pk, stores)
+                emit("applied", agent="workflow", company=company, pk=pk,
+                     detail=f"{company}: résumé tailored — approve on the board to apply")
+            except Exception:
+                logging.getLogger("server").exception("apply-role failed")
+            finally:
+                _RUNNING["process"] = False
+
+        background.add_task(_run)
+        return {"ok": True, "status": "running", "pk": pk, "company": company, "title": title}
 
     @app.post("/actions/watchlist")
     def watchlist_add(body: dict):

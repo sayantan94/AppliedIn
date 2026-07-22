@@ -26,6 +26,7 @@ const state = {
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
+  filters: {},        // {company_lower: [title keyword, ...]} per-company title filters
   coQuery: "",        // search inside the company picker
   mode: "gated",
   paused: false,
@@ -242,9 +243,13 @@ function renderSkipPicker() {
     .filter((c) => !q || c.toLowerCase().includes(q))
     .map((c) => {
       const sk = state.skipped.has(c.toLowerCase());
-      return `<label class="cp-item sp-item ${sk ? "skipped" : ""}">
-        <input type="checkbox" value="${esc(c)}" ${sk ? "checked" : ""}>
-        <span>${esc(c)}</span></label>`;
+      const f = (state.filters[c.toLowerCase()] || []).join(", ");
+      return `<div class="cp-item sp-item ${sk ? "skipped" : ""}">
+        <label class="cp-name">
+          <input type="checkbox" value="${esc(c)}" ${sk ? "checked" : ""}>
+          <span>${esc(c)}</span></label>
+        <input class="sp-filter" data-filter-co="${esc(c)}" value="${esc(f)}"
+          placeholder="only titles… e.g. Staff" title="Only keep titles containing these words (comma-separated). Blank = all."></div>`;
     }).join("");
   list.innerHTML = rows || `<div class="cp-none">No companies match.</div>`;
   const n = state.skipped.size, badge = $("#skip-count");
@@ -828,6 +833,7 @@ async function loadCompanies() {
       const r = await fetch(api("/companies"), { headers: auth.header() }).then((r) => r.json());
       state.companies = Array.isArray(r.companies) ? r.companies : [];
       state.skipped = new Set((r.skipped || []).map((s) => String(s).toLowerCase()));
+      state.filters = r.filters || {};
     } catch { /* backend away — fall back below */ }
     if (!state.companies.length) {
       state.companies = [...new Set(state.apps.map((a) => a.company).filter(Boolean))];
@@ -1249,6 +1255,19 @@ function wire() {
     } else if (d) toast(d.error || "Could not add the company.");
   };
   $("#cp-add-btn").addEventListener("click", addCompany);
+  const runRole = async () => {
+    if (demoGuard()) return;
+    const url = $("#cp-role-url").value.trim();
+    if (!url) { toast("Paste the job URL first."); return; }
+    const d = await post("/actions/apply-role", { url });
+    if (d && d.ok) {
+      $("#cp-role-url").value = "";
+      toast(`▶ Tailoring your résumé to that role — it'll appear in Tailored when ready.`);
+      pollStats();
+    } else if (d) toast(d.error || "Couldn't start — check the URL.");
+  };
+  $("#cp-role-go").addEventListener("click", runRole);
+  $("#cp-role-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
   $("#cp-add-run").addEventListener("click", async () => {
     if (demoGuard()) return;
     const name = $("#cp-add-name").value.trim();
@@ -1312,6 +1331,23 @@ function wire() {
   $("#sp-search").addEventListener("input", (e) => {
     state.spQuery = e.target.value;
     renderSkipPicker();
+  });
+  const commitFilter = async (inp) => {
+    const name = inp.dataset.filterCo;
+    const titles = inp.value.trim();
+    const d = await post("/actions/company-filter", { name, titles });
+    if (d && d.ok) {
+      state.filters = d.filters || {};
+      const msg = titles ? `${name}: only titles with "${titles}".` : `${name}: filter cleared.`;
+      toast(d.reconciled ? `${msg} ${d.reconciled} job(s) re-sorted.` : msg);
+      loadApps();
+    }
+  };
+  $("#sp-list").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.matches(".sp-filter")) { e.target.blur(); }
+  });
+  $("#sp-list").addEventListener("focusout", (e) => {
+    if (e.target.matches(".sp-filter")) commitFilter(e.target);
   });
   $("#sp-list").addEventListener("change", async (e) => {
     const cb = e.target;
