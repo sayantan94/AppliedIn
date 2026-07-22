@@ -1608,7 +1608,10 @@ a.rowlk, button.rowlk { display: inline-block; }
   border-radius: var(--r-sm);
   font-size: 11.5px;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 5px 11px;
+  min-height: 27px;
+  display: inline-flex;
+  align-items: center;
 }
 .kc-retry:hover { background: color-mix(in srgb, var(--info) 20%, transparent); }
 
