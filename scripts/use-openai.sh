@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 # account would just move the failures around).
 if ! .venv/bin/python - <<'PY'
 import sys
-from dotenv import load_dotenv; load_dotenv()
+from dotenv import load_dotenv; load_dotenv('.env')
 from litellm import completion
 try:
     completion(model="openai/gpt-5-mini", messages=[{"role":"user","content":"ok"}], max_tokens=5)
