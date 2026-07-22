@@ -16,4 +16,4 @@ for _ in $(seq 1 30); do
   curl -s -o /dev/null -m 2 http://127.0.0.1:8787/ && break
   sleep 1
 done
-echo "server up: pid $(lsof -iTCP:8787 -sTCP:LISTEN -t) — $(pgrep -cf 'python -m server') process(es) total"
+echo "server up: pid $(lsof -iTCP:8787 -sTCP:LISTEN -t) — $(pgrep -f "python -m server" | wc -l | tr -d " ") process(es) total"
