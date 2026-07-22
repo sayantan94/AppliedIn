@@ -1410,6 +1410,14 @@ _READ_FORM_JS = """
     // this MUST stay identical to _FILL_JS's labelOf or fill reports NOT FOUND.
     let lbl = (el.labels && el.labels[0] && norm(el.labels[0].textContent))
               || el.getAttribute('aria-label') || '';
+    if (!lbl) {  // the field wrapper's OWN unbound <label> (Ashby: 'Location',
+      // 'Name' — a direct child of the field container, not tied by id). This
+      // beats questionOf, which climbs to the SECTION heading for a short label.
+      for (let fw = el.parentElement, i = 0; i < 4 && fw && !lbl; i++, fw = fw.parentElement) {
+        const own = [...fw.children].find(c => c.tagName === 'LABEL');
+        if (own) { const t = norm(own.textContent); if (t && t.length < 60) lbl = t; }
+      }
+    }
     if (!lbl) lbl = questionOf(el);
     if (!lbl) {
       let sib = el.previousElementSibling;
@@ -1507,6 +1515,12 @@ _FILL_JS = """
     let lbl = (el.labels && el.labels[0] && ntrim(el.labels[0].textContent))
               || el.getAttribute('aria-label') || '';
     if (lbl) return lbl;
+    // Field wrapper's OWN unbound <label> (Ashby: Location, etc.) — a direct
+    // child of the field container — before questionOf climbs to the section.
+    for (let fw = el.parentElement, i = 0; i < 4 && fw; i++, fw = fw.parentElement) {
+      const own = [...fw.children].find(c => c.tagName === 'LABEL');
+      if (own) { const t = ntrim(own.textContent); if (t && t.length < 60) return t; }
+    }
     lbl = questionOf(el);
     if (lbl) return lbl;
     let sib = el.previousElementSibling;  // short unbound label ("Full name", "Email")
@@ -2015,6 +2029,12 @@ _LOCATE_INPUT_JS = """
     let lbl = (el.labels && el.labels[0] && ntrim(el.labels[0].textContent))
               || el.getAttribute('aria-label') || '';
     if (lbl) return lbl;
+    // Field wrapper's OWN unbound <label> (Ashby: Location, etc.) — a direct
+    // child of the field container — before questionOf climbs to the section.
+    for (let fw = el.parentElement, i = 0; i < 4 && fw; i++, fw = fw.parentElement) {
+      const own = [...fw.children].find(c => c.tagName === 'LABEL');
+      if (own) { const t = ntrim(own.textContent); if (t && t.length < 60) return t; }
+    }
     lbl = questionOf(el);
     if (lbl) return lbl;
     let sib = el.previousElementSibling;
