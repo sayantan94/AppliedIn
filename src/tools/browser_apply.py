@@ -98,6 +98,13 @@ async def apply(url: str, company: str, facts: dict, model: str, *, pk: str = ""
     click loop. Either way the outcome shape is identical."""
     from core.config import get_settings
 
+    facts = dict(facts)
+    full = (facts.get("Full name") or facts.get("Name") or "").strip()
+    if full:
+        first, *rest = full.split()
+        facts.setdefault("First name", first)
+        facts.setdefault("Last name", " ".join(rest) or first)
+
     engine = (getattr(get_settings(), "apply_engine", "agent") or "agent").lower()
     if engine != "scripted":  # browser-use is the driver
         return await _agent_apply(url, company, facts, model, pk=pk, jd_text=jd_text,
@@ -594,6 +601,12 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             # so the model cannot invent text) or ESSAY/SKIP markers.
             mapping = await asyncio.to_thread(
                 _map_fields, fields, facts, company, jd_text)
+            if not mapping:
+                log.warning("field mapper returned NOTHING (bad model output?) — "
+                            "relying on the deterministic KB match")
+                _emit(pk, "response", agent="browser", url=url,
+                      detail="⚠️ field mapper returned nothing — using deterministic "
+                             "KB matching for every field")
             fill_map: dict[str, str] = {}
             missing_required: list[str] = []
             for f in fields:
@@ -620,12 +633,20 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         missing_required.append(label)
                 elif verdict != "SKIP":
                     val = facts.get(verdict, "")
+                    if not val and (hit := _fact_for(label, facts)):
+                        val = hit[1]  # mapper picked a dud key — the KB still knows
                     if val:
                         fill_map[label] = val
                     elif f.get("required") and f.get("type") not in ("checkbox",):
                         missing_required.append(label)
                 elif f.get("required") and f.get("type") not in ("checkbox", "radio"):
-                    missing_required.append(label)
+                    # NEVER gate on a fact the KB already holds (Name, Email, …):
+                    # a silent mapper failure (bad JSON → {} → all-SKIP) must not
+                    # reach the human. Deterministic word-overlap is the backstop.
+                    if hit := _fact_for(label, facts):
+                        fill_map[label] = hit[1]
+                    else:
+                        missing_required.append(label)
 
             if missing_required:
                 shot = base64.b64encode(await page.screenshot()).decode()
