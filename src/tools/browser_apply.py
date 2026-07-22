@@ -237,7 +237,8 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
                           "detail": "browser-use filled the form but its page was unavailable"})
         heal_facts = {**facts, **drafted}
         await _click_fields_pass(page, pk, url)  # last fill step: click-commit every box/text field
-        result = await _finalize_submit(page, heal_facts, drafted, pk, url, headed=headed)
+        result = await _finalize_submit(page, heal_facts, drafted, pk, url,
+                                        headed=headed, model=model)
         if "fields" not in result and (uf := _ui_fields(snapshot)):
             result["fields"] = uf
         return result
@@ -314,10 +315,12 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
 
 # --- scripted apply: code drives, the model only maps + writes -----------------
 
-_SUCCESS_RX = (r"thank you|thanks for applying|application (has been |was )?"
-               r"(submitted|received|sent)|submitted successfully|successfully (applied|submitted)"
-               r"|application (is )?complete|received your application|we('|’)ve received"
-               r"|your application (has been|was) (submitted|received)")
+_SUCCESS_RX = (
+    r"thank you for applying|thanks for applying|thank you for your (application|interest)"
+    r"|application[\w\s,'\-]{0,60}?(submitted|received|complete|sent|on its way|in review)"
+    r"|submitted successfully|successfully (applied|submitted)"
+    r"|we('|’)?(ve| have) received your application|received your application"
+    r"|your application (is|has been|was)\b")
 
 # A portal rejecting the submit because the PRIMARY identity already hit its cap
 # ("You have reached your application limit", "you've already applied"). This is a
@@ -972,8 +975,85 @@ async def _launch(p):  # noqa: ANN001, ANN201
     return await b.new_page(), b.close, (not headless)
 
 
+async def _confirm_applied_visually(page, model: str) -> bool:  # noqa: ANN001
+    """Read the CURRENT page with a vision model and answer one question: does it
+    show a job-application confirmation (a thank-you / 'application submitted' /
+    'we received your application' screen)? This is the authoritative tie-breaker
+    for the Ashby case where the hCaptcha iframe lingers in the DOM after a
+    successful submit. Best-effort: any error (no vision model, quota) → False,
+    and the caller falls back to text/structural signals."""
+    import base64
+
+    from litellm import completion
+
+    try:
+        shot = base64.b64encode(await page.screenshot()).decode()
+    except Exception:
+        return False
+    # Route to a multimodal model: the configured browser model if it takes
+    # images, else a small multimodal default. Text-only models are skipped.
+    vmodel = model
+    if _is_text_only(model) or model.startswith("openrouter/moonshotai/kimi-k2"):
+        vmodel = "openrouter/openai/gpt-4o-mini"
+    try:
+        resp = await asyncio.to_thread(
+            completion, model=vmodel, max_tokens=6,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text":
+                    "This is a job-application page. Does it VISIBLY show a submission "
+                    "confirmation — a 'thank you for applying', 'application submitted', "
+                    "'we received your application', or similar success message (NOT just "
+                    "an empty form or a CAPTCHA)? Answer with one word: YES or NO."},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{shot}"}}]}])
+        ans = (resp["choices"][0]["message"]["content"] or "").strip().upper()
+        return ans.startswith("YES")
+    except Exception as exc:
+        log.info("visual apply-confirmation unavailable (%s) — using text/structural", exc)
+        return False
+
+
+async def _applied_signal(page, url_before: str, body: str | None = None,  # noqa: ANN001
+                          model: str = "", allow_vision: bool = False) -> str | None:
+    """Return a confirmation string if the page shows the application went
+    through, else None. Three signals, cheapest first: (1) success text, (2) a
+    confirmation URL, (3) STRUCTURAL — after a submit the form's submit control
+    AND the fields are gone, i.e. the form was replaced by a confirmation. Only
+    when all three are inconclusive AND vision is allowed do we spend a vision
+    call. Deliberately conservative: never claims success on the mere ABSENCE of
+    a captcha."""
+    import re as _re
+
+    if body is None:
+        try:
+            body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
+        except Exception:
+            body = ""
+    m = _re.search(_SUCCESS_RX, body, _re.I)
+    if m:
+        return (next((ln.strip() for ln in body.splitlines()
+                      if m.group(0).lower()[:16] in ln.lower()), None) or m.group(0))[:120]
+    if page.url != url_before and _re.search(
+            r"confirmation|submitted|thank|success|application-complete|/complete", page.url, _re.I):
+        return "Application submitted (confirmation page)."
+    # Structural: the form is GONE (no submit control, no text inputs) and the
+    # page got short — a confirmation screen, not the filled-in form.
+    try:
+        has_submit = await page.locator(
+            'button:has-text("Submit"), button:has-text("Apply"), input[type=submit]').count()
+        n_inputs = await page.locator(
+            'input[type=text], input[type=email], input[type=tel], textarea').count()
+        if not has_submit and n_inputs == 0 and body and len(body) < 1800:
+            return "Application submitted (form replaced by a confirmation page)."
+    except Exception:
+        pass
+    if allow_vision and model and await _confirm_applied_visually(page, model):
+        return "Application submitted (visually confirmed on the page)."
+    return None
+
+
 async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
-                       reason: str = "") -> str | None:
+                       reason: str = "", model: str = "") -> str | None:
     """Human handoff: the form is filled and visible — wait for the person to finish
     whatever's actually blocking (a stubborn field, or a CAPTCHA if one is present)
     and click Submit, then return the real confirmation text. The message states the
@@ -999,11 +1079,9 @@ async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
         await page.bring_to_front()
     except Exception:
         pass
-    for _ in range(max(1, secs // 3)):
+    for _tick in range(max(1, secs // 3)):
         try:
             await page.wait_for_timeout(3000)
-            body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
-            url_now = page.url
         except Exception as exc:
             if _page_gone(exc):
                 # You closed the window (often right AFTER submitting). We can't read
@@ -1014,14 +1092,12 @@ async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
                              "If you submitted it, mark it applied on the dashboard.")
                 return None
             continue
-        m = _re.search(_SUCCESS_RX, body, _re.I)
-        # A redirect to a confirmation/success URL is also proof of submission.
-        url_ok = url_now != url and bool(
-            _re.search(r"confirmation|submitted|thank|success|application-complete", url_now, _re.I))
-        if m or url_ok:
-            line = (next((ln.strip() for ln in body.splitlines()
-                          if m and m.group(0).lower() in ln.lower()), None)
-                    or (m.group(0) if m else "Application submitted (confirmation page)."))
+        # Text/url/structural every tick; a vision check every ~30s so a
+        # confirmation the wording missed still auto-completes.
+        conf = await _applied_signal(page, url, model=model,
+                                     allow_vision=(model and _tick % 10 == 9))
+        if conf:
+            line = conf
             _emit(pk, "response", agent="applier", url=url,
                   detail=f"✅ you submitted it — confirmed: {line[:80]}")
             return line[:120]
@@ -1642,7 +1718,7 @@ async def _click_fields_pass(page, pk: str, url: str) -> int:  # noqa: ANN001
 
 
 async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str,  # noqa: ANN001
-                           headed: bool) -> dict:
+                           headed: bool, model: str = "") -> dict:
     """Deterministic finish on an already-FILLED page (browser-use did the filling,
     including the vision-picked dropdowns): submit → read the form's own errors →
     self-heal only those → resubmit; on real confirmation return applied; on a
@@ -1773,15 +1849,13 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
         body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
     except Exception:
         pass
-    m = _re.search(_SUCCESS_RX, body, _re.I)
-    url_ok = page.url != url and bool(_re.search(
-        r"confirmation|submitted|thank|success|application-complete", page.url, _re.I))
-    if m or url_ok:
-        line = (next((ln.strip() for ln in body.splitlines()
-                      if m and m.group(0).lower() in ln.lower()), None)
-                or (m.group(0) if m else "Application submitted (confirmation page)."))
+    # A visible confirmation is AUTHORITATIVE — read the live page (text →
+    # url → structural → vision). This is what stops a succeeded application
+    # from being false-gated as a CAPTCHA and re-submitted.
+    conf = await _applied_signal(page, url, body, model=model, allow_vision=True)
+    if conf:
         st = await page.evaluate(_READ_FORM_JS)
-        return {"status": "applied", "confirmation": line[:120],
+        return {"status": "applied", "confirmation": conf,
                 "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
                 "drafted": drafted or None, "fields": _ui_fields(st)}
 
@@ -1789,8 +1863,8 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
     empty_req = [f for f in state if f.get("required") and not f.get("value")
                  and f.get("type") != "file"]
     # A REAL captcha block = the challenge is present AND the submit control is
-    # still there (i.e. we're still on the form). A leftover iframe on a
-    # confirmation page is not a blocker (success was already returned above).
+    # still there (still on the form). A leftover iframe on a confirmation page
+    # is not a blocker — and _applied_signal already returned above if applied.
     has_submit = bool(await page.locator(
         'button:has-text("Submit"), input[type=submit]').count())
     captcha = has_submit and (bool(_re.search(r"captcha", body, _re.I)) or bool(
@@ -1799,7 +1873,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
     # or an unconfirmed submit falls through to a board gate (with a screenshot) —
     # we don't pull the human into a live window unless one is truly required.
     if headed and get_settings().assist_captcha and captcha:
-        conf = await _assist_wait(page, pk, url, "", "captcha")
+        conf = await _assist_wait(page, pk, url, "", "captcha", model=model)
         if conf:
             st = await page.evaluate(_READ_FORM_JS)
             return {"status": "applied", "confirmation": conf,
@@ -1813,7 +1887,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
         if headed and get_settings().assist_captcha:
             conf = await _assist_wait(
                 page, pk, url,
-                "set " + "; ".join(l[:60] for l in labels[:4]), "")
+                "set " + "; ".join(l[:60] for l in labels[:4]), "", model=model)
             if conf:
                 st = await page.evaluate(_READ_FORM_JS)
                 return {"status": "applied", "confirmation": conf,
