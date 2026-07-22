@@ -27,6 +27,7 @@ const state = {
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
   filters: {},        // {company_lower: [title keyword, ...]} per-company title filters
+  activity: {},       // pk -> {detail, at} — the live step, shown on active cards
   coQuery: "",        // search inside the company picker
   mode: "gated",
   paused: false,
@@ -405,10 +406,14 @@ function laneCard(r) {
     retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
        title="Score + tailor this job now (stops at ready-to-apply)">▶ Run now</button>`;
   }
+  const act = state.activity[r.pk];
+  const live = (["tailoring", "submitting"].includes(r.status) && act && act.detail)
+    ? `<div class="kc-live"><span class="kc-live-dot"></span>${esc(act.detail.replace(/^[^\w]+/, "").slice(0, 70))}</div>` : "";
   return `<div class="kcard" data-open="${esc(r.pk)}" role="button" tabindex="0"
       title="Open details">
     <div class="kc-co">${esc(r.company)}</div>
     <div class="kc-role">${esc(r.title)}</div>
+    ${live}
     <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${retry}</div>
   </div>`;
 }
@@ -731,6 +736,18 @@ function feedItem(e) {
 
 const FEED_MAX = 250;
 let _feedTimer = null;
+let _liveT = null;
+function scheduleLive(pk) {
+  // Only re-render if this pk is an actively-working card on the board.
+  const a = state.apps.find((r) => r.pk === pk);
+  if (!a || !["tailoring", "submitting"].includes(a.status)) return;
+  if (_liveT) return;
+  _liveT = setTimeout(() => {
+    _liveT = null;
+    if (!["apps", "needs", "stuck", "logs"].includes(state.tab)) renderPane();  // pipeline view
+  }, 500);
+}
+
 function scheduleFeed() {
   if (_feedTimer) return;
   _feedTimer = setTimeout(() => { _feedTimer = null; renderFeed(); }, 180);
@@ -783,6 +800,10 @@ function connectLive() {
         if (seen.size > 5000) seen.clear();
         state.events.unshift(e);
         if (state.events.length > 1500) state.events.length = 1500;
+        if (e.pk && e.detail && ["response", "running", "action", "gate", "applied", "error"].includes(e.kind)) {
+          state.activity[e.pk] = { detail: String(e.detail), at: e.at, kind: e.kind };
+          scheduleLive(e.pk);   // update the card's live line without a full reload
+        }
         scheduleFeed();
         if (["discovered", "applied", "gate", "running", "error"].includes(e.kind)) scheduleReload();
       } catch { /* ignore malformed lines */ }
