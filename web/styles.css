@@ -1661,23 +1661,6 @@ a.rowlk, button.rowlk { display: inline-block; }
 .klane.ln-captcha .kl-dot { background: var(--info); animation: wippulse 1.4s ease-in-out infinite; }
 
 /* Single-role tailor panel + per-company title filter input */
-.cp-role {
-  border-top: 1px solid var(--border);
-  padding: 8px;
-  background: var(--card);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-.cp-role-t {
-  width: 100%;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  letter-spacing: 0.02em;
-}
-.cp-role .cp-search { flex: 1; min-width: 0; }
 
 
 
@@ -1710,3 +1693,38 @@ a.rowlk, button.rowlk { display: inline-block; }
   padding: 8px 12px;
 }
 .cp-runone:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }
+
+
+/* Top-level "Tailor a role" toolbar control (mirrors Skip companies). */
+.rolemgr { position: relative; display: inline-flex; }
+.rolebtn { color: var(--scan); border-color: color-mix(in srgb, var(--scan) 35%, var(--border)); }
+.rolebtn:hover { color: var(--scan); border-color: color-mix(in srgb, var(--scan) 55%, transparent);
+  background: color-mix(in srgb, var(--scan) 8%, var(--card)); }
+.rolepicker { left: 0; right: auto; width: min(340px, calc(100vw - 32px)); }
+.cp-role-h {
+  padding: 11px 12px 4px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--fg);
+}
+.cp-role-foot {
+  border-top: 1px solid var(--border);
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--card);
+}
+.cp-role-foot span { flex: 1; }
+.cp-role-foot b { color: var(--fg); font-weight: 600; }
+.cp-role-foot .cp-add-btn {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 12%, transparent);
+  color: var(--scan);
+  border-radius: var(--r-sm);
+  padding: 5px 11px;
+}
+.cp-role-foot .cp-add-btn:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }

@@ -1266,19 +1266,6 @@ function wire() {
     } else if (d) toast(d.error || "Could not add the company.");
   };
   $("#cp-add-btn").addEventListener("click", addCompany);
-  const runRole = async () => {
-    if (demoGuard()) return;
-    const url = $("#cp-role-url").value.trim();
-    if (!url) { toast("Paste the job URL first."); return; }
-    const d = await post("/actions/apply-role", { url });
-    if (d && d.ok) {
-      $("#cp-role-url").value = "";
-      toast(`▶ Tailoring your résumé to that role — it'll appear in Tailored when ready.`);
-      pollStats();
-    } else if (d) toast(d.error || "Couldn't start — check the URL.");
-  };
-  $("#cp-role-go").addEventListener("click", runRole);
-  $("#cp-role-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
   $("#cp-add-run").addEventListener("click", async () => {
     if (demoGuard()) return;
     const name = $("#cp-add-name").value.trim();
@@ -1342,6 +1329,31 @@ function wire() {
     renderTabs();
     renderPane();
   });
+
+  const rp = $("#rolepicker"), rpBtn = $("#btn-role");
+  const closeRp = () => { if (!rp.hidden) { rp.hidden = true; rpBtn.setAttribute("aria-expanded", "false"); } };
+  const runRole = async () => {
+    if (demoGuard()) return;
+    const url = $("#rp-url").value.trim();
+    if (!url) { toast("Paste the job URL first."); return; }
+    const d = await post("/actions/apply-role", { url });
+    if (d && d.ok) {
+      $("#rp-url").value = ""; closeRp();
+      toast("▶ Tailoring your résumé to that role — it'll land in Tailored when ready.");
+      pollStats();
+    } else if (d) toast(d.error || "Couldn't start — check the URL.");
+  };
+  rpBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = rp.hidden;
+    rp.hidden = !show;
+    rpBtn.setAttribute("aria-expanded", String(show));
+    if (show) $("#rp-url").focus();
+  });
+  rp.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", (e) => { if (!rp.hidden && !e.target.closest(".rolemgr")) closeRp(); });
+  $("#rp-go").addEventListener("click", runRole);
+  $("#rp-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
 
   const sp = $("#skippicker"), spBtn = $("#btn-skips");
   const closeSp = () => {

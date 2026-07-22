@@ -84,14 +84,6 @@
                   <button class="cp-lk cp-add-btn" id="cp-add-run" type="button"
                     title="Add the company, discover its postings, and tailor résumés — stops before applying">Add&nbsp;&amp;&nbsp;run</button>
                 </div>
-                <div class="cp-role">
-                  <div class="cp-role-t">Tailor to one specific role</div>
-                  <input id="cp-role-url" class="cp-search" type="text"
-                    placeholder="paste a job URL (Greenhouse / Lever / Ashby…)"
-                    autocomplete="off" spellcheck="false" />
-                  <button class="cp-lk cp-add-btn" id="cp-role-go" type="button"
-                    title="Fetch the JD, tailor your résumé to it, and stop at 'ready to apply' — no discovery needed">Tailor&nbsp;résumé</button>
-                </div>
               </div>
             </div>
 
@@ -191,6 +183,22 @@
                 <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
             </nav>
             <div class="workbar-right">
+              <div class="rolemgr" id="rolemgr">
+                <button id="btn-role" class="skipbtn rolebtn" aria-haspopup="true" aria-expanded="false"
+                  title="Paste a job URL — tailor your résumé to that one role, no discovery needed">✎ Tailor a role</button>
+                <div id="rolepicker" class="copicker rolepicker" hidden>
+                  <div class="cp-role-h">Tailor your résumé to one role</div>
+                  <div class="cp-head">
+                    <input id="rp-url" class="cp-search" type="text"
+                      placeholder="paste a job URL (Greenhouse / Lever / Ashby / Workday…)"
+                      autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div class="cp-role-foot">
+                    <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>
+                    <button id="rp-go" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
+                  </div>
+                </div>
+              </div>
               <div class="skipmgr" id="skipmgr">
                 <button id="btn-skips" class="skipbtn" aria-haspopup="true" aria-expanded="false"
                   title="Choose companies Discover + Process should skip">⊘ Skip companies<span
