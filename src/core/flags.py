@@ -51,6 +51,30 @@ def apply_mode() -> str:
     return mode if mode in ("gated", "auto") else "gated"
 
 
+def note_llm_error(where: str, msg: str) -> None:
+    """Record an LLM-provider failure (quota, auth, outage) so the dashboard can
+    show a TOP-LEVEL banner — these errors otherwise degrade stages silently
+    (e.g. the relevance screen passing whole feeds through)."""
+    import json
+    from datetime import datetime, timezone
+
+    set_flag("llm_error", json.dumps({
+        "where": where, "msg": msg[:300],
+        "at": datetime.now(timezone.utc).isoformat()}))
+
+
+def llm_error() -> dict | None:
+    import json
+
+    raw = get_flag("llm_error", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) or None
+    except Exception:
+        return None
+
+
 def skipped_companies() -> set:
     """Companies (lowercase names) the owner excluded via the picker's skip
     toggles. Skipped companies sit out discovery AND processing whenever the

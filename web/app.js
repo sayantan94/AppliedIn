@@ -250,7 +250,19 @@ function renderSkipPicker() {
   if (b) b.classList.toggle("on", n > 0);
 }
 
+function renderLlmBanner() {
+  const b = $("#llm-banner");
+  if (!b) return;
+  const err = state.stats.llm_error;
+  if (!err || !err.msg) { b.hidden = true; return; }
+  $("#llm-banner-msg").textContent =
+    `LLM failure in ${err.where || "the pipeline"}: ${err.msg} — screening degraded ` +
+    `to the keyword filter; scoring/tailoring/applying will fail until this is fixed.`;
+  b.hidden = false;
+}
+
 function renderDeck() {
+  renderLlmBanner();
   const s = state.stats || {};
   const c = s.counts_by_status || {};
   const waiting = s.found_waiting ?? c.found ?? 0;
@@ -1260,6 +1272,10 @@ function wire() {
     } else cb.checked = !skip;
   });
 
+  $("#llm-banner-x").addEventListener("click", () => {
+    $("#llm-banner").hidden = true;
+    if (!DEMO) post("/actions/clear-llm-error");
+  });
   $("#co-filter").addEventListener("change", (e) => {
     state.coFilter = e.target.value;
     e.target.classList.toggle("on", !!state.coFilter);

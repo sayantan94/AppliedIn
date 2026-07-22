@@ -122,6 +122,7 @@ def create_app() -> FastAPI:
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
         from core import flags
         return {"today_submitted": applied,
+                "llm_error": flags.llm_error(),
                 "queue_age_seconds": None, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
                 "auto_min_score": settings.auto_min_score,
@@ -139,6 +140,13 @@ def create_app() -> FastAPI:
         from discovery.handler import list_watchlist_companies
         return {"companies": list_watchlist_companies(),
                 "skipped": sorted(flags.skipped_companies())}
+
+    @app.post("/actions/clear-llm-error")
+    def clear_llm_error():
+        """Dismiss the top-level LLM-failure banner."""
+        from core import flags
+        flags.set_flag("llm_error", "")
+        return {"ok": True}
 
     @app.post("/actions/skip-company")
     def skip_company(body: dict):

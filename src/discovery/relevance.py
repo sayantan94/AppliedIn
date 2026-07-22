@@ -87,15 +87,24 @@ def relevant(
                           response_format=RelevanceResult)
         text = resp["choices"][0]["message"]["content"]
     except Exception as exc:
-        log.error("relevance screen call failed (%s) — passing all %d postings through",
-                  exc, len(jobs))
-        return jobs
+        # NEVER fail open: passing whole feeds through once flooded the board
+        # with 600+ sales/legal postings during an OpenAI quota outage. Degrade
+        # to the deterministic keyword/title gate and raise a TOP-LEVEL banner.
+        log.error("relevance screen call failed (%s) — degrading to the keyword filter",
+                  exc)
+        from core import flags as _flags
+
+        from .filters import stage1_match
+        _flags.note_llm_error("relevance screen", str(exc))
+        return [j for j in jobs if stage1_match(j, prefs)]
 
     try:
         keep = set(_parse(text).fit_indices)
     except Exception as exc:  # malformed output — don't silently drop everything
-        log.warning("relevance screen parse failed (%s) — passing all through", exc)
-        return jobs
+        log.warning("relevance screen parse failed (%s) — degrading to the keyword filter",
+                    exc)
+        from .filters import stage1_match
+        return [j for j in jobs if stage1_match(j, prefs)]
     return [j for i, j in enumerate(jobs) if i in keep]
 
 
