@@ -891,9 +891,21 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                     github=github)
                 return await _maybe_assist(res)
 
-            # The form accepted the submit (no errors). Scan for a required field we
-            # can RELIABLY read as empty — but skip comboboxes: their value lives off
-            # the visible input, so trust the form's verdict over our read for those.
+            # The form accepted the submit (no errors). A VISIBLE confirmation is
+            # authoritative — Ashby keeps its hCaptcha iframe in the DOM even after
+            # a successful submit, so we must confirm success (text / url /
+            # structural / vision) BEFORE gating on a "CAPTCHA" or re-submitting.
+            # This is what stops an already-applied job from false-gating.
+            conf = await _applied_signal(page, url, body, model=model, allow_vision=True)
+            if conf:
+                st = await page.evaluate(_READ_FORM_JS)
+                return {"status": "applied", "confirmation": conf,
+                        "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
+                        "drafted": drafted or None, "fields": _ui_fields(st)}
+
+            # Scan for a required field we can RELIABLY read as empty — but skip
+            # comboboxes: their value lives off the visible input, so trust the
+            # form's verdict over our read for those.
             state = await page.evaluate(_READ_FORM_JS)
             empty_req = [f for f in state if f.get("required") and not f.get("value")
                          and f.get("type") != "file" and not f.get("combo")]
@@ -911,9 +923,14 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                     "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
                     "drafted": drafted or None, "fields": _ui_fields(state),
                     "question": q})
-            # Only NOW, with every required field truly filled, is the CAPTCHA the blocker.
-            if _re.search(r"captcha", body, _re.I) or await page.locator(
-                    'iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count():
+            # A REAL captcha block = the challenge is present AND the submit
+            # control is still on the page (we're still on the form, not a
+            # confirmation). A leftover Ashby iframe on a submitted page is not a
+            # blocker — success was already returned above if it applied.
+            has_submit = bool(await page.locator(
+                'button:has-text("Submit"), input[type=submit]').count())
+            if has_submit and (_re.search(r"captcha", body, _re.I) or await page.locator(
+                    'iframe[src*="recaptcha"], iframe[src*="hcaptcha"]').count()):
                 return await _maybe_assist({
                     "status": "gate", "reason": "captcha", "screenshot_b64": shot,
                     "drafted": drafted or None, "fields": _ui_fields(state),
