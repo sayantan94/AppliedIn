@@ -19,6 +19,7 @@ class Status(str, Enum):
     """Lifecycle of a single application row in the ``applications`` table."""
 
     FOUND = "found"
+    TAILORING = "tailoring"  # in-progress: score/tailor running (UI shows it working)
     TAILORED = "tailored"
     SKIPPED = "skipped"
     SUBMITTING = "submitting"  # idempotency marker; set immediately before submit

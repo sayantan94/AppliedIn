@@ -107,6 +107,12 @@ def run_job(pk: str, stores: Any = None) -> dict:
         return {"result": "missing", "pk": pk}
 
     from core.events import emit
+    # Mark it in-progress so the board shows it WORKING (yellow, in Tailored)
+    # instead of sitting silently in Found. The graph resets it to
+    # tailored/skipped/gated when it finishes; an orphan (killed mid-run) is
+    # recovered back to found on restart.
+    if row.get("status") == "found":
+        stores.tracking.set_status(pk, Status.TAILORING)
     emit("running", pk=pk, detail=f"{row.get('title','')} @ {row.get('company','')}",
          url=row.get("jd_url"))
     return _run(_run_job_async(pk, row, stores))

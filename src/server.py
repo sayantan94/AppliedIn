@@ -596,14 +596,19 @@ def _recover_stuck(settings) -> None:  # noqa: ANN001
 
     try:
         stores = make_stores(settings)
-        stuck = [r for r in stores.tracking.all()
-                 if r.get("status") == "submitting"
-                 and not str(r.get("pk", "")).startswith("meta#")]
+        rows = [r for r in stores.tracking.all()
+                if not str(r.get("pk", "")).startswith("meta#")]
+        stuck = [r for r in rows if r.get("status") == "submitting"]
         for r in stuck:
             stores.tracking.set_status(r["pk"], Status.TAILORED)
-        if stuck:
+        # A killed score/tailor leaves the row in 'tailoring' — reset to found.
+        mid = [r for r in rows if r.get("status") == "tailoring"]
+        for r in mid:
+            stores.tracking.set_status(r["pk"], Status.FOUND)
+        if stuck or mid:
             logging.getLogger("server").info(
-                "recovered %d orphaned 'submitting' job(s) -> tailored", len(stuck))
+                "recovered %d 'submitting' -> tailored, %d 'tailoring' -> found",
+                len(stuck), len(mid))
     except Exception:  # noqa: BLE001 - never block startup on recovery
         logging.getLogger("server").exception("orphan recovery failed")
 

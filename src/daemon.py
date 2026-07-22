@@ -270,15 +270,23 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
     so the apply worker retries it. Nothing stays stuck in 'applying' forever."""
     from core.models import Status
 
-    n = 0
+    n = t = 0
     for r in stores.tracking.all():
         pk = r.get("pk", "")
-        if not str(pk).startswith("meta#") and r.get("status") == "submitting":
+        if str(pk).startswith("meta#"):
+            continue
+        st = r.get("status")
+        if st == "submitting":
             stores.tracking.set_status(pk, Status.TAILORED)
             stores.queue.enqueue(stores.apply_queue, {"pk": pk})
             n += 1
+        elif st == "tailoring":  # score/tailor was killed mid-run → back to found
+            stores.tracking.set_status(pk, Status.FOUND)
+            t += 1
     if n:
         log.info("recovered %d orphaned 'submitting' job(s) → re-queued to apply", n)
+    if t:
+        log.info("recovered %d orphaned 'tailoring' job(s) → reset to found", t)
 
 
 def main() -> None:

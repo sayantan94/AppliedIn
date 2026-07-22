@@ -98,6 +98,7 @@ const imgOk = (u) => !!u && u !== "#";
 // --- status vocabulary -----------------------------------------------------
 const STATUS_META = {
   found:          { label: "found",            cls: "s-found" },
+  tailoring:      { label: "tailoring…",       cls: "s-tailoring" },
   tailored:       { label: "tailored",         cls: "s-work" },
   submitting:     { label: "applying…",        cls: "s-live" },
   applied:        { label: "applied",          cls: "s-ok" },
@@ -363,10 +364,12 @@ const canApply = (r) => r.status === "tailored" || awaitsApproval(r);
 
 const LANES = [
   { label: "Found",      st: ["found"],                cls: "ln-found",
+    match: (r) => r.status === "found",
     hint: "Discovered — waiting for a Process run" },
-  { label: "Tailored",   st: ["tailored", "needs_human"], cls: "ln-ready",
-    match: (r) => r.status === "tailored" || (r.status === "needs_human" && awaitsApproval(r)),
-    hint: "Résumé tailored — the apply itself waits for your ▶ approval" },
+  { label: "Tailored",   st: ["tailored", "tailoring", "needs_human"], cls: "ln-ready",
+    match: (r) => r.status === "tailored" || r.status === "tailoring"
+                  || (r.status === "needs_human" && awaitsApproval(r)),
+    hint: "Résumé tailored (or tailoring now, in yellow) — the apply waits for your ▶ approval" },
   { label: "Submitting", st: ["submitting"],           cls: "ln-live",
     hint: "The browser is filling the application now" },
   { label: "Applied",    st: ["applied", "applied_manual"], cls: "ln-ok",

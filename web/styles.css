@@ -868,6 +868,15 @@ a.rowlk, button.rowlk { display: inline-block; }
   border-color: color-mix(in srgb, var(--info) 40%, transparent);
 }
 .pill.s-found::before { background: transparent; border: 1px dashed currentColor; }
+.pill.s-tailoring {
+  color: var(--run);
+  border-color: color-mix(in srgb, var(--run) 45%, transparent);
+  background: color-mix(in srgb, var(--run) 12%, transparent);
+}
+.pill.s-tailoring::before {
+  background: var(--run);
+  animation: wippulse 1.1s ease-in-out infinite;
+}
 .pill.s-work { color: color-mix(in srgb, var(--scan) 70%, var(--muted)); }
 .pill.s-dim { color: var(--faint); }
 .pill.s-dim::before { background: var(--faint); }
