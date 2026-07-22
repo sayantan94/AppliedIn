@@ -227,12 +227,27 @@ function renderPickerState() {
   $("#cp-state").textContent = pickedAll() ? `all ${total}` : `${n} of ${total}`;
   const sk = state.skipped.size;
   const skNote = sk ? ` <span class="cp-skipnote">· ${sk} skipped</span>` : "";
-  const one = n === 1 ? [...state.picked][0] : null;
-  const runOne = one ? ` <button class="cp-lk cp-runone" data-runone="${esc(one)}"
-      title="Discover ${esc(one)}'s postings, then score + tailor them — stops before applying">▶ Discover&nbsp;+&nbsp;tailor ${esc(one)}</button>` : "";
-  $("#cp-foot").innerHTML = (pickedAll()
+  const line = pickedAll()
     ? `Discover + Process run on the <b>whole watchlist</b>${total ? ` (${total - sk} of ${total} companies)` : ""}.`
-    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`) + skNote + runOne;
+    : `Discover + Process run on <b>${n} compan${n === 1 ? "y" : "ies"}</b> only.`;
+  // Pick exactly ONE company → a clear per-company title filter + run button,
+  // right where you decide to run it (not buried in the skip list).
+  let single = "";
+  if (n === 1) {
+    const one = [...state.picked][0];
+    const f = (state.filters[one.toLowerCase()] || []).join(", ");
+    single = `<div class="cp-one">
+      <div class="cp-one-fl">
+        <label for="cp-one-filter">Only ${esc(one)} titles containing</label>
+        <input id="cp-one-filter" class="cp-search" data-filter-co="${esc(one)}"
+          value="${esc(f)}" placeholder="e.g. Staff  ·  blank = all titles"
+          autocomplete="off" spellcheck="false">
+      </div>
+      <button class="cp-runone" data-runone="${esc(one)}"
+        title="Discover ${esc(one)}'s postings (matching the filter), score + tailor them — stops before applying">▶ Discover + tailor ${esc(one)}</button>
+    </div>`;
+  }
+  $("#cp-foot").innerHTML = line + skNote + single;
 }
 
 function renderSkipPicker() {
@@ -243,13 +258,9 @@ function renderSkipPicker() {
     .filter((c) => !q || c.toLowerCase().includes(q))
     .map((c) => {
       const sk = state.skipped.has(c.toLowerCase());
-      const f = (state.filters[c.toLowerCase()] || []).join(", ");
-      return `<div class="cp-item sp-item ${sk ? "skipped" : ""}">
-        <label class="cp-name">
-          <input type="checkbox" value="${esc(c)}" ${sk ? "checked" : ""}>
-          <span>${esc(c)}</span></label>
-        <input class="sp-filter" data-filter-co="${esc(c)}" value="${esc(f)}"
-          placeholder="only titles… e.g. Staff" title="Only keep titles containing these words (comma-separated). Blank = all."></div>`;
+      return `<label class="cp-item sp-item ${sk ? "skipped" : ""}">
+        <input type="checkbox" value="${esc(c)}" ${sk ? "checked" : ""}>
+        <span>${esc(c)}</span></label>`;
     }).join("");
   list.innerHTML = rows || `<div class="cp-none">No companies match.</div>`;
   const n = state.skipped.size, badge = $("#skip-count");
@@ -1277,9 +1288,30 @@ function wire() {
     await runCompany(name, url);   // endpoint adds it to the watchlist if new
     await loadCompanies();
   });
+  const commitOneFilter = async (inp) => {
+    const name = inp.dataset.filterCo, titles = inp.value.trim();
+    const d = await post("/actions/company-filter", { name, titles });
+    if (d && d.ok) {
+      state.filters = d.filters || {};
+      toast(titles
+        ? `${name}: only titles with "${titles}"${d.reconciled ? ` — ${d.reconciled} re-sorted` : ""}.`
+        : `${name}: title filter cleared.`);
+      loadApps();
+    }
+  };
   $("#cp-foot").addEventListener("click", (e) => {
     const b = e.target.closest("[data-runone]");
-    if (b) runCompany(b.dataset.runone);
+    if (!b) return;
+    const inp = $("#cp-one-filter");           // save the filter before running
+    if (inp && inp.value.trim() !== (state.filters[b.dataset.runone.toLowerCase()] || []).join(", ")) {
+      commitOneFilter(inp).then(() => runCompany(b.dataset.runone));
+    } else runCompany(b.dataset.runone);
+  });
+  $("#cp-foot").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.id === "cp-one-filter") { e.preventDefault(); e.target.blur(); }
+  });
+  $("#cp-foot").addEventListener("focusout", (e) => {
+    if (e.target.id === "cp-one-filter") commitOneFilter(e.target);
   });
   $("#cp-add-url").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
   $("#cp-add-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
@@ -1331,23 +1363,6 @@ function wire() {
   $("#sp-search").addEventListener("input", (e) => {
     state.spQuery = e.target.value;
     renderSkipPicker();
-  });
-  const commitFilter = async (inp) => {
-    const name = inp.dataset.filterCo;
-    const titles = inp.value.trim();
-    const d = await post("/actions/company-filter", { name, titles });
-    if (d && d.ok) {
-      state.filters = d.filters || {};
-      const msg = titles ? `${name}: only titles with "${titles}".` : `${name}: filter cleared.`;
-      toast(d.reconciled ? `${msg} ${d.reconciled} job(s) re-sorted.` : msg);
-      loadApps();
-    }
-  };
-  $("#sp-list").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && e.target.matches(".sp-filter")) { e.target.blur(); }
-  });
-  $("#sp-list").addEventListener("focusout", (e) => {
-    if (e.target.matches(".sp-filter")) commitFilter(e.target);
   });
   $("#sp-list").addEventListener("change", async (e) => {
     const cb = e.target;
