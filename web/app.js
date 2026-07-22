@@ -355,8 +355,12 @@ const LANES = [
     hint: "The browser is filling the application now" },
   { label: "Applied",    st: ["applied", "applied_manual"], cls: "ln-ok",
     hint: "Submitted — confirmation captured" },
+  { label: "Human check", st: ["needs_human"],         cls: "ln-captcha",
+    match: (r) => r.status === "needs_human" && r.gate_reason === "captcha",
+    hint: "Filled and ready — a CAPTCHA needs 10 seconds of human. One click re-opens the window" },
   { label: "Needs you",  st: ["needs_human"],          cls: "ln-warn",
-    match: (r) => r.status === "needs_human" && !awaitsApproval(r),
+    match: (r) => r.status === "needs_human" && !awaitsApproval(r)
+                  && r.gate_reason !== "captcha",
     hint: "Paused on a question — answer in the Needs-you tab" },
   { label: "Flagged",    st: ["failed"],               cls: "ln-flag",
     match: (r) => r.status === "failed" && r.fail_kind === "spam_flagged",
@@ -372,6 +376,9 @@ function laneCard(r) {
   if (r.status === "failed" && r.fail_kind === "spam_flagged") {
     retry = `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
        title="Re-run this application with human-style clicks">↻ Retry</button>`;
+  } else if (r.status === "needs_human" && r.gate_reason === "captcha") {
+    retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
+       title="Re-opens the filled application in Chrome — solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
   } else if (canApply(r)) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Approve — the browser applies with the tailored résumé">▶ Apply</button>`;

@@ -1657,3 +1657,4 @@ a.rowlk, button.rowlk { display: inline-block; }
   padding: 3px 9px;
 }
 .cp-runone:hover { text-decoration: none; background: color-mix(in srgb, var(--scan) 12%, transparent); }
+.klane.ln-captcha .kl-dot { background: var(--info); animation: wippulse 1.4s ease-in-out infinite; }
