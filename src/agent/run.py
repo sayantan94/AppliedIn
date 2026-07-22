@@ -414,6 +414,21 @@ def _score_gate(pk: str, text: str, stores: Any) -> dict | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
+    # A weak model sometimes REFUSES ("I'm an AI assistant and don't have a
+    # resume…") instead of scoring; the refusal parses as score 0 and used to
+    # bury a perfectly good job as 'low_score'. Surface it as a retryable,
+    # VISIBLE error instead.
+    import re as _re
+    if score <= 1 and _re.search(
+            r"i'?m an ai|as an ai|i cannot|i can'?t|unable to (access|assist)"
+            r"|don'?t have (a|any) (resume|r\u00e9sum\u00e9|personal)", t, _re.I):
+        stores.tracking.set_status(pk, Status.ERROR,
+                                   error="the scorer model refused the task instead of "
+                                         "scoring — hit Retry (or switch the scorer model)")
+        emit("error", pk=pk, detail="scorer refused instead of scoring — retry the job")
+        log.warning("scorer refusal for pk=%s", pk)
+        return {"result": "error", "pk": pk, "reason": "scorer_refused"}
+
     row = stores.tracking.get(pk) or {}
     stores.tracking.set_status(pk, row.get("status", "running"), match_score=score)
     threshold = _min_score()

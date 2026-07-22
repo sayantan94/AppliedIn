@@ -229,7 +229,9 @@ scorer = LlmAgent(
         "3=stretch, 5=generic, 7=worth applying, 9-10=exceptional. Be calibrated and "
         "slightly conservative. If the job description is only a title with little detail, "
         "score from the title + résumé rather than refusing. Return the score and a "
-        "one-line reasoning."
+        "one-line reasoning. You are NOT applying to anything and need no personal "
+        "data or web access — everything required is in this prompt; scoring is a "
+        "pure text-analysis task, so NEVER refuse it."
     ),
     output_schema=MatchScore, output_key="match_score",
 )
