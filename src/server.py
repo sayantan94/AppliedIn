@@ -316,7 +316,9 @@ def create_app() -> FastAPI:
             if company and company != "__all__" and (r.get("company") or "").lower() != company:
                 continue
             q = (r.get("gate_pending") or {}).get("question", "")
-            if r.get("gate_reason") == "approval" or q.startswith("Ready to apply"):
+            if (r.get("status") == "tailored"
+                    or r.get("gate_reason") == "approval"
+                    or q.startswith("Ready to apply")):
                 pks.append(r["pk"])
 
         _LANES = 5  # concurrent applies (also the number of Chrome profiles)

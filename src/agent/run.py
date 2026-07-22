@@ -232,6 +232,11 @@ def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
     row = stores.tracking.get(pk) or {}
     call_id = row.get("gate_call_id")
     if not call_id:
+        # Ungated TAILORED rows (tailored before approval gates kept status, or
+        # re-queued items) still take the one-click ▶ Apply: approving one means
+        # "run the browser apply for it now".
+        if row.get("status") == "tailored":
+            return _run(_apply_direct(pk, stores))
         return {"result": "not_gated", "pk": pk}
 
     question = (row.get("gate_pending") or {}).get("question") or ""

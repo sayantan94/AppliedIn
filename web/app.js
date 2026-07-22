@@ -341,6 +341,9 @@ function renderCoFilter() {
 
 // --- Pipeline board (kanban lanes by status) -------------------------------
 const awaitsApproval = (r) => r.gate_reason === "approval" && !!r.gate_question;
+// Every tailored job can be applied with one click — including older rows
+// tailored before approval gates carried the status.
+const canApply = (r) => r.status === "tailored" || awaitsApproval(r);
 
 const LANES = [
   { label: "Found",      st: ["found"],                cls: "ln-found",
@@ -369,7 +372,7 @@ function laneCard(r) {
   if (r.status === "failed" && r.fail_kind === "spam_flagged") {
     retry = `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
        title="Re-run this application with human-style clicks">↻ Retry</button>`;
-  } else if (awaitsApproval(r)) {
+  } else if (canApply(r)) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Approve — the browser applies with the tailored résumé">▶ Apply</button>`;
   }
@@ -399,7 +402,7 @@ function viewPipeline() {
     </div>`;
   }).join("");
   if (!shown && filtersActive()) return emptyFiltered();
-  const nApprove = visible(state.apps.filter(awaitsApproval)).length;
+  const nApprove = visible(state.apps.filter(canApply)).length;
   const approveNote = nApprove ? `<div class="pane-note">
     <span>${nApprove} tailored job${nApprove === 1 ? "" : "s"} await${nApprove === 1 ? "s" : ""} your apply approval.</span>
     <button class="btn btn-amber" data-approve-all="1">Approve all ${nApprove}</button>
@@ -995,7 +998,7 @@ function openDrawer(pk) {
     `<div class="tl"><div class="tl-dot ${t.done ? "done" : ""}"></div>
       <div><div class="tl-label">${esc(t.label)}</div><div class="tl-time">${when(t.at)}</div></div></div>`).join("");
 
-  const gate = (r.status === "needs_human" || awaitsApproval(r)) ? `
+  const gate = (r.status === "needs_human" || canApply(r)) ? `
     <div class="section gate-box">
       <div class="section-t">⏸ ${esc(gateLabel(r.gate_reason))}</div>
       <div class="gate-q md">${md(r.gate_question || defaultGateText(r))}</div>
