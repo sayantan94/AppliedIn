@@ -75,19 +75,36 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
         key = artifacts.put("resumes", f"{pk}.pdf", render_pdf(tailored_latex), "application/pdf")
         fmt = "pdf"
     except RuntimeError as exc:
-        # NEVER downgrade a good PDF to a .tex pointer: the apply step needs a PDF
-        # to upload. If a previous save compiled, keep it and make the agent fix
-        # its broken edit; only fall back to .tex when no PDF ever existed.
-        prev = (stores.tracking.get(pk) or {}).get("resume_s3_key", "")
-        if prev.endswith(".pdf"):
-            log.warning("PDF render failed (%s); keeping previous good PDF", exc)
-            return {"ok": False,
-                    "message": "Your edited LaTeX does NOT compile (syntax error). The "
-                               "previous valid résumé is kept. Fix the error and re-save "
-                               "the FULL corrected .tex."}
-        log.warning("PDF render failed (%s); storing .tex only", exc)
-        key = tex_key
-        fmt = "tex"
+        # Most compile failures are bare specials ($500K, 30%, AT&T) — repair
+        # deterministically and retry ONCE before considering any downgrade.
+        from tools.render import sanitize_latex
+        pdf_bytes = None
+        fixed = sanitize_latex(tailored_latex)
+        if fixed != tailored_latex:
+            try:
+                pdf_bytes = render_pdf(fixed)
+            except RuntimeError:
+                pdf_bytes = None
+        if pdf_bytes is not None:
+            tailored_latex = fixed
+            tex_key = artifacts.put("resumes", f"{pk}.tex", fixed.encode(), "text/x-tex")
+            key = artifacts.put("resumes", f"{pk}.pdf", pdf_bytes, "application/pdf")
+            fmt = "pdf"
+            log.info("PDF render repaired by escaping bare specials for %s", pk)
+        else:
+            # NEVER downgrade a good PDF to a .tex pointer: the apply step needs a PDF
+            # to upload. If a previous save compiled, keep it and make the agent fix
+            # its broken edit; only fall back to .tex when no PDF ever existed.
+            prev = (stores.tracking.get(pk) or {}).get("resume_s3_key", "")
+            if prev.endswith(".pdf"):
+                log.warning("PDF render failed (%s); keeping previous good PDF", exc)
+                return {"ok": False,
+                        "message": "Your edited LaTeX does NOT compile (syntax error). The "
+                                   "previous valid résumé is kept. Fix the error and re-save "
+                                   "the FULL corrected .tex."}
+            log.warning("PDF render failed (%s); storing .tex only", exc)
+            key = tex_key
+            fmt = "tex"
 
     tool_context.state["resume_s3_key"] = key
     tool_context.state["tailored"] = tailored_latex

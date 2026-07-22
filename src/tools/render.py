@@ -53,6 +53,27 @@ def _run(cmd: list[str], tmp: str, name: str) -> bytes:
     return out.read_bytes()
 
 
+def sanitize_latex(tex: str) -> str:
+    """Escape the LaTeX specials models keep writing bare in résumé BULLETS —
+    `$500K`, `30% faster`, `AT&T`, `#1` — which break compilation (a naked `%`
+    even silently comments out the rest of the line). Context-aware and
+    body-only: the preamble's real `%` comments and tabular `&` separators are
+    untouched, as is anything already escaped. Only used as a compile-failure
+    retry, so a document that compiles is never rewritten."""
+    import re
+
+    marker = "\\begin{document}"
+    at = tex.find(marker)
+    if at == -1:
+        return tex
+    head, body = tex[: at + len(marker)], tex[at + len(marker):]
+    body = re.sub(r"(?<!\\)\$", r"\\$", body)          # $500K → \$500K
+    body = re.sub(r"(?<=\d)\s?%", r"\\%", body)        # 30% → 30\% (digit-bound only)
+    body = re.sub(r"(?<=\w)&(?=\w)", r"\\&", body)     # AT&T → AT\&T (word-bound only)
+    body = re.sub(r"(?<!\\)#(?=\d)", r"\\#", body)     # #1 → \#1
+    return head + body
+
+
 def render_pdf(latex_source: str) -> bytes:
     """Compile LaTeX source to PDF bytes (pdflatex if available, else Tectonic)."""
     if (pdflatex := shutil.which("pdflatex")) is not None:
