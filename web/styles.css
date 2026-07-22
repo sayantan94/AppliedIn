@@ -715,7 +715,16 @@ button:disabled { cursor: default; }
   padding: 0 6px;
   text-align: center;
 }
-.kl-cards { display: flex; flex-direction: column; gap: 8px; padding: 9px; }
+.kl-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+  /* A lane with 100+ cards must scroll ITSELF — never stretch the page. */
+  max-height: min(62vh, 640px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .kl-empty { color: var(--faint); text-align: center; font-size: 12px; padding: 12px 0 8px; }
 .kcard {
   background: var(--card-2);
