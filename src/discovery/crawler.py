@@ -67,15 +67,31 @@ def _search_terms(prefs: Preferences) -> list[str]:
     return terms[:5] or ["software engineer"]
 
 
+_CRAWL_CEILING_S = 600  # 10 min per company — enterprise portals (Google, Oracle)
+# otherwise grind a full-watchlist sweep for HOURS; a crawl that needs longer is
+# stuck, not thorough. The company is simply skipped until the next sweep.
+
+
 def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobRecord]:
     """Tier-2 escalation: drive the page with a browser agent (browser-use) and
     map the postings it uncovers to JobRecords."""
+    import asyncio
     from urllib.parse import urljoin
 
     from core.config import get_settings
     from tools.browser_crawl import crawl
 
-    items = _run_async(crawl(url, company, _search_terms(prefs), get_settings().browser_model))
+    async def _bounded():
+        return await asyncio.wait_for(
+            crawl(url, company, _search_terms(prefs), get_settings().browser_model),
+            timeout=_CRAWL_CEILING_S)
+
+    try:
+        items = _run_async(_bounded())
+    except TimeoutError:
+        log.warning("%s: browser crawl hit the %ds ceiling — skipping until the next sweep",
+                    company, _CRAWL_CEILING_S)
+        return []
     return [
         JobRecord(company=company, job_id=str(it["job_id"]), title=it.get("title", ""),
                   # normalize relative URLs (e.g. /en-us/details/…) to absolute so the
