@@ -489,22 +489,27 @@ async def _agent_finish_submit(page, facts: dict, drafted: dict, model: str, pk:
                    if upload_path else "")
     snapshot: list = []
     task = (
-        f"This {company} job-application form is already open and mostly filled. "
-        f"FINISH and SUBMIT it (under 14 steps).\n{resume_line}"
+        f"This {company} application was ALREADY filled and a Submit was ALREADY "
+        f"clicked, but we could not auto-confirm it. Resolve it in AT MOST 5 steps. "
+        f"Be decisive — do NOT loop.\n{resume_line}"
         f"Approved answers — type these VERBATIM only, never invent:\n{facts_str}\n\n"
-        "1. If a required field is empty, set it: fill_fields for text/dropdown, "
-        "select_choices for radios/checkboxes; for an autocomplete (Location) click "
-        "it, type the city, and click the matching suggestion (a more-qualified "
-        "option like 'Seattle, Washington, United States' for 'Seattle' IS correct).\n"
-        "2. call verify_form_filled and fix only what it flags.\n"
-        "3. Click Submit/Apply and watch the page.\n"
-        "4. If you SEE a confirmation ('application submitted', 'thank you'), finish "
-        "with:  APPLIED: <exact confirmation text>\n"
-        "Rules — never invent a value. If a required field has no approved answer, "
-        "STOP with:  MISSING: <question>. If a CAPTCHA challenge or a login/account "
-        "wall blocks submit, STOP with:  BLOCKED: <captcha or account> (never solve a "
-        "CAPTCHA). If you clicked submit but see no confirmation, STOP with:  "
-        "UNCERTAIN: <what the page shows>.")
+        "STEP 1 — LOOK at the current page FIRST. If it shows a submission "
+        "confirmation ('application submitted', 'thank you for applying', 'we "
+        "received your application', 'your application has been submitted'), the "
+        "job is DONE — finish immediately with:  APPLIED: <exact confirmation text>.\n"
+        "STEP 2 — If it still shows the FORM: do NOT re-upload the résumé and do "
+        "NOT re-type fields that already hold a value. Set ONLY a required field "
+        "that is visibly empty, then STOP editing.\n"
+        "STEP 3 — Click the Submit/Apply button EXACTLY ONCE, then look at the page.\n"
+        "STEP 4 — If a confirmation now shows, finish with:  APPLIED: <text>. If the "
+        "form shows a validation error, fix only that one field and click Submit "
+        "once more.\n"
+        "HARD RULES: call verify_form_filled AT MOST ONCE (never in a loop); click "
+        "Submit AT MOST TWICE total; never re-upload a résumé that's already "
+        "attached. Never invent a value — a required field with no approved answer "
+        "→ STOP with:  MISSING: <question>. A CAPTCHA/login wall → STOP with:  "
+        "BLOCKED: <captcha or account> (never solve a CAPTCHA). Submitted but no "
+        "confirmation visible → STOP with:  UNCERTAIN: <what the page shows>.")
     controller = _apply_controller(upload_path, pk, url, snapshot_sink=snapshot,
                                    drafted_sink=drafted, company=company, jd_text=jd_text,
                                    resume_tex=resume_tex, github=github)
@@ -518,7 +523,7 @@ async def _agent_finish_submit(page, facts: dict, drafted: dict, model: str, pk:
           detail="🤖 browser-use finishing + submitting the form (vision)")
     text, shot = "", None
     try:
-        history = await Agent(task=task, **opts).run(max_steps=16)
+        history = await Agent(task=task, **opts).run(max_steps=8)  # tight — no verify loops
         text = (history.final_result() if hasattr(history, "final_result") else str(history)) or ""
         shot = _last_screenshot(history)
     except Exception as exc:
