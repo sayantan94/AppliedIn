@@ -59,6 +59,17 @@ def _toks(s: str) -> set:
     return {t for t in words if len(t) > 2 and t not in _TOK_STOP}
 
 
+def _headless() -> bool:
+    """Run the apply browser headless? Runtime flag (dashboard toggle) wins over
+    the env default. Headless = no visible Chrome windows."""
+    try:
+        from core import flags
+        return flags.browser_headless()
+    except Exception:
+        from core.config import get_settings
+        return bool(getattr(get_settings(), "browser_headless", False))
+
+
 def _is_text_only(model: str) -> bool:
     """True for models with NO vision — we send them no screenshots (image input
     404s them). The Kimi K2 line is text-only; Kimi K2.5+/K3 are multimodal, so
@@ -176,7 +187,7 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
 
     facts = dict(facts)  # copy — we add auto-drafted answers across passes
     llm = make_llm(model)
-    headed = not bool(getattr(get_settings(), "browser_headless", False))
+    headed = not _headless()
     # Vision ON by default (Claude, GPT, Muse Spark, and other multimodal models).
     # Only known TEXT-ONLY models get it off — sending them screenshots 404s with
     # "no endpoints support image input" (e.g. Kimi K2).
@@ -971,7 +982,7 @@ def _browser_profile(allowed_domains: list, keep_alive: bool = False):  # noqa: 
     from core.config import get_settings
 
     s = get_settings()
-    base = {"headless": bool(getattr(s, "browser_headless", False)),
+    base = {"headless": _headless(),
             "keep_alive": keep_alive,
             "wait_between_actions": 0.8,
             "wait_for_network_idle_page_load_time": 1.0}
@@ -1000,7 +1011,7 @@ async def _launch(p):  # noqa: ANN001, ANN201
     from core.config import get_settings
 
     s = get_settings()
-    headless = bool(getattr(s, "browser_headless", False))
+    headless = _headless()
     channel = (getattr(s, "browser_channel", "") or "").strip() or None
     profile = _profile_dir()
     args = ["--no-first-run", "--no-default-browser-check"]

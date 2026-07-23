@@ -51,6 +51,16 @@ def apply_mode() -> str:
     return mode if mode in ("gated", "auto") else "gated"
 
 
+def browser_headless() -> bool:
+    """Whether apply runs Chrome HEADLESS (no visible windows). Runtime flag
+    overrides the env default. Note: a CAPTCHA / human handoff can't open a
+    visible window when headless — it surfaces on the board with a screenshot."""
+    v = get_flag("headless", "")
+    if v in ("yes", "no"):
+        return v == "yes"
+    return bool(getattr(get_settings(), "browser_headless", False))
+
+
 def note_llm_error(where: str, msg: str) -> None:
     """Record an LLM-provider failure (quota, auth, outage) so the dashboard can
     show a TOP-LEVEL banner — these errors otherwise degrade stages silently

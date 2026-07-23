@@ -30,6 +30,7 @@ const state = {
   activity: {},       // pk -> {detail, at} — the live step, shown on active cards
   coQuery: "",        // search inside the company picker
   mode: "gated",
+  headless: false,
   paused: false,
   autoMin: 8,
 };
@@ -326,6 +327,11 @@ function renderMenuState() {
   const mode = $("#m-mode-state");
   mode.textContent = state.mode === "auto" ? "auto ☾" : "gated";
   mode.className = "menu-state mono " + (state.mode === "auto" ? "on" : "");
+  const hl = $("#m-headless-state");
+  if (hl) {
+    hl.textContent = state.headless ? "headless" : "visible";
+    hl.className = "menu-state mono " + (state.headless ? "warn" : "on");
+  }
   $("#m-theme-state").textContent = document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
@@ -834,6 +840,7 @@ function demoEvents(apps) {
 function applyStats(s) {
   state.stats = s || {};
   if (s && s.apply_mode) state.mode = s.apply_mode;
+  if (s && typeof s.headless === "boolean") state.headless = s.headless;
   if (s) state.paused = !!s.paused;
   if (s && s.auto_min_score != null) state.autoMin = s.auto_min_score;
 }
@@ -1012,6 +1019,16 @@ async function togglePause() {
   await post("/actions/pause", { paused: state.paused });
   toast(state.paused ? "Automation paused — nothing will run on its own." : "Automation resumed.");
 }
+async function toggleHeadless() {
+  if (demoGuard()) return;
+  state.headless = !state.headless;
+  renderMenuState();
+  await post("/actions/browser-mode", { headless: state.headless });
+  toast(state.headless
+    ? "Headless — applies run with NO visible Chrome. (A CAPTCHA/handoff shows on the board, not a window.)"
+    : "Visible — you'll see the Chrome windows while it applies.");
+}
+
 async function toggleMode() {
   if (demoGuard()) return;
   state.mode = state.mode === "auto" ? "gated" : "auto";
@@ -1547,6 +1564,7 @@ function wire() {
   });
   $("#m-pause").addEventListener("click", () => { togglePause(); closeMenu(); });
   $("#m-mode").addEventListener("click", () => { toggleMode(); closeMenu(); });
+  $("#m-headless").addEventListener("click", () => { toggleHeadless(); closeMenu(); });
   $("#m-theme").addEventListener("click", () => {
     const root = document.documentElement;
     root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";

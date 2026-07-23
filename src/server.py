@@ -125,6 +125,7 @@ def create_app() -> FastAPI:
                 "llm_error": flags.llm_error(),
                 "queue_age_seconds": None, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
+                "headless": flags.browser_headless(),
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _RUNNING["discover"], "processing": _RUNNING["process"],
@@ -434,6 +435,15 @@ def create_app() -> FastAPI:
             return {"ok": False, "note": "mode must be 'gated' or 'auto'"}
         flags.set_flag("apply_mode", mode)
         return {"ok": True, "apply_mode": mode}
+
+    @app.post("/actions/browser-mode")
+    def set_browser_mode(body: dict):
+        """Toggle the apply browser between visible windows and HEADLESS (no GUI).
+        Headless is faster/less intrusive, but a CAPTCHA or human handoff can't
+        open a window — it surfaces on the board with a screenshot instead."""
+        from core import flags
+        flags.set_flag("headless", "yes" if (body or {}).get("headless") else "no")
+        return {"ok": True, "headless": flags.browser_headless()}
 
     @app.post("/actions/approve-all")
     def approve_all(body: dict, background: BackgroundTasks):
