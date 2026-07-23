@@ -904,26 +904,46 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                                                       resume_tex=resume_tex, github=github)
                         handed_off = True
 
-            # SUCCESS is authoritative first — Ashby keeps its hCaptcha iframe in
-            # the DOM even after a successful submit, so confirm (text / url /
-            # structural / vision) BEFORE anything else, or an applied job
-            # false-gates and gets re-submitted.
-            conf = await _applied_signal(page, url, body, model=model, allow_vision=True)
+            # SUCCESS is authoritative — but Ashby's submit is ASYNC, so poll a
+            # few seconds before deciding it didn't confirm (a too-fast read
+            # triggered the wander-prone escalation below on an app that had in
+            # fact submitted).
+            conf = None
+            for _ in range(6):
+                conf = await _applied_signal(page, url, model=model, allow_vision=False)
+                if conf:
+                    break
+                await page.wait_for_timeout(1200)
+            if not conf:  # last check with vision
+                conf = await _applied_signal(page, url, model=model, allow_vision=True)
             if conf:
                 st = await page.evaluate(_READ_FORM_JS)
                 return {"status": "applied", "confirmation": conf,
                         "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
                         "drafted": drafted or None, "fields": _ui_fields(st)}
 
-            # ENFORCED scripted → agent escalation: whenever the deterministic path
-            # cannot CONFIRM a submission — form errors it couldn't fix, a stubborn
-            # dropdown, or an unconfirmed submit — hand the live, already-filled
-            # page to the vision browser-use agent to finish + submit + confirm.
-            # The agent is smarter about confirmations/dropdowns and gates to the
-            # human ONLY when it genuinely hits a CAPTCHA or account wall (via
-            # BLOCKED:), never on a leftover iframe. This is the intended
-            # fast-path-then-escalate design — the scripted path never gates the
-            # human directly on its own read.
+            # A KNOWN ATS (Ashby/…) was filled by its dedicated skill — every
+            # field, the Location combobox, the choices/consents. Handing THAT to
+            # the vision agent is what caused the "clicks a random place and goes
+            # out" wander (it clicked 'Join us' and left the form). So for a known
+            # ATS we do NOT escalate to the agent: the form is complete and
+            # submitted — hold the visible window for the human to eyeball the
+            # confirmation (no wander), or report uncertain on the board.
+            from tools.ats import detect_ats
+            if detect_ats(url):
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"✅ {detect_ats(url)} form filled + submitted — couldn't "
+                             f"auto-read the confirmation; over to you to eyeball it")
+                return await _maybe_assist({
+                    "status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
+                    "drafted": drafted or None, "fields": _ui_fields(state),
+                    "question": "The form is filled and Submit was clicked. If the page "
+                                "shows a confirmation, you're done — otherwise click "
+                                "Submit once in the open window."})
+
+            # UNKNOWN form → escalate to the vision agent to finish + confirm
+            # (fenced to this host; gates the human only on a real CAPTCHA/account
+            # wall). This is the fast-path-then-escalate design for generic portals.
             _emit(pk, "response", agent="browser", url=url,
                   detail="🤝 scripted couldn't confirm — handing the filled form to "
                          "the vision agent to finish + submit")
