@@ -37,6 +37,14 @@ def emit(kind: str, *, pk: str | None = None, detail: str = "", **extra: Any) ->
     event = {"kind": kind, "pk": pk, "detail": detail,
              "at": datetime.now(UTC).isoformat(), **extra}
     payload = json.dumps(event, default=str)
+    # Durable diary of OUTCOMES (applied/needs-you/failed) — best-effort, ignores
+    # non-outcome kinds internally, never raises.
+    try:
+        from .memory import remember
+        remember(kind, pk=pk, detail=detail, at=event["at"],
+                 company=str(extra.get("company", "")), title=str(extra.get("title", "")))
+    except Exception:  # never let the diary break a run
+        log.debug("memory hook failed", exc_info=True)
     try:
         if get_settings().mode == "local":
             r = _redis()

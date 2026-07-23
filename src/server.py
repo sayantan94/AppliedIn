@@ -132,6 +132,12 @@ def create_app() -> FastAPI:
                 # 'Process applications' button will act on.
                 "found_waiting": counts.get("found", 0)}
 
+    @app.get("/memory")
+    def memory():
+        """The durable markdown diary of pipeline outcomes (applied/needs-you/failed)."""
+        from core.memory import read
+        return Response(read(), media_type="text/markdown; charset=utf-8")
+
     @app.get("/companies")
     def companies():
         """The watchlist company names — so the dashboard can offer a picker and
