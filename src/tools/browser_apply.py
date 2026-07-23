@@ -689,9 +689,14 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 elif f.get("required") and f.get("type") not in ("checkbox", "radio"):
                     # NEVER gate on a fact the KB already holds (Name, Email, …):
                     # a silent mapper failure (bad JSON → {} → all-SKIP) must not
-                    # reach the human. Deterministic word-overlap is the backstop.
+                    # reach the human. Deterministic word-overlap is the backstop,
+                    # and a standard consent auto-affirms from its own options.
                     if hit := _fact_for(label, facts):
                         fill_map[label] = hit[1]
+                    elif cd := _consent_default(label, f.get("options")):
+                        fill_map[label] = cd
+                        _emit(pk, "response", agent="browser", url=url,
+                              detail=f"✓ consent default → {label[:45]}: {cd}")
                     else:
                         missing_required.append(label)
 
@@ -1133,6 +1138,35 @@ async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
 def _with_fields(page, res: dict) -> dict:  # noqa: ANN001 - small shaping helper
     res = {k: v for k, v in res.items() if v is not None}
     return res
+
+
+def _consent_default(label: str, options: list | None) -> str | None:
+    """Standard job-application CONSENTS — 'I certify the info is true', 'I
+    understand the privacy policy', 'I authorize consideration for other roles',
+    'I acknowledge…' — are always affirmed by an applicant who is submitting.
+    If the label is clearly such a consent AND the field offers an affirmative
+    option (Yes / I agree / I accept), return it; else None. Deliberately
+    conservative: it NEVER fires for a substantive question (visa, relocation,
+    clearance) or for a waiver / fee / arbitration clause, which must reach the
+    human."""
+    import re as _re
+
+    l = (label or "").lower()
+    consent = _re.search(
+        r"\bi\s+(certify|understand|acknowledge|authorize|agree|consent|confirm)\b"
+        r"|privacy (policy|notice|statement)|terms (and|&) conditions"
+        r"|processed in accordance|candidate privacy", l)
+    if not consent:
+        return None
+    if _re.search(r"waive|waiver|\bfee\b|payment|arbitrat|background check fee", l):
+        return None  # never auto-affirm a waiver / fee — that's the human's call
+    aff = _re.compile(
+        r"^(yes\b|agree\b|accept\b|i\s+(agree|certify|understand|authorize|acknowledge"
+        r"|consent|accept|confirm)\b|i do\b|true\b)", _re.I)
+    for o in (options or []):
+        if aff.match((o or "").strip()):
+            return o
+    return None
 
 
 def _fact_for(err: str, facts: dict) -> tuple[str, str] | None:
