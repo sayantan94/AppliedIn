@@ -60,21 +60,23 @@ def remember(kind: str, *, pk: str | None = None, detail: str = "",
             except Exception:  # noqa: BLE001
                 pass
 
-        dedup = f"{day}|{pk}|{kind}"
-        if dedup in _seen:
-            return
-        _seen.add(dedup)
-
         who = " · ".join(x for x in (company, title) if x) or (pk or "")
-        note = f" — {detail.strip()}" if detail.strip() else ""
-        line = f"- **{clock}** {label} — {who}{note[:180]}\n"
+        # Collapse whitespace/newlines so every entry is ONE clean line.
+        flat = " ".join((detail or "").split())
+        note = f" — {flat[:160]}" if flat else ""
+        line = f"- **{clock}** {label} — {who}{note}\n"
 
         path = _path()
         path.parent.mkdir(parents=True, exist_ok=True)
         text = (path.read_text() if path.exists()
                 else "# AppliedIn — memory\n\nA running diary of what the pipeline did. "
                      "Newest day at the bottom.\n")
+        # File-based dedup (survives restarts): same outcome for the same job on
+        # the same day is written once. Identity = the "LABEL — WHO" part.
         header = f"## {day}\n"
+        section = text.split(header, 1)[1] if header in text else ""
+        if f"{label} — {who}" in section:
+            return
         # Days are chronological and we only append, so today's section is last.
         if header not in text:
             text = text.rstrip("\n") + "\n\n" + header
