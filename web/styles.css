@@ -1881,3 +1881,34 @@ a.rowlk, button.rowlk { display: inline-block; }
 .kc-loc.top { color: var(--scan); font-weight: 600; }
 .kc-loc.remote { color: var(--info); }
 .drawer-loc { color: var(--muted); }
+
+/* ─── Tailored lane: location buckets ──────────────────────────────────────
+   The location preference is a ranking (Washington, then California, then
+   remote), so the lane is grouped and ordered the same way — the roles worth
+   approving first are first, and the colour says which tier at a glance. */
+.bucket { margin-bottom: 10px; }
+.bucket:last-child { margin-bottom: 0; }
+.bk-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 3px 2px 6px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 7px;
+}
+.bk-name { color: var(--muted); }
+.bk-n { margin-left: auto; font-size: 10px; color: var(--faint); }
+.bucket.bk-wa     .bk-name { color: var(--scan); }
+.bucket.bk-wa     .bk-head { border-bottom-color: rgba(63, 214, 143, .35); }
+.bucket.bk-ca     .bk-name { color: var(--run); }
+.bucket.bk-ca     .bk-head { border-bottom-color: rgba(242, 177, 62, .3); }
+.bucket.bk-remote .bk-name { color: var(--info); }
+.bucket.bk-other  .bk-name { color: var(--faint); }
+
+.kl-loc {
+  margin-left: auto; margin-right: 6px;
+  background: var(--card); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-family: var(--sans); font-size: 10.5px; padding: 2px 4px; cursor: pointer;
+}
+.kl-loc:hover { border-color: var(--scan); color: var(--fg); }
