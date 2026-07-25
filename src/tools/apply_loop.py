@@ -36,6 +36,7 @@ from .browser_apply import (
     _ensure_sanctions_safe,
     _fill_human,
     _finalize_submit,
+    _fix_fields,
     _form_frame,
     _is_error_page,
     _is_placeholder,
@@ -49,7 +50,7 @@ from .browser_apply import (
 
 log = get_logger(__name__)
 
-MAX_STEPS = 12  # a form is a handful of decisions; more than this is thrashing
+MAX_STEPS = 18  # a form is a handful of decisions; more than this is thrashing
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +89,17 @@ TOOLS = [
             "required": ["answers"]},
     }},
     {"type": "function", "function": {
+        "name": "draft_answer",
+        "description": "Draft a free-text answer (motivation, 'tell us about a "
+                       "time…', anything open-ended). Always use this rather than "
+                       "writing prose yourself: it is grounded in the résumé and "
+                       "the job description. Returns the text to fill in.",
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string",
+                         "description": "The question exactly as the form asks it."}},
+            "required": ["question"]},
+    }},
+    {"type": "function", "function": {
         "name": "upload_resume",
         "description": "Attach the tailored résumé to the form's résumé field. "
                        "Never attaches to a cover-letter or autofill-parser input.",
@@ -122,8 +134,24 @@ Answer questions about the owner's own protected characteristics — disability,
 veteran status, race, gender — only from an explicit approved fact. If there is
 none, leave the question alone; these are voluntary and blank is a valid state.
 
+A legal acknowledgement — an arbitration agreement, a waiver, a certification
+that the information is true — is the owner's to give and must never be ticked on
+a guess. But an approved fact IS that answer: when the facts already say yes to
+one, use it and move on. Stopping to ask a question the owner has already
+answered is how a pipeline becomes something they have to babysit.
+
+Free-text answers are a pitch, not a form filling exercise. Ground every claim in
+the owner's real work from the facts and résumé, name the systems and the scale,
+and say what they actually did rather than describing the role in general terms.
+Write plain sentences: no dashes as connectors, no em dashes, no bulleted
+fragments. If you cannot ground an answer in the facts, do not write it.
+
 Use the labels exactly as read_form gives them. Fill everything you can in as few
-calls as possible, verify with read_form, then call ready_to_submit."""
+calls as possible — batch every value into one fill_fields and one select_choices
+rather than going field by field — verify once with read_form, then call
+ready_to_submit. You have a limited number of steps and each tool result tells you
+how many remain; an application left unsubmitted helps nobody, so once every
+required field has a value, submit."""
 
 
 def _guard(values: dict, kind: str) -> tuple[dict, list[str]]:
@@ -223,16 +251,53 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
 
                     elif name == "fill_fields":
                         vals, refused = _guard(args.get("values") or {}, "text")
-                        if vals:
-                            await _fill_human(page, vals)
+                        # A combobox is not a text box. Typing into a geocoder
+                        # leaves the text visible but nothing committed, so the
+                        # model reads it back as empty and tries again until the
+                        # step budget is gone — which is exactly how a location
+                        # field ate a whole run. Send those through the real
+                        # click, type and pick pass instead.
+                        snapshot = await _read(frame)
+                        combos = {f.get("label") for f in snapshot
+                                  if f.get("combo") or "location" in
+                                  str(f.get("label") or "").lower()}
+                        typed = {k: v for k, v in vals.items() if k not in combos}
+                        picked = {k: v for k, v in vals.items() if k in combos}
+                        if typed:
+                            await _fill_human(page, typed)
                             _emit(pk, "response", agent="browser", url=url,
-                                  detail=f"⌨ filled {len(vals)}: {list(vals)[:4]}")
-                        result = {"filled": list(vals), "refused": refused}
+                                  detail=f"⌨ filled {len(typed)}: {list(typed)[:4]}")
+                        if picked:
+                            # a geocoder matches on the city, not the full string
+                            picked = {k: (v.split(",")[0].strip()
+                                          if "location" in k.lower() else v)
+                                      for k, v in picked.items()}
+                            _emit(pk, "response", agent="browser", url=url,
+                                  detail=f"🎯 combobox: {list(picked)}")
+                            await _fix_fields(page, picked, pk, url)
+                        result = {"filled": list(typed), "picked_from_dropdown": list(picked),
+                                  "refused": refused}
 
                     elif name == "select_choices":
                         vals, refused = _guard(args.get("answers") or {}, "choice")
                         got = await _set_choices(page, vals, pk, url) if vals else {}
                         result = {"set": got, "refused": refused}
+
+                    elif name == "draft_answer":
+                        # The same writer the scripted engine uses: grounded in the
+                        # owner's real work, and already tuned for how they want to
+                        # be represented. A second prose voice in the pipeline would
+                        # be one more thing to keep in sync.
+                        from .narrative import draft_answer as _draft
+                        q = str(args.get("question") or "")
+                        text = _draft(q, company, jd_text, resume=resume_tex,
+                                      model=model) if q else ""
+                        if text and not _is_placeholder(text):
+                            drafted[q] = text
+                            _emit(pk, "response", agent="writer", url=url,
+                                  detail=f"drafted answer → {q[:70]}")
+                        result = {"answer": text or
+                                  "no grounded answer available — ask the owner"}
 
                     elif name == "upload_resume":
                         n = await _set_resume_on_page(page, resume_path) if resume_path else 0
@@ -255,12 +320,30 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                         return await _finalize_submit(page, facts, drafted, pk, url,
                                                       headed, model)
 
-                    messages.append({"role": "tool", "tool_call_id": call.id,
-                                     "name": name,
-                                     "content": json.dumps(result, default=str)[:8000]})
+                    messages.append({
+                        "role": "tool", "tool_call_id": call.id, "name": name,
+                        "content": json.dumps(
+                            {"result": result,
+                             "steps_remaining": MAX_STEPS - step - 1},
+                            default=str)[:8000]})
 
+            # Out of steps. If the form is actually complete, submitting it is
+            # obviously right — discarding a finished application because the
+            # model spent its budget verifying would waste the whole run and
+            # leave the owner to redo it by hand.
+            state = await _read(frame)
+            empty = [f for f in state if f.get("required") and not f.get("value")
+                     and f.get("type") not in ("file",)]
+            if state and not empty:
+                _emit(pk, "response", agent="browser", url=url,
+                      detail="⏱ out of steps but every required field is filled — submitting")
+                await _ensure_sanctions_safe(page, pk, url)
+                await _click_fields_pass(page, pk, url)
+                return await _finalize_submit(page, facts, drafted, pk, url, headed, model)
             return {"status": "unknown",
-                    "detail": f"The loop used all {MAX_STEPS} steps without submitting.",
-                    "fields": _ui_fields(await _read(frame))}
+                    "detail": f"The loop used all {MAX_STEPS} steps and "
+                              f"{len(empty)} required field(s) are still empty: "
+                              + "; ".join(str(f.get("label"))[:40] for f in empty[:3]),
+                    "fields": _ui_fields(state)}
         finally:
             await close()
