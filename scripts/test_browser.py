@@ -21,8 +21,14 @@ import core.config  # noqa: F401 — loads .env + sets litellm.drop_params
 from core.config import get_settings
 from core.stores import make_stores
 from tools.browser_apply import (
-    _APPLY_POLICY, _apply_controller, _clean_resume_copy, _is_text_only, _step_cb)
+    _APPLY_POLICY,
+    _apply_controller,
+    _clean_resume_copy,
+    _is_text_only,
+    _step_cb,
+)
 from tools.browser_llm import make_llm
+
 
 class LoopBreak(RuntimeError):
     def __init__(self, msg: str, force_submit: bool = False):

@@ -176,7 +176,7 @@ async def main() -> int:
         try:
             row = await asyncio.wait_for(survey_one(browser, company, sem),
                                          timeout=PER_COMPANY_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             row = {"company": company.name, "ats": "", "job_url": "", "status": "timeout",
                    "embedded": False, "fields": 0, "file_inputs": 0, "combos": 0,
                    "choice_groups": 0, "sanctions": False, "login_wall": False}

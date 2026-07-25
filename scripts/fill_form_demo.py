@@ -29,8 +29,8 @@ from tools.browser_apply import (  # noqa: E402
     _READ_FORM_JS,
     _fill_human,
     _fix_fields,
-    _set_choices,
     _form_frame,
+    _set_choices,
     _set_resume_on_page,
 )
 

@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import yaml
+
 from core.config import get_settings
 from core.storage.answer_bank import AnswerBank
 

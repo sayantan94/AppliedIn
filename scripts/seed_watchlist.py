@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
+
 from discovery.resolver import resolve
 
 
