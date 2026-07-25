@@ -2303,6 +2303,80 @@ async def _restore_wiped_form(page, state: list, facts: dict, pk: str, url: str)
     return total
 
 
+_VERIFY_FIELD_JS = r"""
+({q}) => {
+  const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const nq = norm(q);
+  for (const el of document.querySelectorAll('input,textarea,select')) {
+    const lbl = norm((el.labels && el.labels[0] && el.labels[0].textContent)
+                     || el.getAttribute('aria-label') || el.name || '');
+    const near = norm((el.closest('[class*="fieldEntry" i], fieldset, label, div') || {}).textContent || '');
+    if (!lbl.includes(nq.slice(0, 34)) && !near.includes(nq.slice(0, 34))) continue;
+    if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked) return 'checked'; continue; }
+    if (el.type === 'file') return (el.files && el.files.length) ? el.files[0].name : '';
+    if (el.value) return el.value;
+  }
+  return '';
+}
+"""
+
+
+async def set_field(page, label: str, value: object, pk: str = "", url: str = "") -> str:  # noqa: ANN001
+    """Set one control to `value`, whatever kind of control it turns out to be.
+
+    Every apply failure this pipeline has had takes the same shape: we decide a
+    field's type from what the reader told us, commit to one way of setting it,
+    and when that guess is wrong nothing happens at all — an Ashby Yes/No is two
+    buttons over a hidden checkbox, a location is a geocoder that ignores typing,
+    a consent is a lone box with no option to match. Each was a separate patch.
+
+    So stop guessing. Try each way of setting a control in turn and check the DOM
+    after every attempt, stopping at the one that actually took. A board we have
+    never seen gets the same treatment as one we have, and a new widget costs a
+    strategy here rather than a special case in every caller.
+    """
+    want = str(value)
+
+    async def _current() -> str:
+        try:
+            return str(await page.evaluate(_VERIFY_FIELD_JS, {"q": label}) or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    before = await _current()
+    if before and (before == want or _norm_txt(before) == _norm_txt(want)
+                   or before == "checked"):
+        return "already"
+
+    async def _visible_option() -> None:
+        await _set_choices(page, {label: want}, pk, url)
+
+    async def _typed() -> None:
+        await _fill_human(page, {label: want})
+
+    async def _geocoder() -> None:
+        await _fix_fields(page, {label: want.split(",")[0].strip()}, pk, url)
+
+    for name, attempt in (("option", _visible_option), ("type", _typed),
+                          ("combobox", _geocoder)):
+        try:
+            await attempt()
+        except Exception as exc:  # noqa: BLE001
+            if _page_gone(exc):
+                raise
+            log.debug("set_field %r via %s raised: %s", label[:40], name, exc)
+        await page.wait_for_timeout(400)
+        now = await _current()
+        if now and now != before:
+            log.info("set_field %r via %s", label[:48], name)
+            return "set"
+    return "failed"
+
+
+def _norm_txt(v: object) -> str:
+    return re.sub(r"\s+", " ", str(v or "")).strip().lower()
+
+
 async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str,  # noqa: ANN001
                            headed: bool, model: str = "") -> dict:
     """Deterministic finish on an already-FILLED page (browser-use did the filling,
