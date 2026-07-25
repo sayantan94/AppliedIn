@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
 
 from core.logging import get_logger
 
@@ -1704,6 +1705,21 @@ _FILL_JS = """
 }
 """
 
+# Values that are a TEMPLATE REFERENCE, not an answer. The apply agent is told to
+# call draft_essay_answer and reuse its text verbatim; sometimes it instead writes
+# the token standing for that text ("{{DRAFT_ESSAY_ANSWER}}"), and a literal
+# placeholder then gets typed into a real job application. Nothing matching this
+# is ever entered into a form.
+_PLACEHOLDER_RX = re.compile(
+    r"^\s*(?:\{\{.*\}\}|<[A-Z_ ]{3,}>|\[(?:INSERT|YOUR|TODO|DRAFT)[^\]]*\]"
+    r"|(?:DRAFT_ESSAY_ANSWER|YOUR_ANSWER_HERE|ANSWER_HERE|TODO|TBD|N/?A_PLACEHOLDER))\s*$",
+    re.IGNORECASE)
+
+
+def _is_placeholder(value: object) -> bool:
+    return isinstance(value, str) and bool(_PLACEHOLDER_RX.match(value))
+
+
 async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
     """Fill a form the way a PERSON does — real mouse clicks, real keystrokes.
 
@@ -1720,6 +1736,15 @@ async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
     caller keeps working unchanged.
     """
     import random
+
+    # Refuse template tokens BEFORE anything is typed — this is the one choke
+    # point every value passes through, so a placeholder can never reach a form.
+    blocked = [k for k, v in mapping.items() if _is_placeholder(v)]
+    if blocked:
+        log.warning("refusing to type placeholder values: %s", ", ".join(blocked))
+        mapping = {k: v for k, v in mapping.items() if k not in blocked}
+    if not mapping:
+        return [f"PLACEHOLDER (not typed): {k}" for k in blocked]
 
     try:
         out = await page.evaluate(_FILL_JS, {"map": mapping, "opts": {"tagOnly": True}})
@@ -1772,7 +1797,7 @@ async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
     # caller believes the form is complete and submits a half-empty application.
     return [f"NOT FOUND: {line.split(': ', 1)[1]}"
             if line.startswith("FILLED: ") and line.split(": ", 1)[1] in failed else line
-            for line in report]
+            for line in report] + [f"PLACEHOLDER (not typed): {k}" for k in blocked]
 
 
 _LOCATE_CHOICE_JS = """
@@ -2350,6 +2375,30 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
             return ActionResult(extracted_content=f"fill_fields: bad fields_json ({exc}) — "
                                                   "pass a JSON object encoded as a string",
                                 include_in_memory=True)
+        # 0a) The model sometimes sends the TOKEN for a drafted essay instead of the
+        # essay ("{{DRAFT_ESSAY_ANSWER}}"). We already banked the real text when it
+        # called draft_essay_answer — swap it back in by question, so a good draft
+        # isn't lost to a formatting slip.
+        unresolved = []
+        for k, v in list(mapping.items()):
+            if not _is_placeholder(v):
+                continue
+            bank = drafted_sink or {}
+            hit = bank.get(k) or next(
+                (a for q, a in bank.items() if _toks(q) & _toks(k)), "")
+            if hit:
+                mapping[k] = hit
+                log.info("recovered drafted answer for %r from the bank", k)
+            else:
+                unresolved.append(k)
+                mapping.pop(k, None)
+        if unresolved and not mapping:
+            return ActionResult(extracted_content=(
+                "fill_fields: REFUSED — you sent a placeholder token instead of the "
+                f"answer text for: {', '.join(unresolved)[:200]}. Call "
+                "draft_essay_answer(question) and pass the text it returns VERBATIM. "
+                "Never send {{...}} or <PLACEHOLDER> as a value."), include_in_memory=True)
+
         # 0) AUTO-SKIP set or provably-dead keys — a re-send returns instantly, no loop.
         skipped_bad = [k for k in mapping if k in run_state["unmatchable"]]
         mapping = {k: v for k, v in mapping.items()

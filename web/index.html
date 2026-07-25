@@ -204,6 +204,44 @@
                   </div>
                 </div>
               </div>
+              <div class="prefmgr" id="prefmgr">
+                <button id="btn-prefs" class="skipbtn prefbtn" aria-haspopup="true" aria-expanded="false"
+                  title="What counts as a match — titles, keywords, locations and the score bar">◎ Job preferences</button>
+                <div id="prefpicker" class="copicker prefpicker" hidden>
+                  <div class="cp-role-h">What counts as a match</div>
+                  <div class="pf-body">
+                    <label class="pf-f"><span class="pf-l">Target titles</span>
+                      <input id="pf-titles" class="cp-search" type="text" autocomplete="off"
+                        placeholder="Senior Software Engineer, Staff Software Engineer" /></label>
+                    <label class="pf-f"><span class="pf-l">Raises fit</span>
+                      <input id="pf-include" class="cp-search" type="text" autocomplete="off"
+                        placeholder="ai, agentic, llm, platform" /></label>
+                    <label class="pf-f"><span class="pf-l">Never a fit</span>
+                      <input id="pf-exclude" class="cp-search" type="text" autocomplete="off"
+                        placeholder="intern, manager, mobile" /></label>
+                    <div class="pf-row">
+                      <label class="pf-f"><span class="pf-l">Seniority</span>
+                        <input id="pf-seniority" class="cp-search" type="text" autocomplete="off"
+                          placeholder="senior, staff" /></label>
+                      <label class="pf-f pf-narrow"><span class="pf-l">Score bar</span>
+                        <input id="pf-score" class="cp-search" type="number" min="0" max="10" /></label>
+                    </div>
+                    <label class="pf-f"><span class="pf-l">Locations</span>
+                      <input id="pf-locations" class="cp-search" type="text" autocomplete="off"
+                        placeholder="Seattle, California, Remote (US)" /></label>
+                    <label class="pf-f"><span class="pf-l">Hard rules
+                        <em class="pf-hint">— one per line; the scorer rejects anything that breaks these</em></span>
+                      <textarea id="pf-notes" class="cp-search pf-notes" rows="5"
+                        placeholder="- No roles requiring a security clearance."></textarea></label>
+                    <label class="pf-check"><input id="pf-remote" type="checkbox" />
+                      <span>Remote roles only</span></label>
+                  </div>
+                  <div class="cp-role-foot">
+                    <span id="pf-state">Applies to the next job scored.</span>
+                    <button id="pf-save" class="cp-lk cp-add-btn" type="button">Save preferences</button>
+                  </div>
+                </div>
+              </div>
               <div class="skipmgr" id="skipmgr">
                 <button id="btn-skips" class="skipbtn" aria-haspopup="true" aria-expanded="false"
                   title="Choose companies Discover + Process should skip">⊘ Skip companies<span

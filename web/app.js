@@ -23,6 +23,7 @@ const state = {
   liveState: "off",   // SSE connection state (off | connecting | live | demo)
   query: "",          // free-text search
   coFilter: "",       // board filter: show one company only ("" = all)
+  openPk: "",         // pk in the open detail drawer (streams its agent log)
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
@@ -811,6 +812,9 @@ function connectLive() {
           scheduleLive(e.pk);   // update the card's live line without a full reload
         }
         scheduleFeed();
+        // Drawer open on this job? Stream the agent's work into it live, so
+        // watching a run doesn't mean hitting refresh.
+        if (e.pk && e.pk === state.openPk && !$("#drawer").hidden) scheduleAgentLog(e.pk);
         if (["discovered", "applied", "gate", "running", "error"].includes(e.kind)) scheduleReload();
       } catch { /* ignore malformed lines */ }
     };
@@ -1153,18 +1157,70 @@ function openDrawer(pk) {
 
     ${tl ? `<div class="section"><div class="section-t">timeline</div><div class="timeline">${tl}</div></div>` : ""}
 
+    <div class="section"><div class="section-t">everything the agent did
+      <button class="cp-lk agentlog-re" data-agentlog="${esc(r.pk)}" type="button">refresh</button></div>
+      <div id="agentlog" class="agentlog"><span class="muted">loading…</span></div></div>
+
     <div class="section"><div class="section-t">artifacts</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${links}</div></div>
   `;
   $("#drawer-title").textContent = r.company;
-  $("#drawer-sub").textContent = r.title;
+  // The posting URL, always one click away — not buried in the artifacts row.
+  $("#drawer-sub").innerHTML = r.jd_url
+    ? `${esc(r.title)} · <a class="drawer-jd" href="${esc(r.jd_url)}" target="_blank"
+         rel="noopener" title="${esc(r.jd_url)}">open job posting ↗</a>`
+    : esc(r.title);
   $("#scrim").hidden = false;
   $("#drawer").hidden = false;
   requestAnimationFrame(() => {
     $("#scrim").classList.add("show");
     $("#drawer").classList.add("show");
   });
+  state.openPk = r.pk;
   if (r.has_diff) loadDiff(r.pk);
+  loadAgentLog(r.pk);
+}
+
+// Coalesce the live stream — a busy agent emits several events per second and
+// each would otherwise be its own round trip.
+let agentLogTimer = null;
+function scheduleAgentLog(pk) {
+  if (agentLogTimer) return;
+  agentLogTimer = setTimeout(() => { agentLogTimer = null; loadAgentLog(pk); }, 700);
+}
+
+// Every event the agent emitted for ONE job — each step, tool call and result,
+// in order. The card shows a one-line summary; when something stalls or gets
+// refused, this is the whole story behind it.
+function loadAgentLog(pk) {
+  fetch(api(`/job-log/${encodeURIComponent(pk)}`), { headers: auth.header() })
+    .then((r) => r.json())
+    .then((d) => {
+      const el = $("#agentlog");
+      if (!el) return;
+      // Was the reader parked at the bottom? Then keep following the transcript.
+      const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40 || !el.dataset.seeded;
+      el.dataset.seeded = "1";
+      const evs = d.events || [];
+      if (!evs.length) {
+        el.innerHTML = '<span class="muted">nothing logged for this job yet</span>';
+        return;
+      }
+      el.innerHTML = evs.map((e) => {
+        const body = [e.detail, e.input, e.output].filter(Boolean)
+          .map((x) => unraw(typeof x === "string" ? x : JSON.stringify(x))).join("\n");
+        return `<div class="al-e">
+          <div class="al-h"><span class="al-k" data-kind="${esc(e.kind || "")}">${esc(e.kind || "·")}</span>
+            ${e.agent ? `<span class="al-a">${esc(e.agent)}</span>` : ""}
+            <span class="al-t">${when(e.at)}</span></div>
+          ${body ? `<pre class="al-b">${esc(body)}</pre>` : ""}</div>`;
+      }).join("");
+      if (stick) el.scrollTop = el.scrollHeight;  // follow the tail, but only if already there
+    })
+    .catch(() => {
+      const el = $("#agentlog");
+      if (el) el.innerHTML = '<span class="muted">couldn\'t load the log</span>';
+    });
 }
 
 function loadDiff(pk) {
@@ -1190,6 +1246,7 @@ function loadDiff(pk) {
     });
 }
 function closeDrawer() {
+  state.openPk = "";
   $("#scrim").classList.remove("show");
   $("#drawer").classList.remove("show");
   setTimeout(() => { $("#scrim").hidden = true; $("#drawer").hidden = true; }, 260);
@@ -1402,6 +1459,66 @@ function wire() {
   $("#rp-go").addEventListener("click", runRole);
   $("#rp-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
 
+  // --- job preferences ---
+  // What counts as a match. Every stage re-reads preferences.yaml per job, so a
+  // save here changes the very next job scored — no restart, no file editing.
+  const pf = $("#prefpicker"), pfBtn = $("#btn-prefs");
+  const closePf = () => {
+    if (!pf.hidden) { pf.hidden = true; pfBtn.setAttribute("aria-expanded", "false"); }
+  };
+  const csv = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const loadPrefs = async () => {
+    try {
+      const r = await fetch(api("/preferences"), { headers: auth.header() });
+      const p = (await r.json()) || {};
+      $("#pf-titles").value = (p.titles || []).join(", ");
+      $("#pf-include").value = (p.include_keywords || []).join(", ");
+      $("#pf-exclude").value = (p.exclude_keywords || []).join(", ");
+      $("#pf-seniority").value = (p.seniority || []).join(", ");
+      $("#pf-locations").value = (p.locations || []).join(", ");
+      $("#pf-score").value = p.min_match_score ?? 7;
+      $("#pf-notes").value = p.notes || "";
+      $("#pf-remote").checked = !!p.remote_only;
+      state.prefsGithub = p.github || "";
+    } catch { toast("Couldn't load preferences."); }
+  };
+  const savePrefs = async () => {
+    if (demoGuard()) return;
+    const st = $("#pf-state");
+    const d = await post("/preferences", {
+      titles: csv($("#pf-titles").value),
+      include_keywords: csv($("#pf-include").value),
+      exclude_keywords: csv($("#pf-exclude").value),
+      seniority: csv($("#pf-seniority").value),
+      locations: csv($("#pf-locations").value),
+      min_match_score: Number($("#pf-score").value || 7),
+      notes: $("#pf-notes").value,
+      remote_only: $("#pf-remote").checked,
+      github: state.prefsGithub || "",
+    });
+    if (d && d.ok) {
+      st.textContent = "Saved — applies to the next job scored.";
+      st.className = "saved";
+      toast("◎ Preferences saved.");
+      setTimeout(() => { st.className = ""; st.textContent = "Applies to the next job scored."; }, 4000);
+    } else {
+      st.textContent = (d && d.error) || "Couldn't save.";
+      st.className = "failed";
+    }
+  };
+  pfBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = pf.hidden;
+    pf.hidden = !show;
+    pfBtn.setAttribute("aria-expanded", String(show));
+    if (show) { loadPrefs(); $("#pf-titles").focus(); }
+  });
+  pf.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", (e) => {
+    if (!pf.hidden && !e.target.closest(".prefmgr")) closePf();
+  });
+  $("#pf-save").addEventListener("click", savePrefs);
+
   const sp = $("#skippicker"), spBtn = $("#btn-skips");
   const closeSp = () => {
     if (sp.hidden) return;
@@ -1517,6 +1634,8 @@ function wire() {
   });
 
   $("#drawer").addEventListener("click", (e) => {
+    const relog = e.target.closest("[data-agentlog]");
+    if (relog) { loadAgentLog(relog.dataset.agentlog); return; }
     const resume = e.target.closest("[data-resume]");
     if (resume) { openResume(resume.dataset.resume); return; }
     const act = e.target.closest("[data-act]");

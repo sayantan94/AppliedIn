@@ -95,6 +95,68 @@ def _to_ui(row: dict, artifacts) -> dict:
     }
 
 
+def _render_preferences_yaml(prefs) -> str:  # noqa: ANN001
+    """Write preferences.yaml with its documentation intact.
+
+    Dumping the model straight to YAML would work but would strip every comment,
+    and this file is meant to stay hand-editable — the comments explain what each
+    list actually does to the two screens that read it. So the prose is a template
+    and only the values are generated.
+    """
+    import yaml
+
+    def block(items: list) -> str:
+        # Dump the whole list (never item-by-item: safe_dump of a bare scalar
+        # appends a '...' document-end marker) and indent it under its key.
+        if not items:
+            return "  []\n"
+        dumped = yaml.safe_dump(items, default_flow_style=False,
+                                allow_unicode=True, sort_keys=False)
+        return "".join(f"  {ln}\n" for ln in dumped.splitlines())
+
+    notes = (prefs.notes or "").rstrip()
+    notes_block = "".join(f"  {ln}\n" if ln.strip() else "\n"
+                          for ln in notes.splitlines()) if notes else ""
+    return f"""\
+# What the discovery AGENT looks for. These are HINTS, not hardcoded rules — the
+# stage-1 relevance agent (src/discovery/relevance.py) reads them as a brief and
+# judges each posting's title, counting role variants (SDE, SWE, Backend /
+# Platform / ML / AI Engineer, …) as fits. The deeper stage-2 LLM score
+# (min_match_score) is the second, per-job gate.
+#
+# Edited from the dashboard (Preferences) or by hand — both are fine. Every stage
+# re-reads this file per job, so a change applies to the very next one scored.
+
+# Target roles, in priority order — the crawl searches these top-down and the
+# scorer weighs seniority fit.
+titles:
+{block(prefs.titles)}
+# Soft signals that RAISE fit (not required).
+include_keywords:
+{block(prefs.include_keywords)}
+seniority:
+{block(prefs.seniority)}
+# Never a fit — technical-sounding NON-engineering roles that leak through.
+exclude_keywords:
+{block(prefs.exclude_keywords)}
+# Preferred locations. A blank/unknown location on a posting is allowed.
+locations:
+{block(prefs.locations)}
+remote_only: {str(prefs.remote_only).lower()}
+
+# Free-text HARD CONSTRAINTS — read by BOTH the title screen and the JD scorer.
+# Anything violating these is rejected (the scorer caps it at <= 2).
+notes: |
+{notes_block}
+# Stage-2: minimum LLM relevance score (0-10) for a job to proceed to apply.
+min_match_score: {int(prefs.min_match_score)}
+
+# Candidate's public GitHub — the tailor reads the repos (names, languages,
+# topics) as extra context to reword bullets toward each JD.
+github: {prefs.github or '""'}
+"""
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="AppliedIn")
     settings = get_settings()
@@ -136,6 +198,66 @@ def create_app() -> FastAPI:
                 # `found` = discovered but not yet processed; the number the
                 # 'Process applications' button will act on.
                 "found_waiting": counts.get("found", 0)}
+
+    @app.get("/job-log/{pk:path}")
+    def job_log(pk: str, limit: int = 500):
+        """EVERYTHING the agent did on one job — the full event stream (each step,
+        tool call, and result), oldest first. The board shows a one-line summary
+        per card; this is the whole story behind it, so a stuck or refused apply
+        is never a mystery. Includes the job posting URL for that job."""
+        import json
+
+        from core.events import HISTORY, _redis
+
+        row = make_stores(settings).tracking.get(pk) or {}
+        try:
+            raw = _redis().lrange(HISTORY, 0, 1999)
+        except Exception:  # noqa: BLE001
+            raw = []
+        events = []
+        for item in raw:
+            try:
+                e = json.loads(item)
+            except Exception:  # noqa: BLE001
+                continue
+            if e.get("pk") == pk:
+                events.append(e)
+        events.reverse()  # history is newest-first; read it like a transcript
+        return {"pk": pk, "jd_url": row.get("jd_url", ""),
+                "company": row.get("company", ""), "title": row.get("title", ""),
+                "status": row.get("status", ""), "events": events[-limit:]}
+
+    @app.get("/preferences")
+    def get_preferences():
+        """The job-matching preferences the discovery screen and scorer read."""
+        import yaml
+
+        path = Path(settings.config_dir) / "preferences.yaml"
+        data = yaml.safe_load(path.read_text()) if path.exists() else {}
+        return data or {}
+
+    @app.post("/preferences")
+    def set_preferences(body: dict):
+        """Save job-matching preferences from the dashboard.
+
+        Validated through the same Preferences model discovery uses, then written
+        as commented YAML — the file stays hand-editable, and every stage reads it
+        from disk on each run, so a save takes effect on the very next job."""
+        from discovery.watchlist import Preferences
+
+        try:
+            prefs = Preferences(**(body or {}))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"invalid preferences: {exc}"}
+        path = Path(settings.config_dir) / "preferences.yaml"
+        try:
+            path.write_text(_render_preferences_yaml(prefs))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        from core.events import emit
+        emit("running", agent="workflow", pk="meta#prefs",
+             detail="Job-matching preferences updated — they apply to the next job scored.")
+        return {"ok": True, "preferences": prefs.model_dump()}
 
     @app.get("/memory")
     def memory():
