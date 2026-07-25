@@ -85,55 +85,6 @@ def test_readme_is_not_treated_as_a_skill(skills):
 
 # --- applied-signal safety --------------------------------------------------
 
-def test_browser_error_pages_are_never_read_as_a_confirmation():
-    """The structural 'the form is gone' test cannot tell a confirmation screen
-    from a page that never loaded — an error page also has no submit control, no
-    inputs and a short body. A DNS failure was recorded as a submitted
-    application, so positive proof of failure must veto that inference.
-    """
-    from tools.browser_apply import _is_error_page
-
-    assert _is_error_page("chrome-error://chromewebdata/", "DNS_PROBE_FINISHED_NXDOMAIN")
-    assert _is_error_page("https://x.example/j", "This site can't be reached")
-    assert _is_error_page("https://x.example/j", "ERR_CONNECTION_REFUSED")
-    assert _is_error_page("about:blank", "")
-    # A real confirmation must still pass through.
-    assert not _is_error_page("https://x.example/j",
-                              "Thank you for applying! We have received your application.")
-    assert not _is_error_page("https://x.example/j",
-                              "Application Success\nYour application has been submitted")
-
-
-async def test_success_wording_is_vetoed_while_the_form_still_needs_input():
-    """A submitted application does not leave you looking at an empty required
-    field. When both appear true, the wording came from somewhere other than a
-    confirmation — a footer, a sibling posting, a pre-rendered panel — and must
-    not be recorded. An uncertain apply is reviewable; a false 'applied' is never
-    revisited.
-    """
-    from playwright.async_api import async_playwright
-    from tools.browser_apply import _applied_signal, _form_still_awaiting_input
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        try:
-            await page.set_content(
-                "<body><p>Thank you for applying — we review every application.</p>"
-                "<form><input type='text' required>"
-                "<select required><option value=''></option></select>"
-                "<button>Submit application</button></form></body>")
-            assert await _form_still_awaiting_input(page) is True
-            assert await _applied_signal(page, "http://x/", allow_vision=False) is None
-
-            # A real confirmation still reads as applied.
-            await page.set_content(
-                "<body><h1>Thank you for applying</h1><p>We received it.</p></body>")
-            assert await _form_still_awaiting_input(page) is False
-            assert await _applied_signal(page, "http://x/", allow_vision=False)
-        finally:
-            await browser.close()
-
 
 # --- choice resolution ------------------------------------------------------
 
@@ -174,7 +125,7 @@ def test_never_declares_a_protected_characteristic():
     questions must still go through, or a required EEO field is left blank
     instead of correctly declined.
     """
-    from tools.browser_apply import _is_self_id_affirmation as declares
+    from tools.claude_chrome import _is_self_id_affirmation as declares
 
     assert declares("Yes, I have a disability, or have had one in the past")
     assert declares("I identify as one or more of the classifications of protected veteran")
@@ -195,7 +146,7 @@ def test_guards_refuse_what_a_prompt_can_only_ask_for():
     A rule that is only a sentence in a prompt is a rule nobody enforces. These
     run on every write, whichever engine proposed it.
     """
-    from tools.form_fill import guard_value
+    from tools.claude_chrome import guard_value
 
     assert guard_value("Legal Name", "Alex Kim") == ("Alex Kim", None)
 
@@ -214,7 +165,7 @@ def test_guards_refuse_what_a_prompt_can_only_ask_for():
 def test_a_sanctions_answer_is_corrected_not_dropped():
     """Dropping it leaves a required question blank, which fails the submit
     instead of answering it."""
-    from tools.form_fill import guard_value
+    from tools.claude_chrome import guard_value
 
     q = "Are you a citizen of, or located in, Cuba, Iran, North Korea, or Syria?"
     val, why = guard_value(q, "Yes")
@@ -274,3 +225,43 @@ def test_chrome_engine_scopes_itself_to_browser_tools():
     assert set(ALLOWED_TOOLS) <= {"mcp__claude-in-chrome", "Write"}
     for forbidden in ("Bash", "Read", "Edit", "WebFetch"):
         assert forbidden not in ALLOWED_TOOLS
+
+
+def test_applied_is_never_recorded_without_the_page_saying_so():
+    """Two engines have reported a submission that never happened.
+
+    One read a DNS error page as a confirmation; another read "Thank you for
+    applying" off a page whose form was still empty. So claiming success is not
+    enough — the page has to have said something.
+    """
+    from tools.claude_chrome import classify
+
+    assert classify({"outcome": "applied"})["status"] == "unknown"
+    assert classify({"outcome": "applied", "confirmation": "   "})["status"] == "unknown"
+
+    ok = classify({"outcome": "applied", "confirmation": "Application Success"})
+    assert ok["status"] == "applied" and ok["confirmation"] == "Application Success"
+
+
+def test_a_block_is_named_so_the_owner_knows_what_to_do():
+    """"Already applied" and "you have used your 5 applications" need different
+    responses, so reporting both as a generic failure is not good enough."""
+    from tools.claude_chrome import classify
+
+    assert classify({"outcome": "blocked",
+                     "blocked_by": "application_limit"})["reason"] == "application_limit"
+    assert classify({"outcome": "blocked",
+                     "blocked_by": "already_applied"})["reason"] == "already_applied"
+    # An unrecognised reason is reported plainly, never reinterpreted.
+    assert classify({"outcome": "blocked", "blocked_by": "vibes"})["reason"] == "blocked"
+    assert classify({"outcome": "blocked", "detail": "something odd"})["reason"] == "blocked"
+
+
+def test_a_guardrail_breach_is_never_recorded_as_applied():
+    """Even with a confirmation, an application that declared a protected
+    characteristic is refused rather than filed."""
+    from tools.claude_chrome import classify
+
+    res = classify({"outcome": "applied", "confirmation": "Thanks!",
+                    "filled": {"Yes, I have a disability, or have had one in the past": "on"}})
+    assert res["status"] == "failed" and res["reason"] == "guardrail"

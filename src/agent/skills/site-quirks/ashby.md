@@ -30,4 +30,26 @@ success_phrases:
   carries the state — not a radio group. Clicking the input does nothing because
   it is `display:none`. Click the visible button whose text is the answer; the
   hidden input follows.
+- **Check the application-limit banner before filling anything.** Some boards show
+  "we have set up limits for applications across roles. Candidates may not apply
+  more than 5 times in any 180 day span". If the cap is already reached the submit
+  is rejected no matter how well the form is filled, so read that banner first and
+  stop rather than spending a run on a form that cannot be sent.
+- A rejected submit can answer "your application submission was flagged as possible
+  spam… please submit your application again" **and blank every field**. Clicking
+  Submit again straight away sends an EMPTY application, which looks far more like
+  a bot than the attempt that was flagged. Re-enter the answers, wait, then
+  resubmit — and never resubmit more than twice.
+- **Required is marked with an asterisk in the label, not with `required` or
+  `aria-required`.** The location combobox and the arbitration acknowledgement
+  both carry a red `*` and neither HTML attribute, so a form can look complete
+  while two mandatory fields are empty. Trust the asterisk.
+- An acknowledgement ("I acknowledge that I have opened, read, and understood the
+  Arbitration Agreement", "I confirm I have read the above") is a **lone checkbox**
+  with no Yes/No options — tick the box itself. Only do so when the owner has
+  explicitly answered it; an arbitration clause waives their right to sue and is
+  never affirmed on a guess.
+- Race and ethnicity are often ONE dropdown whose options encode both, e.g.
+  "Asian (Not Hispanic or Latino)". Pick the single option matching both of the
+  owner's answers rather than looking for two separate questions.
 

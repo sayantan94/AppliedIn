@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -22,6 +23,10 @@ from core.logging import get_logger
 log = get_logger(__name__)
 
 DEFAULT_TIMEOUT_S = 600
+
+# What a session may say stopped it. Anything else is reported as a plain block
+# rather than quietly reinterpreted.
+BLOCK_REASONS = frozenset({"application_limit", "already_applied", "captcha", "login"})
 
 # Browser tools only. Claude Code can read files, run bash and edit code; none of
 # that is needed to read or fill a page, and an agent that can do it anyway is a
@@ -161,6 +166,106 @@ def resume_dirs(resume_path: str) -> list[str]:
     return [str(Path(resume_path).parent)] if resume_path else []
 
 
+# --- what we refuse to say on the owner's behalf ----------------------------
+#
+# Each of these exists because the alternative is a real person's name on a claim
+# they did not make. The session acts in another process, so these cannot stop the
+# keystroke; they stop the result being recorded as a good application, and say
+# why. A rule that is only a sentence in a prompt is a rule nobody is checking.
+
+_SANCTIONS_RX = re.compile(
+    r"cuba|iran\b|north korea|syria|crimea|donetsk|luhansk|zaporizhzhia|kherson"
+    r"|\bbelarus\b|sanction|embargo|export control|restricted (?:country|party)",
+    re.I)
+# Option wording that SAFELY answers such a question.
+
+
+_SAFE_OPTION_RX = _SANCTIONS_SAFE_RX = re.compile(
+    r"^\s*(?:no|none of the above|not applicable|n/?a|neither|none)\b", re.I)
+
+
+_PLACEHOLDER_RX = re.compile(
+    r"^\s*(?:\{\{.*\}\}|<[A-Z_ ]{3,}>|\[(?:INSERT|YOUR|TODO|DRAFT)[^\]]*\]"
+    r"|(?:DRAFT_ESSAY_ANSWER|YOUR_ANSWER_HERE|ANSWER_HERE|TODO|TBD|N/?A_PLACEHOLDER))\s*$",
+    re.IGNORECASE)
+
+
+_SELF_ID_RX = re.compile(
+    r"disabilit|protected veteran|veteran status|hispanic|latino"
+    r"|race|ethnicit|gender identity|transgender|sexual orientation", re.I)
+
+
+_SELF_ID_AFFIRM_RX = re.compile(
+    r"^\s*yes\b|^\s*i (identify|have|am)\b|i identify as one or more", re.I)
+
+
+# "I am NOT a protected veteran" and "No, I do not have a disability" are the
+# NEGATIVE answers to the same questions, and refusing those would leave a
+# required EEO field blank instead of correctly declined.
+
+
+_SELF_ID_NEGATION_RX = re.compile(
+    r"\bnot?\b|\bdon'?t\b|\bdo not\b|\bnone\b|decline|wish to answer", re.I)
+
+
+def _is_placeholder(value: object) -> bool:
+    return isinstance(value, str) and bool(_PLACEHOLDER_RX.match(value))
+
+
+def _is_self_id_affirmation(label: str, value: object = "") -> bool:
+    """True when ticking this would DECLARE a protected characteristic."""
+    text = f"{label} {value}".strip()
+    head = str(label).strip()
+    if _SELF_ID_NEGATION_RX.search(head):
+        return False
+    return bool(_SELF_ID_RX.search(text) and _SELF_ID_AFFIRM_RX.search(head))
+
+
+def _safe_sanctions_answer(question: str, values: list) -> list:
+    """Force a sanctions question to its negative answer.
+
+    Keeps only options that are plainly negative. If the caller proposed an
+    affirmative one, it is dropped and 'None of the above' / 'No' is used, so a
+    mis-mapped answer cannot tick "citizen of a sanctioned country".
+    """
+    if not _SANCTIONS_RX.search(question or ""):
+        return values
+    safe = [v for v in values if _SANCTIONS_SAFE_RX.match(str(v))]
+    if safe != list(values):
+        log.warning("sanctions question — forcing the negative answer for %r "
+                    "(proposed %r)", (question or "")[:70], values)
+    return safe or ["None of the above", "No", "Not applicable"]
+
+
+# Finds a sanctions checkbox/radio group and its SAFE option, wherever it sits.
+# Structure varies (fieldset+legend, a bare paragraph then labels, a div), and
+# the generic reader does not always group it — so this works off the OPTION
+# text, which is consistent, rather than the question's markup.
+
+
+def _norm_txt(v: object) -> str:
+    return re.sub(r"\s+", " ", str(v or "")).strip().lower()
+
+
+def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
+    """(value_to_write, refusal_note) — every promise, applied to one answer.
+
+    - placeholder tokens are never typed;
+    - a protected-status AFFIRMATION is never made for the owner, while the
+      negative answers pass through, because refusing those leaves a required
+      EEO field blank rather than correctly declined;
+    - a sanctions question takes its safe option whatever was proposed.
+    """
+    if _is_placeholder(value):
+        return None, f"{label}: placeholder text"
+    if _is_self_id_affirmation(label, value) or _is_self_id_affirmation(str(value)):
+        return None, f"{label}: self-identification is the owner's to answer"
+    safe = _safe_sanctions_answer(label, [str(value)])
+    if safe and str(safe[0]) != str(value):
+        return str(safe[0]), f"{label}: forced to the safe option {safe[0]!r}"
+    return str(value), None
+
+
 # --- the apply engine ------------------------------------------------------
 
 TIMEOUT_S = 900  # a real form with an upload on a slow portal
@@ -203,9 +308,10 @@ When the form is complete, submit it and read what the page says afterwards.
 Then end your reply with ONLY this JSON object and nothing after it:
 
 {{"outcome": "applied" | "needs_owner" | "blocked",
+  "blocked_by": "application_limit" | "already_applied" | "captcha" | "login" | "other",
   "confirmation": "<the page's confirmation wording, if it submitted>",
   "question": "<what to ask the owner, if outcome is needs_owner>",
-  "detail": "<what blocked it, if outcome is blocked>",
+  "detail": "<what blocked it, in your own words, if outcome is blocked>",
   "filled": {{"<field label>": "<value you entered>"}}}}
 
 Report what actually happened. "applied" means the page confirmed a submission you
@@ -220,8 +326,7 @@ def _verify(report: dict) -> tuple[bool, str]:
     checked after the fact instead. A rule that is only ever a sentence in a
     prompt is a rule nobody is enforcing.
     """
-    from .browser_apply import _is_placeholder, _is_self_id_affirmation
-
+    
     for label, value in (report.get("filled") or {}).items():
         if _is_self_id_affirmation(str(label), value):
             return False, (f"It declared a protected characteristic ({label[:60]}). "
@@ -238,23 +343,20 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     """Fill and submit `url` in the owner's Chrome. Same shape as every engine."""
     from core.config import get_settings
     from core.events import emit
-    from core.stores import make_stores
 
-    from .browser_apply import _clean_resume_copy, _site_rules
+    from .browser_apply import (
+        _clean_resume_copy,
+        _duplicate_refusal,
+        _site_rules,
+    )
 
     ok, why = available()
     if not ok:
         return {"status": "unknown", "detail": why}
 
-    # Applying twice under a real person's name is worse than not applying, and a
-    # portal that accepts the second one leaves them looking careless to an
-    # employer they wanted. Checked here rather than trusted to the caller.
-    row = (make_stores().tracking.get(pk) or {}) if pk else {}
-    if row.get("status") in ("applied", "applied_manual"):
-        log.warning("refusing to re-apply to %s — already %s", pk, row["status"])
-        return {"status": "unknown",
-                "detail": f"Already {row['status'].replace('_', ' ')} — not applying "
-                          "again. Clear that status first if this is deliberate."}
+    refusal = _duplicate_refusal(pk, url)
+    if refusal:
+        return refusal
 
     # The tailored PDF is stored as "openai#f763c6b3-….pdf". That is the filename
     # the employer would receive, and the '#' breaks some upload widgets outright,
@@ -277,6 +379,19 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     if problem:
         return {"status": "unknown", "detail": problem}
 
+    return classify(report)
+
+
+def classify(report: dict) -> dict:
+    """A Chrome session's report, turned into a result — or refused.
+
+    Kept separate from the run so the rules can be tested without a browser.
+    Two engines have reported a submission that never happened: one read a DNS
+    error page as a confirmation, one read "Thank you for applying" off a page
+    whose form was still empty. So a claim of success is not enough. The page has
+    to have said something, and what was entered has to pass the same guards that
+    applied while entering it.
+    """
     passed, why_not = _verify(report)
     fields = [{"label": k, "value": v}
               for k, v in (report.get("filled") or {}).items()][:40]
@@ -286,22 +401,30 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
                 "detail": why_not, "fields": fields}
 
     outcome = str(report.get("outcome") or "").lower()
-    if outcome == "applied" and report.get("confirmation"):
-        return {"status": "applied",
-                "confirmation": str(report["confirmation"])[:120], "fields": fields}
     if outcome == "applied":
-        # Claimed without evidence. Two engines have reported a submission that
-        # never happened, so the bar is a confirmation the page actually showed.
-        return {"status": "unknown",
-                "detail": "It reported applying but captured no confirmation from "
-                          "the page, so this is not recorded as applied.",
+        confirmation = str(report.get("confirmation") or "").strip()
+        if not confirmation:
+            return {"status": "unknown",
+                    "detail": "It reported applying but captured no confirmation "
+                              "from the page, so this is not recorded as applied.",
+                    "fields": fields}
+        return {"status": "applied", "confirmation": confirmation[:120],
                 "fields": fields}
     if outcome == "needs_owner":
         return {"status": "gate", "reason": "unknown_field",
                 "question": str(report.get("question") or
                                 "This form needs an answer only you can give."),
                 "fields": fields}
-    return {"status": "failed", "reason": "blocked",
-            "detail": str(report.get("detail") or
-                          "The application could not be completed.")[:300],
+
+    # Name the block precisely. "You have already applied" and "5 applications per
+    # 180 days" are different problems with different answers, and reporting both
+    # as a generic failure sends the owner to the portal to work out which.
+    # The session read the page and says WHY in a field of its own. Matching its
+    # prose with a regex would be guessing at an answer it already gave, and the
+    # guess would be wrong the moment it phrases a cap in its own words — which is
+    # exactly what happened.
+    detail = str(report.get("detail") or "The application could not be completed.")
+    said = str(report.get("blocked_by") or "").strip().lower()
+    reason = said if said in BLOCK_REASONS else "blocked"
+    return {"status": "failed", "reason": reason, "detail": detail[:300],
             "fields": fields}

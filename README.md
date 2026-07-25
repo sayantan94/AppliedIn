@@ -8,9 +8,9 @@ AppliedIn does the retyping. It finds roles worth your time, tailors your résum
 to each one, fills the employer's form from answers you approved, and stops for
 you only where a person is genuinely required.
 
-**It runs entirely on your own machine.** Your résumé, your answers and your
-history stay on your disk. Nothing is uploaded anywhere except to the employer
-you are applying to.
+**It runs entirely on your own machine, and applies in your own browser.** Your
+résumé, your answers and your history stay on your disk. Nothing is uploaded
+anywhere except to the employer you are applying to.
 
 > Published for learning — applications go out under **your** name, so read them
 > before they are sent. See [the caveats](#️-for-learning-purposes-only).
@@ -113,40 +113,52 @@ touching code.
 | Critic | review the tailored résumé | `APPLIEDIN_CRITIC_MODEL` |
 | Writer | draft free-text answers | `APPLIEDIN_WRITER_MODEL` |
 | Field mapper | match form fields to your answers | `APPLIEDIN_ORCHESTRATOR_MODEL` |
-| Browser | drive Chrome when a form needs vision | `APPLIEDIN_BROWSER_MODEL` |
+| Browser | fills the form in your own Chrome | `APPLIEDIN_CHROME_MODEL` |
 
 Unset stages fall back to `APPLIEDIN_ORCHESTRATOR_MODEL`, so one variable moves
 everything. A stronger model for the writer (essays) is the usual first upgrade.
 
-### Two engines, and when it switches by itself
+### It applies in your own browser
 
-`APPLIEDIN_APPLY_ENGINE` is **`scripted`** by default: a deterministic Playwright
-pipeline with **no model in the click loop**. It reads the form, matches each
-field to an answer you approved, and types. On a known ATS — Ashby, Greenhouse,
-Lever, Workday — that is the whole apply, which is why the running cost is mostly
-scoring and tailoring rather than clicking.
+A driven browser has never been anywhere. No history, no cookies the site has
+seen before, and a fingerprint that reads as automation, so the pages that matter
+push back: a security code on one posting, "your submission was flagged as
+possible spam" on the next. A form filled perfectly still does not go out. That is
+a browser problem, and no amount of work on the form logic fixes it.
 
-**It escalates on its own.** You do not choose per job:
+So the application runs in the browser you already use, through
+[Claude Code's Chrome integration](https://code.claude.com/docs/en/chrome), with
+the sessions you are already signed into. The session is limited to browser tools
+plus a scratch file for its report: filling a form cannot read your repo or run a
+shell.
 
-| What happened | What it does |
+**This needs Claude Code and a direct Anthropic plan** (Pro, Max, Team or
+Enterprise). The Chrome integration does not accept API keys, so an API key alone
+will not enable it.
+
+Everything else stays on OpenAI. Discovery, scoring, tailoring, the critic and the
+writer all run on your `OPENAI_API_KEY`; the browser is the only part that
+changed hands.
+
+| Stage | Runs on |
 | --- | --- |
-| Can't find a real form (fewer than 2 fillable fields) | Re-runs the apply under **browser-use**, which can read the page visually |
-| The scripted pass throws | Same — falls back to **browser-use** |
-| **The browser closed or crashed** | **Stops.** Reports *uncertain* and asks you to check the portal |
+| Discovery, scoring, tailoring, critic, writer | OpenAI (`APPLIEDIN_ORCHESTRATOR_MODEL`) |
+| Filling and submitting the application | Claude, in your Chrome (`APPLIEDIN_CHROME_MODEL`) |
 
-That last row is deliberate. If the browser died, the form may already have been
-filled and submitted, so re-running it could submit a **second** application. A
-duplicate is worse than an unconfirmed one, so it never retries blind.
+### What it refuses to do
 
-There is a second, narrower escalation once a form *has* been filled — deciding
-who presses Submit:
+These are checked in code, not asked for in a prompt, because a rule that is only
+a sentence in a prompt is a rule nobody is enforcing:
 
-- **Known ATS** → scripted submits and reads the confirmation. No model involved.
-- **Unknown or custom form** → handed to the vision agent to finish and confirm.
-
-Setting `APPLIEDIN_APPLY_ENGINE=agent` skips the scripted attempt entirely and
-hands every form to browser-use: slower and pricier, but useful if you are
-working with employers whose pages the scripted path cannot read.
+- **It never declares a protected characteristic.** Disability, veteran status,
+  race and gender questions are voluntary; unless you have answered one yourself,
+  it is left blank. Your own negative answers still go through.
+- **It never applies twice.** A job already marked applied is refused outright,
+  before the browser opens.
+- **It never records "applied" without a confirmation the page actually showed.**
+  Clicking Submit and hoping is not a submission.
+- **It never solves a CAPTCHA**, and never accepts an arbitration agreement or
+  waiver you have not explicitly answered.
 
 ### Site quirks
 
@@ -182,7 +194,9 @@ scripts/        no-cost verification and survey tools
 
 ## Requirements
 
-Python 3.12, Redis, Chrome, and an OpenAI API key. `setup.sh` handles the rest.
+Python 3.12, Redis, Chrome, and an OpenAI API key. Applying also needs
+[Claude Code](https://code.claude.com) and a direct Anthropic plan, since the
+Chrome integration does not accept API keys. `setup.sh` handles the rest.
 
 ## ⚠️ For learning purposes only
 
