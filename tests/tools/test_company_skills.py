@@ -102,3 +102,34 @@ def test_browser_error_pages_are_never_read_as_a_confirmation():
                               "Thank you for applying! We have received your application.")
     assert not _is_error_page("https://x.example/j",
                               "Application Success\nYour application has been submitted")
+
+
+async def test_success_wording_is_vetoed_while_the_form_still_needs_input():
+    """A submitted application does not leave you looking at an empty required
+    field. When both appear true, the wording came from somewhere other than a
+    confirmation — a footer, a sibling posting, a pre-rendered panel — and must
+    not be recorded. An uncertain apply is reviewable; a false 'applied' is never
+    revisited.
+    """
+    from playwright.async_api import async_playwright
+    from tools.browser_apply import _applied_signal, _form_still_awaiting_input
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        try:
+            await page.set_content(
+                "<body><p>Thank you for applying — we review every application.</p>"
+                "<form><input type='text' required>"
+                "<select required><option value=''></option></select>"
+                "<button>Submit application</button></form></body>")
+            assert await _form_still_awaiting_input(page) is True
+            assert await _applied_signal(page, "http://x/", allow_vision=False) is None
+
+            # A real confirmation still reads as applied.
+            await page.set_content(
+                "<body><h1>Thank you for applying</h1><p>We received it.</p></body>")
+            assert await _form_still_awaiting_input(page) is False
+            assert await _applied_signal(page, "http://x/", allow_vision=False)
+        finally:
+            await browser.close()

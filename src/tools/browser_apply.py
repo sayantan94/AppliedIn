@@ -1157,11 +1157,20 @@ async def _applied_signal(page, url_before: str, body: str | None = None,  # noq
         except Exception:
             body = ""
     m = _re.search(_SUCCESS_RX, body, _re.I)
-    if m:
+    if m and not await _form_still_awaiting_input(page):
         return (next((ln.strip() for ln in body.splitlines()
                       if m.group(0).lower()[:16] in ln.lower()), None) or m.group(0))[:120]
+    if m:
+        # Success wording AND a live form with required fields still unanswered
+        # cannot both be true. Something else on the page said "thank you for
+        # applying" — a footer, a sibling posting, a pre-rendered panel. Refuse to
+        # record it; an uncertain apply the owner reviews is recoverable, a job
+        # falsely marked applied is never revisited.
+        log.warning("success wording found but the form is still awaiting input "
+                    "— not recording this as applied")
     if page.url != url_before and _re.search(
-            r"confirmation|submitted|thank|success|application-complete|/complete", page.url, _re.I):
+            r"confirmation|submitted|thank|success|application-complete|/complete",
+            page.url, _re.I):
         return "Application submitted (confirmation page)."
     # Structural: the form is GONE (no submit control, no text inputs) and the
     # page got short — a confirmation screen, not the filled-in form.
@@ -1178,6 +1187,32 @@ async def _applied_signal(page, url_before: str, body: str | None = None,  # noq
     if allow_vision and model and await _confirm_applied_visually(page, model):
         return "Application submitted (visually confirmed on the page)."
     return None
+
+
+async def _form_still_awaiting_input(page) -> bool:  # noqa: ANN001
+    """True when the page is STILL showing a live application form with required
+    fields left unanswered.
+
+    Used to veto a success claim. A submitted application does not leave you
+    looking at an empty required dropdown, so if both appear to be true the
+    success wording came from somewhere other than a confirmation. Returns False
+    on any error — this only ever downgrades a claim, never invents one.
+    """
+    try:
+        has_submit = await page.locator(
+            'button:has-text("Submit"), button:has-text("Apply"), input[type=submit]').count()
+        if not has_submit:
+            return False
+        empty_required = await page.evaluate("""
+        () => [...document.querySelectorAll(
+                 'input:not([type=hidden]):not([type=submit]):not([type=button]), textarea, select')]
+              .filter(el => (el.required || el.getAttribute('aria-required') === 'true')
+                            && !el.value && el.type !== 'checkbox' && el.type !== 'radio')
+              .length
+        """)
+        return bool(empty_required)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def _assist_wait(page, pk: str, url: str, note: str = "",  # noqa: ANN001
