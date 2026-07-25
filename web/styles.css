@@ -1884,31 +1884,68 @@ a.rowlk, button.rowlk { display: inline-block; }
 
 /* ─── Tailored lane: location buckets ──────────────────────────────────────
    The location preference is a ranking (Washington, then California, then
-   remote), so the lane is grouped and ordered the same way — the roles worth
-   approving first are first, and the colour says which tier at a glance. */
-.bucket { margin-bottom: 10px; }
+   remote), so the lane is grouped and ordered the same way. Colour says which
+   tier at a glance; the top tier opens by default and the rest fold away, since
+   a lane of thirty cards is not something anyone reads. */
+/* Wraps rather than scrolls: a filter the owner cannot see is not a filter, and
+   a lane is too narrow to hold four tiers on one line. */
+.locbar {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 8px 10px 0;
+}
+.lp {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; flex: none; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--card); color: var(--muted);
+  font-family: var(--sans); font-size: 10.5px; line-height: 1.6;
+  cursor: pointer; transition: border-color .12s, color .12s, background .12s;
+}
+.lp:hover { border-color: var(--border-2); color: var(--fg); }
+.lp-n { font-size: 10px; color: var(--faint); }
+.lp.on { background: var(--card-2); color: var(--fg); border-color: currentColor; }
+.lp.on .lp-n { color: inherit; opacity: .75; }
+.lp.bk-wa.on     { color: var(--scan); }
+.lp.bk-ca.on     { color: var(--run); }
+.lp.bk-remote.on { color: var(--info); }
+.lp.bk-other.on,
+.lp.lp-all.on    { color: var(--fg); border-color: var(--border-2); }
+
+.bucket { margin-bottom: 12px; }
 .bucket:last-child { margin-bottom: 0; }
 .bk-head {
+  width: 100%;
   display: flex; align-items: center; gap: 7px;
-  padding: 3px 2px 6px;
-  font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em;
-  text-transform: uppercase;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 7px;
+  padding: 4px 2px 6px; margin-bottom: 8px;
+  background: none; border: 0; border-bottom: 1px solid var(--border);
+  color: inherit; cursor: pointer; text-align: left;
+  font-family: var(--sans); font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0; white-space: nowrap;
 }
-.bk-name { color: var(--muted); }
-.bk-n { margin-left: auto; font-size: 10px; color: var(--faint); }
-.bucket.bk-wa     .bk-name { color: var(--scan); }
+.bk-head:hover .bk-name { color: var(--fg); }
+.bucket.shut { margin-bottom: 6px; }
+.bucket.shut .bk-head { margin-bottom: 0; border-bottom-color: transparent; }
+.bk-caret {
+  font-size: 10px; width: 10px; flex: none; line-height: 1;
+  display: inline-flex; justify-content: center;
+  color: currentColor; opacity: .65; transition: opacity .12s;
+}
+.bk-head:hover .bk-caret { opacity: 1; }
+.bk-name { color: var(--muted); transition: color .12s;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bk-n {
+  margin-left: auto; font-size: 10px; color: var(--faint);
+  background: var(--card-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0 6px; letter-spacing: 0;
+}
+.bk-cards { display: flex; flex-direction: column; gap: 8px; }
+.bucket.bk-wa     .bk-name,
+.bucket.bk-wa     .bk-caret { color: var(--scan); }
 .bucket.bk-wa     .bk-head { border-bottom-color: rgba(63, 214, 143, .35); }
-.bucket.bk-ca     .bk-name { color: var(--run); }
+.bucket.bk-ca     .bk-name,
+.bucket.bk-ca     .bk-caret { color: var(--run); }
 .bucket.bk-ca     .bk-head { border-bottom-color: rgba(242, 177, 62, .3); }
-.bucket.bk-remote .bk-name { color: var(--info); }
-.bucket.bk-other  .bk-name { color: var(--faint); }
-
-.kl-loc {
-  margin-left: auto; margin-right: 6px;
-  background: var(--card); color: var(--muted);
-  border: 1px solid var(--border); border-radius: 6px;
-  font-family: var(--sans); font-size: 10.5px; padding: 2px 4px; cursor: pointer;
-}
-.kl-loc:hover { border-color: var(--scan); color: var(--fg); }
+.bucket.bk-remote .bk-name,
+.bucket.bk-remote .bk-caret { color: var(--info); }
+.bucket.bk-other  .bk-name,
+.bucket.bk-other  .bk-caret { color: var(--faint); }

@@ -25,6 +25,7 @@ const state = {
   coFilter: "",       // board filter: show one company only ("" = all)
   openPk: "",         // pk in the open detail drawer (streams its agent log)
   locFilter: "",      // Tailored lane: show one location tier only ("" = all)
+  collapsed: null,    // folded location buckets (null = pick the default once)
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
@@ -408,13 +409,13 @@ const TOP_LOCATIONS = ["seattle", "bellevue", "washington", "redmond", "kirkland
    groups by these so the roles worth approving first are literally first —
    scanning thirty cards for the word "Seattle" is not a review process. */
 const LOC_TIERS = [
-  { key: "wa",     label: "Seattle · Bellevue · WA", cls: "bk-wa",
+  { key: "wa",     label: "Seattle · Bellevue · WA", short: "WA", head: "Seattle · Bellevue", cls: "bk-wa",
     test: (l) => TOP_LOCATIONS.some((t) => l.includes(t)) },
-  { key: "ca",     label: "California",              cls: "bk-ca",
+  { key: "ca",     label: "California",              short: "CA", head: "California", cls: "bk-ca",
     test: (l) => /california|san francisco|bay area|mountain view|palo alto|los angeles|\bca\b|sunnyvale|san jose/.test(l) },
-  { key: "remote", label: "Remote",                  cls: "bk-remote",
+  { key: "remote", label: "Remote",                  short: "Remote", head: "Remote", cls: "bk-remote",
     test: (l) => /\bremote\b|anywhere|distributed/.test(l) },
-  { key: "other",  label: "Elsewhere",               cls: "bk-other", test: () => true },
+  { key: "other",  label: "Elsewhere",               short: "Other", head: "Elsewhere", cls: "bk-other", test: () => true },
 ];
 function locTier(loc) {
   const l = String(loc || "").toLowerCase();
@@ -464,16 +465,29 @@ function bucketed(rows) {
   if (!rows.length) return `<div class="kl-empty">—</div>`;
   const groups = new Map(LOC_TIERS.map((t) => [t.key, []]));
   for (const r of rows) groups.get(locTier(r.location).key).push(r);
+
+  // Default: the best tier that has jobs is open, the rest are folded away. With
+  // 29 tailored roles the lane is otherwise a wall, and the whole point of the
+  // ranking is that the top tier is the one to act on.
+  const present = LOC_TIERS.filter((t) => groups.get(t.key).length);
+  if (state.collapsed === null) {
+    state.collapsed = new Set(present.slice(1).map((t) => t.key));
+  }
+
   let html = "";
-  for (const tier of LOC_TIERS) {
+  for (const tier of present) {
     const inTier = groups.get(tier.key);
-    if (!inTier.length) continue;
     if (state.locFilter && state.locFilter !== tier.key) continue;
     inTier.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
-    html += `<div class="bucket ${tier.cls}">
-      <div class="bk-head"><span class="bk-name">${tier.label}</span>
-        <span class="bk-n mono">${inTier.length}</span></div>
-      ${inTier.map(laneCard).join("")}
+    const shut = state.collapsed.has(tier.key) && !state.locFilter;
+    html += `<div class="bucket ${tier.cls}${shut ? " shut" : ""}">
+      <button class="bk-head" data-bucket="${tier.key}"
+        aria-expanded="${!shut}" title="${esc(tier.label)} — ${shut ? "show" : "hide"}">
+        <span class="bk-caret" aria-hidden="true">${shut ? "▸" : "▾"}</span>
+        <span class="bk-name">${tier.head}</span>
+        <span class="bk-n mono">${inTier.length}</span>
+      </button>
+      ${shut ? "" : `<div class="bk-cards">${inTier.map(laneCard).join("")}</div>`}
     </div>`;
   }
   return html || `<div class="kl-empty">none in this location</div>`;
@@ -492,24 +506,30 @@ function viewPipeline() {
     const runAll = (l.label === "Found" && rows.length)
       ? `<button class="kl-runall" data-run-all="1" title="Score + tailor all ${rows.length} found jobs (stops each at ready-to-apply)">▶ Run all</button>`
       : "";
-    // Location filter, on the lane it governs. Only tiers that actually have
-    // jobs are offered — an empty option is a dead end.
-    let locFilter = "";
+    // Location filter for the lane it governs — pills rather than a dropdown, so
+    // the tiers and their counts are readable without opening anything. Only
+    // tiers that actually hold jobs are offered; an empty option is a dead end.
+    let locBar = "";
     if (l.label === "Tailored" && rows.length) {
-      const present = LOC_TIERS.filter((t) => rows.some((r) => locTier(r.location).key === t.key));
+      const present = LOC_TIERS
+        .map((t) => ({ t, n: rows.filter((r) => locTier(r.location).key === t.key).length }))
+        .filter((x) => x.n);
       if (present.length > 1) {
-        locFilter = `<select class="kl-loc" data-loc-filter="1"
-            title="Show one location only">
-          <option value=""${state.locFilter ? "" : " selected"}>all locations</option>
-          ${present.map((t) => `<option value="${t.key}"${state.locFilter === t.key ? " selected" : ""}>${t.label}</option>`).join("")}
-        </select>`;
+        const pill = (key, label, n, cls) =>
+          `<button class="lp ${cls}${state.locFilter === key ? " on" : ""}" data-loc="${key}"
+             title="${esc(label)}">${esc(label)}<span class="lp-n mono">${n}</span></button>`;
+        locBar = `<div class="locbar">
+          ${pill("", "All", rows.length, "lp-all")}
+          ${present.map((x) => pill(x.t.key, x.t.short, x.n, x.t.cls)).join("")}
+        </div>`;
       }
     }
     return `<div class="klane ${l.cls}">
       <div class="kl-head" title="${esc(l.hint)}">
         <span class="kl-dot"></span><span class="kl-name">${l.label}</span>
-        <span class="kl-n mono">${rows.length}</span>${locFilter}${runAll}
+        <span class="kl-n mono">${rows.length}</span>${runAll}
       </div>
+      ${locBar}
       <div class="kl-cards">${
         l.label === "Tailored" ? bucketed(rows)
                                : (rows.map(laneCard).join("") || `<div class="kl-empty">—</div>`)
@@ -1711,12 +1731,22 @@ function wire() {
     if (co) openDrawer(co.dataset.open);
   });
 
-  // Lane-level location filter (Tailored).
-  document.addEventListener("change", (e) => {
-    const sel = e.target.closest("[data-loc-filter]");
-    if (!sel) return;
-    state.locFilter = sel.value;
-    renderPane();
+  // Lane-level location filter (Tailored). Clicking the active pill clears it.
+  document.addEventListener("click", (e) => {
+    const pill = e.target.closest("[data-loc]");
+    if (pill) {
+      const key = pill.dataset.loc;
+      state.locFilter = state.locFilter === key ? "" : key;
+      renderPane();
+      return;
+    }
+    const head = e.target.closest("[data-bucket]");
+    if (head) {
+      const key = head.dataset.bucket;
+      state.collapsed = state.collapsed || new Set();
+      state.collapsed.has(key) ? state.collapsed.delete(key) : state.collapsed.add(key);
+      renderPane();
+    }
   });
 
   $("#drawer").addEventListener("click", (e) => {
