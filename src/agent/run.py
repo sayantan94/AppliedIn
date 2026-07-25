@@ -324,6 +324,18 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
 
     row = stores.tracking.get(pk) or {}
     company, jd_url = row.get("company", ""), row.get("jd_url", "")
+
+    # DUPLICATE GUARD — the one mistake this system must never make twice: a row
+    # already applied (by the pipeline or by the owner's own hand) is refused
+    # loudly, and its applied status is never overwritten. The tool layer checks
+    # again right before the submit click; this is the cheap early exit.
+    if row.get("status") in ("applied", "applied_manual"):
+        detail = (f"Refusing to apply: this job is already '{row.get('status')}'"
+                  " — a duplicate application under your name is worse than a missed one.")
+        emit("response", pk=pk, agent="applier", detail=f"🛑 {detail}", url=jd_url)
+        log.warning("duplicate apply refused for pk=%s (status=%s)", pk, row.get("status"))
+        return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
+
     jd_text = await _jd_text(row)
 
     if _no_sponsorship(jd_text):  # don't submit an application that's a guaranteed no
@@ -432,6 +444,14 @@ def retry_job(pk: str, stores: Any = None) -> dict:
     row = stores.tracking.get(pk)
     if row is None:
         return {"result": "missing", "pk": pk}
+    # Never let a retry wipe an APPLIED row back to found — that path re-runs the
+    # whole pipeline including the submit, i.e. a duplicate application.
+    if row.get("status") in ("applied", "applied_manual"):
+        log.warning("retry refused for pk=%s: already %s", pk, row.get("status"))
+        from core.events import emit
+        emit("response", pk=pk, agent="applier", url=row.get("jd_url"),
+             detail=f"🛑 Retry refused — this job is already '{row.get('status')}'.")
+        return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
     _run(_reset_session(pk))  # drop the finished session so the re-run starts clean
     stores.tracking.set_status(pk, Status.FOUND, fail_reason="", fail_kind="",
                                gate_pending=None, gate_call_id=None, skip_reason="")

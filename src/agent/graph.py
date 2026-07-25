@@ -8,7 +8,7 @@ Sequential pipeline, each stage the pattern that fits it:
                        seed résumé via the `resume-tailoring` SKILL and saves a
                        TYPED résumé (save_tailored_resume — validated, no regex);
                        the critic refines until it calls exit_loop.
-    3. applier         LlmAgent that delegates to browser-use (apply_to_job) —
+    3. applier         LlmAgent that delegates to the browser apply (apply_to_job) —
                        a real browser agent (on Anthropic) fills & submits from
                        human-approved answers only; HUMAN-IN-THE-LOOP via
                        ask_human (ADK long-running tool) whenever it's blocked.
@@ -130,7 +130,7 @@ def exit_loop(tool_context: ToolContext) -> dict:
 
 
 async def apply_to_job(tool_context: ToolContext) -> dict:
-    """Drive a browser (browser-use) to fill and submit THIS job's application,
+    """Drive a browser to fill and submit THIS job's application,
     using human-approved answers, the saved login, the TAILORED résumé (uploaded),
     and a writer model for open-ended questions. Returns status 'applied' (with a
     confirmation) or 'gate' (with the missing question)."""
@@ -161,6 +161,15 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
         facts["Login password"] = creds.get("password", "")
 
     row = stores.tracking.get(pk) or {}
+    # DUPLICATE GUARD — never resubmit a job already applied (by the pipeline or
+    # by the owner's own hand), and never overwrite its applied status.
+    if row.get("status") in ("applied", "applied_manual"):
+        detail = (f"Refused: this job is already '{row.get('status')}' — not "
+                  "submitting a duplicate application.")
+        emit("response", pk=pk, agent="applier", detail=f"🛑 {detail}",
+             url=st.get("jd_url", ""))
+        log.warning("duplicate apply refused for pk=%s (status=%s)", pk, row.get("status"))
+        return {"status": "failed", "reason": "duplicate_application", "detail": detail}
     # WIP: flag the board that the browser is actively submitting this one.
     stores.tracking.set_status(pk, Status.SUBMITTING)
     emit("running", pk=pk, agent="applier", detail="submitting application…",
@@ -354,14 +363,14 @@ tailor_critique = LoopAgent(name="tailor_critique", sub_agents=[tailor, critic],
 
 applier = LlmAgent(
     name="applier", model=_model(),
-    description="Human-gated apply: waits for approval, then submits via browser-use.",
+    description="Human-gated apply: waits for approval, then submits via the browser.",
     instruction=(
         "This is the final APPLY step, and it is HUMAN-GATED — never submit without "
         "explicit approval.\n"
         "1. FIRST, call ask_human(\"Ready to apply to {company}? The tailored résumé is "
         "saved — approve to submit the application.\") and STOP. Do not apply yet.\n"
         "2. Once the human approves, call apply_to_job() — it drives a real browser "
-        "(browser-use) to fill and submit using only approved answers + the saved login.\n"
+        "to fill and submit using only approved answers + the saved login.\n"
         "   - status 'applied' → report the confirmation. Done.\n"
         "   - status 'gate' → call ask_human with the returned question and STOP.\n"
         "Never fabricate an answer — the gate exists for approval and for unknowns."
@@ -371,6 +380,6 @@ applier = LlmAgent(
 
 root_agent = SequentialAgent(
     name="appliedin_pipeline",
-    description="Score → tailor (write-until-happy) → apply via browser-use (+ human gate).",
+    description="Score → tailor (write-until-happy) → browser apply (+ human gate).",
     sub_agents=[scorer, tailor_critique, applier],
 )

@@ -189,35 +189,88 @@ def test_never_declares_a_protected_characteristic():
 
 # --- loop engine tool guards -------------------------------------------------
 
-def test_loop_engine_refuses_what_the_prompt_only_asks_for():
-    """The point of the loop engine: guardrails live in the tool, not the prompt.
+def test_guards_refuse_what_a_prompt_can_only_ask_for():
+    """The guarantees live in code, so a model that tries anyway is refused.
 
-    browser-use can only be TOLD not to declare a disability or affirm a sanctions
-    question. Here a model that tries anyway is refused at the tool boundary, so
-    the rule holds regardless of what the model decided to do.
+    A rule that is only a sentence in a prompt is a rule nobody enforces. These
+    run on every write, whichever engine proposed it.
     """
-    from tools.apply_loop import _guard
+    from tools.form_fill import guard_value
 
-    vals, refused = _guard({
-        "Legal Name": "Alex Kim",                                  # ordinary — kept
-        "Cover letter": "{{DRAFT_ESSAY_ANSWER}}",                  # placeholder
-        "Yes, I have a disability, or have had one in the past": "on",
-    }, "text")
-    assert vals == {"Legal Name": "Alex Kim"}
-    assert len(refused) == 2
+    assert guard_value("Legal Name", "Alex Kim") == ("Alex Kim", None)
 
-    # The negative EEO answer is NOT refused — blocking it would leave a required
-    # field blank instead of correctly declined.
-    vals, _ = _guard({"No, I do not have a disability": "on"}, "text")
-    assert vals == {"No, I do not have a disability": "on"}
+    val, why = guard_value("Cover letter", "{{DRAFT_ESSAY_ANSWER}}")
+    assert val is None and "placeholder" in why
+
+    val, why = guard_value("Yes, I have a disability, or have had one in the past", "on")
+    assert val is None and "self-identification" in why
+
+    # The NEGATIVE answers must still go through: refusing those leaves a required
+    # EEO field blank rather than correctly declined, which is a different wrong.
+    assert guard_value("No, I do not have a disability", "on")[0] == "on"
+    assert guard_value("I am not a protected veteran", "on")[0] == "on"
 
 
-def test_loop_engine_forces_the_safe_sanctions_option():
-    """A sanctions answer is corrected rather than dropped: dropping it leaves a
-    required question blank, which fails the submit instead of answering it."""
-    from tools.apply_loop import _guard
+def test_a_sanctions_answer_is_corrected_not_dropped():
+    """Dropping it leaves a required question blank, which fails the submit
+    instead of answering it."""
+    from tools.form_fill import guard_value
 
     q = "Are you a citizen of, or located in, Cuba, Iran, North Korea, or Syria?"
-    vals, refused = _guard({q: "Yes"}, "choice")
-    assert vals.get(q) and str(vals[q]).lower() != "yes"
-    assert refused and "safe option" in refused[0]
+    val, why = guard_value(q, "Yes")
+    assert val and val.lower() != "yes"
+    assert why and "safe option" in why
+
+
+# --- the chrome engine -------------------------------------------------------
+
+def test_chrome_report_survives_a_nested_filled_object():
+    """The report embeds a "filled" object, so brace matching has to be real.
+
+    A regex that stops at the first closing brace truncates the report into
+    nonsense and the engine reports "ended without saying what happened" for a
+    run that actually succeeded.
+    """
+    import json as _json
+
+    from tools.claude_chrome import _report
+
+    env = _json.dumps({"result": 'Filled it in. {"outcome": "applied", '
+                                 '"confirmation": "Thanks for applying!", '
+                                 '"filled": {"Email": "a@b.c", "Phone": "555"}}'})
+    report = _report(env, "outcome")
+    assert report["outcome"] == "applied"
+    assert report["confirmation"] == "Thanks for applying!"
+    assert report["filled"]["Phone"] == "555"
+
+
+def test_chrome_result_is_checked_not_trusted():
+    """Acting happens in another process, so the owner's rules are re-checked.
+
+    A rule that is only ever a sentence in a prompt is a rule nobody enforces.
+    """
+    from tools.claude_chrome import _verify
+
+    ok, _ = _verify({"filled": {"Email": "a@b.c"}})
+    assert ok
+
+    ok, why = _verify({"filled": {
+        "Yes, I have a disability, or have had one in the past": "on"}})
+    assert not ok and "protected characteristic" in why
+
+    ok, why = _verify({"filled": {"Cover letter": "{{DRAFT_ESSAY_ANSWER}}"}})
+    assert not ok and "placeholder" in why
+
+
+def test_chrome_engine_scopes_itself_to_browser_tools():
+    """Filling a form must not come with bash, Read, or Edit.
+
+    Write is granted only so the task can hand back a structured report, and
+    --add-dir confines it to a scratch directory, so no repo file is reachable.
+    """
+    from tools.claude_chrome import ALLOWED_TOOLS
+
+    assert "mcp__claude-in-chrome" in ALLOWED_TOOLS
+    assert set(ALLOWED_TOOLS) <= {"mcp__claude-in-chrome", "Write"}
+    for forbidden in ("Bash", "Read", "Edit", "WebFetch"):
+        assert forbidden not in ALLOWED_TOOLS

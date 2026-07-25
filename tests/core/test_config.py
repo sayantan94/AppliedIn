@@ -11,17 +11,17 @@ from core.config import Settings
 def test_shipped_defaults():
     s = Settings()
     assert s.mode == "local"                    # runs on your machine, not a cloud
-    assert s.apply_engine == "scripted"         # deterministic pipeline, no LLM in the click loop
+    assert s.apply_engine == "chrome"           # the owner's own browser, not a bot-shaped one
     assert s.browser_headless is False          # a real window is friendlier to bot-detection
     assert s.apply_mode == "gated"              # never applies to anything unasked
     assert s.litellm_model == "openai/gpt-5-mini"
 
 
 def test_the_environment_overrides_a_default(monkeypatch):
-    monkeypatch.setenv("APPLIEDIN_APPLY_ENGINE", "agent")
+    monkeypatch.setenv("APPLIEDIN_APPLY_ENGINE", "scripted")
     monkeypatch.setenv("APPLIEDIN_BROWSER_HEADLESS", "true")
     s = Settings()
-    assert s.apply_engine == "agent"
+    assert s.apply_engine == "scripted"
     assert s.browser_headless is True
 
 

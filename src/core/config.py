@@ -63,14 +63,25 @@ class Settings(BaseSettings):
     # Cloud mode reaches the same class of model through Bedrock.
     bedrock_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-    # browser-use (crawl + apply) drives a real browser and needs a model that
-    # reliably emits structured tool actions. Only the browser-use calls use this;
+    # The browser stages (discovery crawl; the loop engine's resolver) need a
+    # model that reliably emits structured output. Only those calls use this;
     # orchestration models are set by orchestrator_model / the per-agent overrides.
     browser_model: str = "gpt-5-mini"
-    # Apply engine: "agent" = browser-use (LLM drives, using our deterministic
-    # helper tools) — swap browser_model to change the driver. "scripted" = pure
-    # Playwright pipeline (no LLM in the click loop).
-    apply_engine: str = "scripted"  # deterministic pipeline; agent = browser-use fallback
+    # Apply engine — both wrap the ONE form-fill core (tools.form_fill):
+    #   "scripted" = purely deterministic, no LLM in the click loop (default);
+    #   "loop"     = adds a model-backed resolver for labels the deterministic
+    #                pass can't map, and drafts free text via the writer.
+    # (The old browser-use "agent" engine was removed; its value maps to scripted.)
+    # Which Claude model drives the browser when an apply is handed to your own
+    # Chrome. Orchestration — discovery, scoring, tailoring, the writer — stays on
+    # OpenAI; this is only the hands, and the hands are the part that has to read a
+    # form nobody wrote a rule for.
+    chrome_model: str = "claude-fable-5"
+    # chrome  — the owner's own browser (default; needs Claude Code + a direct
+    #           Anthropic plan). Falls back to scripted when that is missing.
+    # scripted — pure Playwright, no model in the click loop, one OpenAI key.
+    # loop     — the shared core plus a model-backed resolver.
+    apply_engine: str = "chrome"
     # Run the browser without a visible window (APPLIEDIN_BROWSER_HEADLESS=true).
     # Headed is friendlier to bot-detection; headless suits overnight/Docker runs.
     browser_headless: bool = False
