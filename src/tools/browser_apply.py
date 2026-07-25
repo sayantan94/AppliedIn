@@ -568,7 +568,11 @@ async def _agent_finish_submit(page, facts: dict, drafted: dict, model: str, pk:
         "attached. Never invent a value — a required field with no approved answer "
         "→ STOP with:  MISSING: <question>. A CAPTCHA/login wall → STOP with:  "
         "BLOCKED: <captcha or account> (never solve a CAPTCHA). Submitted but no "
-        "confirmation visible → STOP with:  UNCERTAIN: <what the page shows>.")
+        "confirmation visible → STOP with:  UNCERTAIN: <what the page shows>."
+        # The scripted engine is the DEFAULT path, so site rules must reach this
+        # task too — wiring them only into the agent engine's _task() left the
+        # site-quirks skill dead for every real apply.
+        + _site_rules(url, company))
     controller = _apply_controller(upload_path, pk, url, snapshot_sink=snapshot,
                                    drafted_sink=drafted, company=company, jd_text=jd_text,
                                    resume_tex=resume_tex, github=github)
@@ -639,6 +643,11 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
     async with async_playwright() as p:
         page, closer, headed = await _launch(p)
 
+        # The TOP-LEVEL page. `page` is rebound below to whichever frame holds the
+        # form, so anything that is page-only — screenshots, the assist window —
+        # must go through this handle.
+        top_page = page
+
         async def _maybe_assist(res: dict) -> dict:
             """Hold the VISIBLE window open for the human ONLY when it's a genuine
             MUST — a CAPTCHA to solve or a login/2FA wall to sign in. Everything
@@ -649,13 +658,13 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 return res
             if res.get("reason") not in ("captcha", "no_account", "unknown_field"):
                 return res  # not actionable in a window — surface it on the board
-            conf = await _assist_wait(page, pk, url, res.get("question", ""),
+            conf = await _assist_wait(top_page, pk, url, res.get("question", ""),
                                       res.get("reason", ""))
             if not conf:
                 return res
             st = await page.evaluate(_READ_FORM_JS)
             return {"status": "applied", "confirmation": conf,
-                    "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
+                    "screenshot_b64": base64.b64encode(await top_page.screenshot()).decode(),
                     "drafted": drafted or None, "fields": _ui_fields(st)}
 
         try:
@@ -675,6 +684,14 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 except Exception:
                     continue
 
+            # Some employers EMBED the ATS form in an iframe, leaving the
+            # top-level document with only the site's nav/search boxes and no
+            # résumé input at all. Work inside whichever frame actually holds the
+            # application, or every read/fill/upload below silently targets the
+            # wrong document. `page` is the top level when the form is hosted
+            # directly, so the common case is unchanged.
+            page = await _form_frame(page)   # reads / fills / uploads
+
             # URL-type skill: a known ATS (Ashby/…) gets structure-aware
             # extraction — far more reliable than the generic scrape (Ashby's
             # Location combobox and field labels, etc.). Falls back to generic.
@@ -693,7 +710,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
 
             if any(f.get("type") == "password" for f in fillable) and not any(
                     "login" in k.lower() for k in facts):
-                shot = base64.b64encode(await page.screenshot()).decode()
+                shot = base64.b64encode(await top_page.screenshot()).decode()
                 return {"status": "gate", "reason": "no_account", "screenshot_b64": shot,
                         "question": "The portal wants a login before the application form."}
 
@@ -760,7 +777,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         missing_required.append(label)
 
             if missing_required:
-                shot = base64.b64encode(await page.screenshot()).decode()
+                shot = base64.b64encode(await top_page.screenshot()).decode()
                 return _with_fields(page, {
                     "status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
                     "question": "I need answers for: " + "; ".join(missing_required[:5]),
@@ -852,7 +869,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                 await page.wait_for_timeout(5000)
 
                 body = (await page.evaluate("() => document.body.innerText || ''"))[:6000]
-                shot = base64.b64encode(await page.screenshot()).decode()
+                shot = base64.b64encode(await top_page.screenshot()).decode()
                 state = await page.evaluate(_READ_FORM_JS)
                 # Application-limit block is checked BEFORE success: a portal's limit
                 # page can literally say "Thank you for considering Ramp!" which
@@ -978,7 +995,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             if conf:
                 st = await page.evaluate(_READ_FORM_JS)
                 return {"status": "applied", "confirmation": conf,
-                        "screenshot_b64": base64.b64encode(await page.screenshot()).decode(),
+                        "screenshot_b64": base64.b64encode(await top_page.screenshot()).decode(),
                         "drafted": drafted or None, "fields": _ui_fields(st)}
 
             # A KNOWN ATS (Ashby/…) was filled by its dedicated skill — every
@@ -1484,6 +1501,53 @@ async def _page_of(browser_session) -> object:  # noqa: ANN001
     if page is None and hasattr(browser_session, "get_current_page"):
         page = await browser_session.get_current_page()
     return page
+
+
+# Scores a document on how much it looks like a JOB APPLICATION form rather than
+# a page that merely has inputs. A résumé file input is the strongest signal, an
+# email field next; a plain count is not enough, because a careers page carries a
+# nav search box and a cookie form while the real application sits in an iframe.
+_FORM_SCORE_JS = """
+() => {
+  const q = s => document.querySelectorAll(s).length;
+  const files = q('input[type=file]');
+  const emails = q('input[type=email]');
+  const texts = q('input[type=text], input[type=tel], textarea, select');
+  return files * 100 + emails * 25 + texts;
+}
+"""
+
+
+async def _form_frame(page):  # noqa: ANN001, ANN201
+    """The frame that actually holds the application form.
+
+    Employers commonly EMBED the ATS form in an iframe (a Greenhouse embed is the
+    usual case), which leaves the top-level document with no résumé input and only
+    the site's own nav/search boxes. Reading, filling or uploading against the top
+    level then silently does nothing — the fill reports NOT FOUND for every field
+    and the résumé is never attached, while the page still looks right on screen.
+
+    Returns the top-level page unless a child frame scores strictly higher, so
+    sites that host their form directly (Ashby, Lever) are unaffected.
+    """
+    try:
+        best, best_score = page, await page.evaluate(_FORM_SCORE_JS)
+        for frame in getattr(page, "frames", []) or []:
+            if frame is getattr(page, "main_frame", None):
+                continue
+            try:
+                score = await frame.evaluate(_FORM_SCORE_JS)
+            except Exception:  # noqa: BLE001 — a cross-origin/detached frame
+                continue
+            if score > best_score:
+                best, best_score = frame, score
+        if best is not page:
+            log.info("application form is in an iframe (%s) — working inside it",
+                     (getattr(best, "url", "") or "")[:80])
+        return best
+    except Exception:  # noqa: BLE001 — never lose an apply to frame detection
+        log.debug("frame detection failed; using the top-level page", exc_info=True)
+        return page
 
 
 _READ_FORM_JS = """
