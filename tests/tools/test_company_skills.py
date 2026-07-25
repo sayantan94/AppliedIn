@@ -185,3 +185,39 @@ def test_never_declares_a_protected_characteristic():
     # ordinary questions are untouched
     assert not declares("Are you authorized to work in the country?", "Yes")
     assert not declares("Are you able to work from our US office three days per week?", "Yes")
+
+
+# --- loop engine tool guards -------------------------------------------------
+
+def test_loop_engine_refuses_what_the_prompt_only_asks_for():
+    """The point of the loop engine: guardrails live in the tool, not the prompt.
+
+    browser-use can only be TOLD not to declare a disability or affirm a sanctions
+    question. Here a model that tries anyway is refused at the tool boundary, so
+    the rule holds regardless of what the model decided to do.
+    """
+    from tools.apply_loop import _guard
+
+    vals, refused = _guard({
+        "Legal Name": "Alex Kim",                                  # ordinary — kept
+        "Cover letter": "{{DRAFT_ESSAY_ANSWER}}",                  # placeholder
+        "Yes, I have a disability, or have had one in the past": "on",
+    }, "text")
+    assert vals == {"Legal Name": "Alex Kim"}
+    assert len(refused) == 2
+
+    # The negative EEO answer is NOT refused — blocking it would leave a required
+    # field blank instead of correctly declined.
+    vals, _ = _guard({"No, I do not have a disability": "on"}, "text")
+    assert vals == {"No, I do not have a disability": "on"}
+
+
+def test_loop_engine_forces_the_safe_sanctions_option():
+    """A sanctions answer is corrected rather than dropped: dropping it leaves a
+    required question blank, which fails the submit instead of answering it."""
+    from tools.apply_loop import _guard
+
+    q = "Are you a citizen of, or located in, Cuba, Iran, North Korea, or Syria?"
+    vals, refused = _guard({q: "Yes"}, "choice")
+    assert vals.get(q) and str(vals[q]).lower() != "yes"
+    assert refused and "safe option" in refused[0]

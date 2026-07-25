@@ -128,6 +128,13 @@ async def apply(url: str, company: str, facts: dict, model: str, *, pk: str = ""
         facts.setdefault("Last name", " ".join(rest) or first)
 
     engine = (getattr(get_settings(), "apply_engine", "agent") or "agent").lower()
+    if engine == "loop":
+        # Our own tools, a thin model loop, our guardrails enforced in the tool
+        # layer rather than asked for in a prompt.
+        from .apply_loop import apply_loop
+        return await apply_loop(url, company, facts, model, pk=pk, jd_text=jd_text,
+                                resume_tex=resume_tex, github=github,
+                                resume_path=resume_path)
     if engine != "scripted":  # browser-use is the driver
         return await _agent_apply(url, company, facts, model, pk=pk, jd_text=jd_text,
                                   resume_tex=resume_tex, github=github,
@@ -668,17 +675,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(1500)
 
-            # Reach the actual form: Ashby has an "Application" tab; Greenhouse and
-            # Lever variants use an Apply link/button. All best-effort.
-            for sel in ('role=tab[name*="Application"]', 'text="Application"',
-                        'a:has-text("Apply for this job")', 'a:has-text("Apply now")',
-                        'button:has-text("Apply")'):
-                try:
-                    await page.locator(sel).first.click(timeout=2500)
-                    await page.wait_for_timeout(1200)
-                    break
-                except Exception:
-                    continue
+            await _reach_form(page)
 
             # Some employers EMBED the ATS form in an iframe, leaving the
             # top-level document with only the site's nav/search boxes and no
@@ -1606,6 +1603,26 @@ _FORM_SCORE_JS = """
 """
 
 
+async def _reach_form(page) -> bool:  # noqa: ANN001
+    """Click through to the actual application form. Best-effort, never raises.
+
+    A job page is not an application: Ashby keeps the fields behind an
+    "Application" tab and reading the posting itself finds none at all, while
+    Greenhouse and Lever variants use an Apply link or button. Shared by every
+    engine so they cannot disagree about where the form is.
+    """
+    for sel in ('role=tab[name*="Application"]', 'text="Application"',
+                'a:has-text("Apply for this job")', 'a:has-text("Apply now")',
+                'button:has-text("Apply")'):
+        try:
+            await page.locator(sel).first.click(timeout=2500)
+            await page.wait_for_timeout(1200)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 async def _form_frame(page):  # noqa: ANN001, ANN201
     """The frame that actually holds the application form.
 
@@ -1677,6 +1694,35 @@ _READ_FORM_JS = """
     }
     return '';
   };
+  // A form marks "required" for a PERSON, and that is usually an asterisk in the
+  // label rather than an HTML attribute. OpenAI's Ashby board marks its location
+  // combobox and its arbitration acknowledgement with a red * and sets neither
+  // `required` nor aria-required — so reading attributes alone told every engine
+  // those fields were optional, they were left blank, and the submit failed on
+  // them. Look for the asterisk in the label's own element too.
+  // Two shapes are mandatory in practice on every board, whatever the markup
+  // says: where you are located, and the acknowledgement you must tick to file
+  // an application. Encoding the SHAPE rather than listing fields means a board
+  // we have never seen is handled the first time, and there is nothing to keep
+  // in sync as employers reword their forms.
+  const ALWAYS_REQUIRED = new RegExp([
+    'where are you (currently )?located', 'current location', '^location$',
+    'i acknowledge', 'i confirm', 'i certify', 'i have read',
+    'arbitration agreement', 'consent to',
+  ].join('|'), 'i');
+  const isRequired = (el, label) => {
+    if (el.required || el.getAttribute('aria-required') === 'true') return true;
+    if (label && ALWAYS_REQUIRED.test(label)) return true;
+    const owners = [el.labels && el.labels[0],
+                    el.closest('[class*="fieldEntry" i], [class*="field" i], fieldset, label')];
+    for (const o of owners) {
+      if (!o) continue;
+      const head = o.querySelector('label, legend, .heading, [class*="heading" i]') || o;
+      if (/\\*/.test((head.textContent || '').slice(0, 200))) return true;
+      if (o.querySelector('[class*="required" i], .asterisk')) return true;
+    }
+    return false;
+  };
   const out = [], groups = {};
   for (const el of els) {
     const multi = el.name &&
@@ -1685,7 +1731,7 @@ _READ_FORM_JS = """
       const key = el.name || optLabel(el);
       if (!groups[key]) groups[key] = {
         label: questionOf(el) || key, type: 'choice-group', options: [], value: '',
-        required: !!(el.required || el.getAttribute('aria-required') === 'true') };
+        required: isRequired(el, questionOf(el) || key) };
       const ol = optLabel(el);
       if (ol) groups[key].options.push(ol);
       if (el.checked) groups[key].value = ol || 'checked';
@@ -1741,7 +1787,7 @@ _READ_FORM_JS = """
       value: el.type === 'checkbox' ? (el.checked ? 'checked' : '')
            : (el.type === 'file' ? (el.files && el.files.length ? el.files[0].name : '')
                                  : (el.value || '')),
-      required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+      required: isRequired(el, lbl),
     });
   }
   out.push(...Object.values(groups));
