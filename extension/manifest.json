@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "AppliedIn — assisted apply",
+  "name": "AppliedIn \u2014 handoff",
   "version": "0.1.0",
-  "description": "Fills a job application from your AppliedIn profile, in your own browser. You review and submit.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "description": "Finishes the applications AppliedIn can't: opens each one, fills it from your profile, and leaves you only the security check and Submit.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "alarms"
+  ],
   "host_permissions": [
     "http://127.0.0.1:8787/*",
     "http://localhost:8787/*",
@@ -15,15 +21,36 @@
   ],
   "action": {
     "default_title": "AppliedIn",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "content_scripts": [
     {
-      "matches": ["https://*/*"],
-      "js": ["content.js"],
-      "css": ["overlay.css"],
+      "matches": [
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "overlay.css"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }
-  ]
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
 }

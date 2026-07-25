@@ -1,3 +1,28 @@
-/* Marks the fields AppliedIn filled, so a glance is enough to review them. */
-.appliedin-filled { outline: 2px solid rgba(63, 214, 143, .55) !important; outline-offset: 1px; }
-.appliedin-needs  { outline: 2px solid rgba(242, 177, 62, .75) !important; outline-offset: 1px; }
+/* The on-page banner. It reports what was filled and what still needs the owner,
+   then stays out of the way — the form underneath is the thing that matters. */
+#appliedin-banner {
+  position: fixed; z-index: 2147483647; right: 16px; bottom: 16px;
+  max-width: 380px; padding: 12px 34px 12px 14px;
+  display: flex; flex-direction: column; gap: 3px;
+  background: #151917; color: #e8ede9; border: 1px solid #262d28;
+  border-left: 3px solid #3fd68f; border-radius: 10px;
+  box-shadow: 0 10px 34px -12px rgba(0,0,0,.6);
+  font: 13px/1.5 "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+#appliedin-banner.warn { border-left-color: #f2b13e; }
+#appliedin-banner.busy { border-left-color: #6cc4d8; }
+#appliedin-banner.ok   { border-left-color: #3fd68f; }
+#appliedin-banner .ab-t { font-weight: 650; font-size: 12.5px; }
+#appliedin-banner .ab-t b { color: #3fd68f; }
+#appliedin-banner .ab-n { font-size: 11.5px; color: #f2b13e; }
+#appliedin-banner .ab-n i { font-style: normal; }
+#appliedin-banner .ab-h { font-size: 11.5px; color: #9fada3; }
+#appliedin-banner .ab-x {
+  position: absolute; top: 6px; right: 8px; background: none; border: 0;
+  color: #66716a; font-size: 17px; line-height: 1; cursor: pointer;
+}
+#appliedin-banner .ab-x:hover { color: #e8ede9; }
+
+/* Fields AppliedIn filled, and the ones it could not. */
+.appliedin-filled { outline: 2px solid rgba(63,214,143,.5) !important; outline-offset: 1px; }
+.appliedin-needs  { outline: 2px solid rgba(242,177,62,.75) !important; outline-offset: 1px; }

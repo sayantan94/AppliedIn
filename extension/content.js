@@ -279,8 +279,93 @@ async function run() {
            siteRules: !!ctx.site_rules };
 }
 
+// ── on-page banner ──────────────────────────────────────────────────────────
+/* Feedback belongs on the page, not behind a popup the owner has to reopen.
+ * It says what was filled, what still needs them, and gets out of the way. */
+function banner(html, tone) {
+  let el = document.getElementById("appliedin-banner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "appliedin-banner";
+    (document.body || document.documentElement).append(el);
+  }
+  el.className = "appliedin-banner " + (tone || "");
+  el.innerHTML = html +
+    '<button class="ab-x" title="dismiss" aria-label="dismiss">&times;</button>';
+  el.querySelector(".ab-x").onclick = () => el.remove();
+  return el;
+}
+
+function summarise(res) {
+  const bits = [`<b>${res.filled}</b> fields filled`];
+  if (res.resume) bits.push("résumé attached");
+  if (res.essays?.length) bits.push(`${res.essays.length} answer(s) drafted`);
+  if (res.sanctions) bits.push("sanctions答".replace("答", "") + "question answered");
+  const head = `<span class="ab-t">AppliedIn — ${bits.join(" · ")}</span>`;
+  if (res.remaining?.length) {
+    return head + `<span class="ab-n">${res.remaining.length} still need you: ` +
+      res.remaining.slice(0, 4).map((r) => `<i>${r}</i>`).join(", ") +
+      "</span><span class=\"ab-h\">Review, then submit it yourself.</span>";
+  }
+  return head + '<span class="ab-h">Everything required is filled. ' +
+         "Review it, then submit — clear any security check yourself.</span>";
+}
+
+/* Watch for the employer's confirmation after the owner submits, and tell the
+ * board. Without this the last step is a manual click in the popup; with it,
+ * finishing an application is just pressing the site's own Submit. */
+const DONE_RX = /thank you for applying|application (was |has been )?(submitted|received)|we(?:'| ha)ve received your application|submitted successfully/i;
+
+function watchForConfirmation(pk) {
+  if (!pk) return;
+  const seen = () => DONE_RX.test(document.body?.innerText || "");
+  const report = async () => {
+    try {
+      await fetch(API + "/extension/applied", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pk, confirmation: (document.body.innerText.match(DONE_RX) || [""])[0] }),
+      });
+      banner('<span class="ab-t">AppliedIn — submitted ✓</span>' +
+             '<span class="ab-h">Marked applied on your board.</span>', "ok");
+    } catch (e) { /* the board can be updated by hand */ }
+    obs.disconnect();
+  };
+  if (seen()) return report();
+  const obs = new MutationObserver(() => { if (seen()) report(); });
+  obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+  setTimeout(() => obs.disconnect(), 10 * 60 * 1000);
+}
+
+// ── auto-run ────────────────────────────────────────────────────────────────
+/* Opening a job the pipeline queued should be enough. If this page holds a form
+ * AND the job is one AppliedIn is waiting on, fill it immediately — the owner
+ * came here to finish it, not to press another button first. */
+async function autoRun() {
+  if (formScore() < 25) return;
+  let queued = false;
+  try {
+    const ctx = await (await fetch(
+      `${API}/extension/context?url=${encodeURIComponent(location.href)}`)).json();
+    queued = !!ctx.pk;
+  } catch { return; }          // app not running — stay silent
+  if (!queued) return;
+  banner('<span class="ab-t">AppliedIn — filling…</span>', "busy");
+  const res = await run();
+  if (!res.ok) return banner(`<span class="ab-t">AppliedIn — ${res.error}</span>`, "warn");
+  banner(summarise(res), res.remaining?.length ? "warn" : "ok");
+  watchForConfirmation(res.pk);
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-  if (msg?.type === "APPLIEDIN_FILL") { run().then(respond).catch((e) => respond({ ok: false, error: String(e) })); return true; }
+  if (msg?.type === "APPLIEDIN_FILL") {
+    run().then((r) => {
+      if (r.ok) { banner(summarise(r), r.remaining?.length ? "warn" : "ok"); watchForConfirmation(r.pk); }
+      respond(r);
+    }).catch((e) => respond({ ok: false, error: String(e) }));
+    return true;
+  }
   if (msg?.type === "APPLIEDIN_PROBE") { respond({ score: formScore(), url: location.href }); return true; }
   return false;
 });
+
+if (formScore() >= 25) setTimeout(autoRun, 1200);

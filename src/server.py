@@ -371,6 +371,43 @@ def create_app() -> FastAPI:
                 "unanswered": [str(f.get("label")) for f in fields
                                if f.get("required") and str(f.get("label")) not in values]}
 
+    @app.get("/extension/queue")
+    def extension_queue():
+        """Applications waiting for the owner to finish by hand.
+
+        This is the handoff the extension exists for. A job lands here when the
+        pipeline cannot finish it ITSELF — a CAPTCHA or a sign-in wall it must not
+        touch — and when the owner runs in assisted mode, where the pipeline
+        deliberately stops at TAILORED. Either way the work is already done: the
+        résumé is tailored and the answers are known, so finishing is a matter of
+        opening the page and letting the extension fill it.
+        """
+        from core import flags
+
+        stores = make_stores(settings)
+        blocked = {"captcha", "no_account", "unknown_field"}
+        out = []
+        for r in stores.tracking.all():
+            if not _is_job_row(r) or not r.get("jd_url"):
+                continue
+            status, reason = r.get("status"), r.get("gate_reason") or ""
+            if status == "needs_human" and reason in blocked:
+                why = {"captcha": "a security check the pipeline must not solve",
+                       "no_account": "the portal wants a sign-in",
+                       "unknown_field": "a field it could not answer"}[reason]
+            elif status == "failed" and r.get("fail_kind") == "spam_flagged":
+                why = "the automated attempt was flagged — your own browser will not be"
+            elif status == "tailored" and flags.assisted():
+                why = "ready to send"
+            else:
+                continue
+            out.append({"pk": r["pk"], "company": r.get("company", ""),
+                        "title": r.get("title", ""), "url": r.get("jd_url"),
+                        "location": r.get("location", ""), "why": why,
+                        "score": r.get("match_score")})
+        out.sort(key=lambda j: -(j.get("score") or 0))
+        return {"mode": flags.apply_mode(), "jobs": out}
+
     @app.post("/extension/applied")
     def extension_applied(body: dict):
         """The owner confirmed they submitted it — record it on the board."""

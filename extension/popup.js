@@ -1,125 +1,87 @@
-/* The popup is a remote control. It asks the content script what it can see,
- * tells it to fill, and reports back — every decision is the server's. */
+/* The popup is a readout, not a control panel. The handoff runs by itself in the
+ * background; this exists to say what is waiting and why, and to give a way in
+ * if the owner wants one. */
 
 const API = "http://127.0.0.1:8787";
 const $ = (id) => document.getElementById(id);
 
-let ctx = null;
+const WHY_ICON = {
+  "a security check the pipeline must not solve": "🔒",
+  "the portal wants a sign-in": "👤",
+};
 
-async function tab() {
+async function currentTab() {
   const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
   return t;
 }
 
-function tag(text, ok) {
-  const s = document.createElement("span");
-  s.className = "tag" + (ok ? " ok" : "");
-  s.textContent = text;
-  return s;
-}
-
-async function init() {
-  // Is the app running? Without it there is no profile, no résumé, no mapping.
+async function render() {
+  let stats, queue;
   try {
-    const r = await fetch(`${API}/stats`, { cache: "no-store" });
-    const d = await r.json();
-    $("server").textContent = `connected · ${d.counts_by_status?.tailored ?? 0} tailored`;
-    $("server").className = "sub up";
+    stats = await (await fetch(`${API}/stats`, { cache: "no-store" })).json();
+    queue = await (await fetch(`${API}/extension/queue`, { cache: "no-store" })).json();
   } catch {
     $("server").textContent = "AppliedIn is not running";
     $("server").className = "sub down";
-    $("ft").textContent = "Start it with ./appliedin start, then reopen this.";
+    $("count").textContent = "—";
+    $("cap").textContent = "start it with ./appliedin start";
     return;
   }
 
-  const t = await tab();
-  try {
-    ctx = await (await fetch(
-      `${API}/extension/context?url=${encodeURIComponent(t.url)}`)).json();
-  } catch { ctx = null; }
+  $("server").textContent = `connected · ${queue.mode} mode`;
+  $("server").className = "sub up";
 
-  if (ctx && (ctx.company || ctx.title)) {
-    $("job").hidden = false;
-    $("co").textContent = ctx.company || "This posting";
-    $("role").textContent = ctx.title || t.title || "";
-    const tags = $("tags");
-    if (ctx.resume_url) tags.append(tag("tailored résumé", true));
-    if (ctx.known_site) tags.append(tag("site rules known", true));
-    if (ctx.status) tags.append(tag(ctx.status));
+  const jobs = queue.jobs || [];
+  $("count").textContent = String(jobs.length);
+  $("cap").textContent = jobs.length === 0
+    ? "nothing needs you — the pipeline has it"
+    : jobs.length === 1 ? "application is open and filled, waiting on you"
+                        : "applications are open and filled, waiting on you";
+
+  const list = $("list");
+  list.innerHTML = "";
+  for (const j of jobs.slice(0, 6)) {
+    const row = document.createElement("button");
+    row.className = "row";
+    row.innerHTML =
+      `<span class="ic">${WHY_ICON[j.why] || "✓"}</span>` +
+      `<span class="txt"><b>${j.company}</b><i>${j.title}</i>` +
+      `<em>${j.why}</em></span>`;
+    row.onclick = () => chrome.tabs.create({ url: j.url, active: true });
+    list.append(row);
   }
-  $("fill").disabled = false;
+  if (jobs.length > 6) {
+    const more = document.createElement("div");
+    more.className = "more";
+    more.textContent = `+${jobs.length - 6} more`;
+    list.append(more);
+  }
+
+  $("ft").textContent = jobs.length
+    ? "Each one is already filled. Clear the security check and press the site's Submit — it marks itself applied."
+    : `${stats.counts_by_status?.tailored ?? 0} tailored · ${stats.counts_by_status?.applied ?? 0} applied`;
+
+  // Offer a manual fill only when the owner is actually looking at a form.
+  const t = await currentTab();
+  try {
+    const probe = await chrome.tabs.sendMessage(t.id, { type: "APPLIEDIN_PROBE" });
+    $("here").hidden = !(probe && probe.score >= 25);
+  } catch { $("here").hidden = true; }
 }
 
 $("fill").addEventListener("click", async () => {
-  const btn = $("fill");
-  btn.disabled = true;
-  btn.classList.add("busy");
-  btn.textContent = "reading the form…";
-  const t = await tab();
-
-  let res;
+  const t = await currentTab();
+  $("fill").textContent = "filling…";
   try {
-    // all_frames: the form often lives in an embedded iframe, and only that
-    // frame's copy of the script can see it. Whichever replies with a result wins.
-    const replies = await chrome.tabs.sendMessage(t.id, { type: "APPLIEDIN_FILL" });
-    res = replies;
-  } catch (e) {
-    res = { ok: false, error: "no form found on this page (reload it and retry)" };
-  }
-
-  btn.classList.remove("busy");
-  btn.textContent = "Fill this application";
-  btn.disabled = false;
-
-  const out = $("out");
-  out.hidden = false;
-  out.innerHTML = "";
-  const line = (n, text, warn) => {
-    const d = document.createElement("div");
-    d.className = "row" + (warn ? " warn" : "");
-    d.innerHTML = `<b>${n}</b><span>${text}</span>`;
-    out.append(d);
-  };
-
-  if (!res || !res.ok) {
-    line("—", res?.error || "could not fill this page", true);
-    return;
-  }
-  line(res.filled, "fields filled from your profile");
-  if (res.resume) line("1", "tailored résumé attached");
-  if (res.essays?.length) line(res.essays.length, "open questions drafted");
-  if (res.sanctions) line("✓", `sanctions question — ${res.sanctions}`);
-  if (res.remaining?.length) {
-    line(res.remaining.length, "still need you:", true);
-    const ul = document.createElement("ul");
-    ul.className = "list";
-    for (const r of res.remaining.slice(0, 6)) {
-      const li = document.createElement("li");
-      li.textContent = r;
-      ul.append(li);
-    }
-    out.append(ul);
-  }
-  ctx = { ...(ctx || {}), pk: res.pk || ctx?.pk };
-  $("done").hidden = false;
+    const r = await chrome.tabs.sendMessage(t.id, { type: "APPLIEDIN_FILL" });
+    $("fill").textContent = r?.ok ? `filled ${r.filled} fields` : (r?.error || "could not fill");
+  } catch { $("fill").textContent = "no form on this page"; }
 });
 
-$("applied").addEventListener("click", async () => {
-  if (!ctx?.pk) {
-    $("ft").textContent = "This posting isn't on your board, so there's nothing to mark.";
-    return;
-  }
-  try {
-    const r = await (await fetch(`${API}/extension/applied`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pk: ctx.pk, confirmation: "submitted by hand via the extension" }),
-    })).json();
-    $("applied").textContent = r.ok ? "✓ marked applied on your board" : (r.error || "could not mark it");
-    $("applied").disabled = !!r.ok;
-  } catch {
-    $("applied").textContent = "could not reach AppliedIn";
-  }
+$("enabled").addEventListener("change", async (e) => {
+  await chrome.storage.local.set({ enabled: e.target.checked });
+  if (e.target.checked) chrome.runtime.sendMessage({ type: "APPLIEDIN_SYNC" });
 });
 
-init();
+chrome.storage.local.get("enabled").then((s) => { $("enabled").checked = s.enabled !== false; });
+render();
