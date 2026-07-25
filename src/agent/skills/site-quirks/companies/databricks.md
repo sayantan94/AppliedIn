@@ -19,3 +19,10 @@ success_phrases:
   the Databricks page and shows no form.
 - The résumé row offers Attach / Dropbox / Google Drive. Use **Attach** and set the
   file input directly.
+- **Submitting requires a CAPTCHA.** Clicking "Submit application" reveals a
+  reCAPTCHA plus an 8-box "Security code — confirm you're a human" field, and the
+  application does NOT go through until a person completes it. Nothing on the page
+  says this before the click, so a run that fills the form perfectly still ends
+  with no confirmation. Treat this as a human handoff (BLOCKED: captcha), not a
+  failure to fill — never attempt to solve it.
+

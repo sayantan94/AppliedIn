@@ -14,3 +14,8 @@ success_phrases:
   and set the file input directly; the manual-entry mode discards formatting.
 - Demographic / EEOC questions at the bottom are voluntary. Select the decline
   option rather than leaving them blank when the form refuses to submit.
+- Some Greenhouse boards gate the SUBMIT behind a reCAPTCHA / "security code"
+  challenge that only appears after the button is clicked. If that appears, the
+  application is not in — stop and hand the window to the person. Filling was not
+  the problem, so do not re-fill or re-submit.
+

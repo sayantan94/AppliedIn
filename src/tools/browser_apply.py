@@ -807,6 +807,11 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             if choice_map:
                 await _set_choices(page, choice_map, pk, url)
 
+            # SANCTIONS SWEEP — unconditional. Not driven by the model's field
+            # map, because when the reader fails to group the question nothing
+            # would select the safe option and a required field goes in blank.
+            await _ensure_sanctions_safe(page, pk, url)
+
             # Combobox widgets ignore synthetic value-setting entirely (Ashby's
             # Location). Drive each one with a REAL click → pick → type → pick.
             # Belt-and-braces: a location field goes through the real-keystroke
@@ -2350,6 +2355,87 @@ def _safe_sanctions_answer(question: str, values: list) -> list:
         log.warning("sanctions question — forcing the negative answer for %r "
                     "(proposed %r)", (question or "")[:70], values)
     return safe or ["None of the above", "No", "Not applicable"]
+
+
+# Finds a sanctions checkbox/radio group and its SAFE option, wherever it sits.
+# Structure varies (fieldset+legend, a bare paragraph then labels, a div), and
+# the generic reader does not always group it — so this works off the OPTION
+# text, which is consistent, rather than the question's markup.
+_SANCTIONS_SWEEP_JS = r"""
+() => {
+  const ntrim = s => (s || '').replace(/\s+/g, ' ').trim();
+  const labelOf = el => ntrim(
+       (el.labels && el.labels[0] && el.labels[0].textContent)
+    || (el.closest('label') || {}).textContent
+    || (el.nextElementSibling || {}).textContent || '');
+  const COUNTRY = /cuba|iran\b|north korea|syria|crimea|donetsk|luhansk|zaporizhzhia|kherson|\bbelarus\b|\brussia\b/i;
+  const SAFE = /^(none of the above|not applicable|none of these apply|no)\b/i;
+
+  const boxes = [...document.querySelectorAll('input[type=checkbox], input[type=radio]')];
+  const risky = boxes.filter(b => COUNTRY.test(labelOf(b)));
+  if (!risky.length) return null;
+
+  // The group is whatever container holds the risky options.
+  let scope = risky[0].parentElement;
+  for (let i = 0; i < 6 && scope; i++) {
+    if (risky.every(r => scope.contains(r))) break;
+    scope = scope.parentElement;
+  }
+  scope = scope || document.body;
+  const inGroup = boxes.filter(b => scope.contains(b));
+  const safe = inGroup.find(b => SAFE.test(labelOf(b)));
+  const mark = (el, token) => { el.setAttribute('data-ai-sanctions', token); return token; };
+  return {
+    checkedRisky: risky.filter(b => b.checked).map((b, i) => mark(b, 'risky' + i)),
+    safe: safe ? (safe.checked ? 'ALREADY' : mark(safe, 'safe')) : '',
+    safeLabel: safe ? labelOf(safe) : '',
+    options: inGroup.map(b => labelOf(b)).slice(0, 8),
+  };
+}
+"""
+
+
+async def _ensure_sanctions_safe(page, pk: str = "", url: str = "") -> str:  # noqa: ANN001
+    """Guarantee any sanctions question is answered, and answered negatively.
+
+    Vetoing a wrong answer is not enough: when the reader does not recognise the
+    group (its markup varies by employer), nothing ever selects the safe option
+    and a REQUIRED question is submitted blank. This sweeps the page for the
+    group by its option text, unticks any country option, and ticks "None of the
+    above". Runs regardless of what the model proposed. Returns a short note.
+    """
+    try:
+        found = await page.evaluate(_SANCTIONS_SWEEP_JS)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not found:
+        return ""
+    try:
+        for token in found.get("checkedRisky") or []:
+            await page.locator(f'[data-ai-sanctions="{token}"]').first.click(timeout=2500)
+            log.warning("sanctions: uncheck a country option that was ticked")
+        note = ""
+        if found.get("safe") == "ALREADY":
+            note = f"already {found.get('safeLabel', '')[:40]}"
+        elif found.get("safe"):
+            await page.locator('[data-ai-sanctions="safe"]').first.click(timeout=2500)
+            note = f"ticked {found.get('safeLabel', '')[:40]}"
+        else:
+            note = f"NO safe option found among {found.get('options')}"
+            log.warning("sanctions group present but no 'None of the above': %s",
+                        found.get("options"))
+        log.info("sanctions sweep: %s", note)
+        if pk:
+            _emit(pk, "response", agent="browser", url=url,
+                  detail=f"🛡 sanctions question — {note}")
+        return note
+    finally:
+        try:
+            await page.evaluate(
+                "() => document.querySelectorAll('[data-ai-sanctions]')"
+                ".forEach(e => e.removeAttribute('data-ai-sanctions'))")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict:  # noqa: ANN001

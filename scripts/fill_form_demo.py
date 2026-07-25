@@ -27,6 +27,9 @@ from playwright.async_api import async_playwright  # noqa: E402
 from core.stores import make_stores  # noqa: E402
 from tools.browser_apply import (  # noqa: E402
     _READ_FORM_JS,
+    _applied_signal,
+    _clean_resume_copy,
+    _ensure_sanctions_safe,
     _fill_human,
     _fix_fields,
     _form_frame,
@@ -67,12 +70,17 @@ def _match(label: str, facts: dict) -> str:
 
 
 async def main() -> int:
-    url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    url = args[0] if args else DEFAULT_URL
     stores = make_stores()
     facts = stores.answer_bank.all_facts("Databricks")
 
     resume = Path(".local/artifacts/resumes/databricks#6544403002.pdf")
-    resume_path = str(resume.resolve()) if resume.exists() else ""
+    # Give the recruiter a sensibly named file, exactly as the pipeline does —
+    # "databricks#6544403002.pdf" is not what should land in an inbox.
+    resume_path = (_clean_resume_copy(str(resume.resolve()),
+                                      str(facts.get("Full name") or ""))
+                   if resume.exists() else "")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -178,10 +186,99 @@ async def main() -> int:
             for k, v in list(live.items())[:14]:
                 print(f"   {k[:44]:46s} = {v[:40]}")
 
+            # Sanctions sweep — unconditional, same as the pipeline.
+            note = await _ensure_sanctions_safe(frame)
+            if note:
+                print(f"   sanctions: {note}")
+
             OUT.parent.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(OUT), full_page=True)
             print(f"\nscreenshot: {OUT}")
-            print("NOT submitted — no submit control was clicked.")
+
+            if "--submit" not in sys.argv:
+                print("NOT submitted — no submit control was clicked. "
+                      "(pass --submit to send it for real)")
+                return 0
+
+            # PRE-FLIGHT. Never send a half-filled application: a submitted
+            # application cannot be withdrawn and is the owner's one shot at
+            # this posting. Any empty REQUIRED control aborts the submit.
+            # A React combobox renders its selection but leaves the underlying
+            # input's .value empty, so .value alone reports a complete form as
+            # empty. Treat a control as answered when it has a value OR its
+            # wrapper shows a real selection (a clear "x" appears, or the
+            # rendered text is no longer the "Select..." placeholder).
+            empty = await frame.evaluate("""
+            () => {
+              const ntrim = s => (s || '').replace(/\\s+/g, ' ').trim();
+              const answered = el => {
+                if (el.value) return true;
+                let w = el.parentElement;
+                for (let i = 0; i < 4 && w; i++, w = w.parentElement) {
+                  if (w.querySelector('[class*="clear" i], [aria-label*="clear" i],'
+                                      + ' [class*="remove" i], [title*="clear" i]')) return true;
+                  const lbl = ntrim((w.querySelector('label') || {}).textContent || '');
+                  const txt = ntrim(w.textContent || '').replace(lbl, '');
+                  if (txt && !/^(select\\.{0,3}|choose\\.{0,3}|start typing\\.{0,3})$/i.test(txt)
+                      && txt.length < 90) return true;
+                }
+                return false;
+              };
+              return [...document.querySelectorAll(
+                       'input:not([type=hidden]):not([type=submit]):not([type=button]),'
+                       + ' textarea, select')]
+                .filter(el => (el.required || el.getAttribute('aria-required') === 'true')
+                        && el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'file')
+                .filter(el => !answered(el))
+                .map(el => ((el.labels && el.labels[0] && el.labels[0].textContent)
+                            || el.name || el.id || '?').trim().slice(0, 46));
+            }
+            """)
+            if empty:
+                print(f"\nABORTED — required fields still empty: {empty}")
+                print("Nothing was submitted.")
+                return 1
+
+            print("\nsubmitting for real…")
+            url_before = page.url
+            clicked = ""
+            for sel in ('button:has-text("Submit application")',
+                        'button:has-text("Submit")', 'input[type=submit]'):
+                try:
+                    await frame.locator(sel).first.click(timeout=5000)
+                    clicked = sel
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"   click {sel} failed: {type(exc).__name__}")
+                    continue
+            print(f"   clicked: {clicked or 'NOTHING'}")
+            await page.wait_for_timeout(6000)
+            # Whatever the form is complaining about — the reason a submit does
+            # not take is almost always a validation message we never read.
+            errs = await frame.evaluate("""
+            () => [...document.querySelectorAll(
+                     '[role=alert], [class*="error" i], [aria-invalid="true"]')]
+                  .map(e => (e.textContent || e.getAttribute('aria-label') || '')
+                             .replace(/\\s+/g,' ').trim())
+                  .filter(t => t && t.length < 140).slice(0, 8)
+            """)
+            if errs:
+                print("   form is reporting:")
+                for e in errs:
+                    print(f"     • {e}")
+
+            signal = await _applied_signal(page, url_before, allow_vision=False)
+            await page.screenshot(path=str(OUT.with_name("after_submit.png")), full_page=True)
+            print(f"   confirmation: {signal!r}")
+            print(f"   screenshot:   {OUT.with_name('after_submit.png')}")
+            if signal:
+                from core.models import Status
+                stores.tracking.set_status("databricks#6544403002", Status.APPLIED,
+                                           confirmation_id=str(signal)[:200],
+                                           gate_pending=None, gate_reason="")
+                print("   board updated -> applied")
+            else:
+                print("   NO confirmation detected — left as-is for review.")
         finally:
             await browser.close()
     return 0
