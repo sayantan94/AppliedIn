@@ -34,6 +34,7 @@ from .browser_apply import (
     _click_fields_pass,
     _emit,
     _ensure_sanctions_safe,
+    _fact_for,
     _fill_human,
     _finalize_submit,
     _fix_fields,
@@ -146,6 +147,11 @@ and say what they actually did rather than describing the role in general terms.
 Write plain sentences: no dashes as connectors, no em dashes, no bulleted
 fragments. If you cannot ground an answer in the facts, do not write it.
 
+Each field read_form returns may carry an `owner_answer`: the owner's own approved
+answer for that field, already matched for you. Use it as given. It is an answer
+they have explicitly provided, including for acknowledgements, so do not ask them
+again for something already there.
+
 Use the labels exactly as read_form gives them. Fill everything you can in as few
 calls as possible — batch every value into one fill_fields and one select_choices
 rather than going field by field — verify once with read_form, then call
@@ -178,11 +184,26 @@ def _guard(values: dict, kind: str) -> tuple[dict, list[str]]:
     return ok, refused
 
 
-async def _read(frame) -> list:  # noqa: ANN001
+async def _read(frame, facts: dict | None = None) -> list:  # noqa: ANN001
+    """The form as we see it, with the owner's own answer attached to each field.
+
+    Making the model search a hundred approved facts for the one that matches
+    "Do you acknowledge that you have opened, read, and understood the Arbitration
+    Agreement…" is work it does badly and we do deterministically. It kept asking
+    the owner a question they had already answered simply because the wording did
+    not match what they typed. The bank's answer now arrives with the field.
+    """
     try:
-        return await frame.evaluate(_READ_FORM_JS)
+        fields = await frame.evaluate(_READ_FORM_JS)
     except Exception:  # noqa: BLE001
         return []
+    if not facts:
+        return fields
+    for f in fields:
+        hit = _fact_for(f.get("label", ""), facts)
+        if hit:
+            f["owner_answer"] = hit[1]
+    return fields
 
 
 async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str = "",
@@ -208,12 +229,42 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                 return {"status": "unknown",
                         "detail": f"The posting did not load ({page.url})."}
 
-            fields = await _read(frame)
+            fields = await _read(frame, facts)
             if len(fields) < 2:
                 return {"status": "unknown",
                         "detail": "No application form found on the page."}
             _emit(pk, "response", agent="browser", url=url,
                   detail=f"🔁 loop engine: {len(fields)} field(s)")
+
+            # Anything the owner has already answered is applied before the model
+            # is consulted at all. Asking a model whether to tick an arbitration
+            # acknowledgement is asking it to weigh a legal waiver, which it will
+            # decline — correctly — every time, and the owner gets stopped on a
+            # question they answered days ago. Their explicit answer is not a
+            # judgement call, so it does not go to a judge.
+            pre_text, pre_choice = {}, {}
+            for f in fields:
+                ans = f.get("owner_answer")
+                lbl = f.get("label") or ""
+                if not ans or f.get("value") or not f.get("required"):
+                    continue
+                if _is_self_id_affirmation(lbl, ans) or _is_placeholder(ans):
+                    continue
+                if f.get("type") in ("checkbox", "radio", "choice-group"):
+                    pre_choice[lbl] = ans
+                elif f.get("combo"):
+                    continue          # geocoders need the pick pass; leave to the model
+                elif f.get("type") not in ("file",):
+                    pre_text[lbl] = ans
+            if pre_text:
+                await _fill_human(page, pre_text)
+            if pre_choice:
+                await _set_choices(page, pre_choice, pk, url)
+            if pre_text or pre_choice:
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"✓ answered {len(pre_text) + len(pre_choice)} field(s) "
+                             f"from your saved answers before asking the model")
+                fields = await _read(frame, facts)
 
             messages = [
                 {"role": "system", "content": SYSTEM + _site_rules(url, company)},
@@ -236,7 +287,7 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                     return {"status": "unknown",
                             "detail": f"The loop stopped at step {step + 1} without "
                                       f"submitting." + (f" It said: {said[:160]}" if said else ""),
-                            "fields": _ui_fields(await _read(frame))}
+                            "fields": _ui_fields(await _read(frame, facts))}
 
                 for call in calls:
                     name = call.function.name
@@ -247,7 +298,7 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                     result: object = ""
 
                     if name == "read_form":
-                        result = await _read(frame)
+                        result = await _read(frame, facts)
 
                     elif name == "fill_fields":
                         vals, refused = _guard(args.get("values") or {}, "text")
@@ -257,7 +308,7 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                         # step budget is gone — which is exactly how a location
                         # field ate a whole run. Send those through the real
                         # click, type and pick pass instead.
-                        snapshot = await _read(frame)
+                        snapshot = await _read(frame, facts)
                         combos = {f.get("label") for f in snapshot
                                   if f.get("combo") or "location" in
                                   str(f.get("label") or "").lower()}
@@ -309,7 +360,7 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
                                 "question": str(args.get("question") or
                                                 "This form needs an answer only you can give."),
                                 "screenshot_b64": shot, "drafted": drafted or None,
-                                "fields": _ui_fields(await _read(frame))}
+                                "fields": _ui_fields(await _read(frame, facts))}
 
                     elif name == "ready_to_submit":
                         # Unconditional, exactly as the scripted engine does it: a
@@ -331,7 +382,7 @@ async def apply_loop(url: str, company: str, facts: dict, model: str, *, pk: str
             # obviously right — discarding a finished application because the
             # model spent its budget verifying would waste the whole run and
             # leave the owner to redo it by hand.
-            state = await _read(frame)
+            state = await _read(frame, facts)
             empty = [f for f in state if f.get("required") and not f.get("value")
                      and f.get("type") not in ("file",)]
             if state and not empty:
