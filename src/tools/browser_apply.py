@@ -2248,6 +2248,61 @@ async def _click_fields_pass(page, pk: str, url: str) -> int:  # noqa: ANN001
         return 0
 
 
+async def _restore_wiped_form(page, state: list, facts: dict, pk: str, url: str) -> int:  # noqa: ANN001
+    """Refill every required field the portal just blanked. Returns how many.
+
+    Several portals answer a rejected submit by RELOADING the form — classic
+    Lever on a validation error, Ashby on a spam flag — which wipes fields that
+    were perfectly good. Resubmitting without restoring them sends an empty
+    application, and an empty resubmit looks far more like a bot than the
+    submission that got flagged in the first place.
+    """
+    import asyncio as _aio
+
+    empty = [f for f in state if f.get("required") and not f.get("value")
+             and f.get("type") not in ("file",)]
+    text_fix, choice_fix, combo_fix = {}, {}, {}
+    for f in empty:
+        hit = _fact_for(f.get("label", ""), facts)
+        if not hit:
+            continue
+        _, v = hit
+        if f.get("type") == "choice-group":
+            choice_fix[f["label"]] = v
+        elif f.get("combo"):
+            combo_fix[f["label"]] = v
+        else:
+            text_fix[f["label"]] = v
+    total = len(text_fix) + len(choice_fix) + len(combo_fix)
+    if total < 2:
+        return 0
+    _emit(pk, "response", agent="browser", url=url,
+          detail=f"🔄 the submit reset the form — restoring {total} field(s)")
+
+    async def _restore() -> None:
+        if text_fix:
+            await _fill_human(page, text_fix)
+            await page.wait_for_timeout(700)
+        if choice_fix:
+            await _set_choices(page, choice_fix, pk, url)
+        if combo_fix:
+            await _fix_fields(page, combo_fix, pk, url)
+        await _ensure_sanctions_safe(page, pk, url)
+        await _click_fields_pass(page, pk, url)
+
+    try:
+        # HARD ceiling: evaluate() on a page mid-navigation can block forever and
+        # wedge the whole apply lane — a timed-out restore just resubmits.
+        await _aio.wait_for(_restore(), timeout=150)
+    except TimeoutError:
+        log.warning("restore after form reset timed out — resubmitting anyway")
+    except Exception as exc:  # noqa: BLE001
+        if _page_gone(exc):
+            raise
+        log.warning("restore after form reset failed (%s) — resubmitting", exc)
+    return total
+
+
 async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str,  # noqa: ANN001
                            headed: bool, model: str = "") -> dict:
     """Deterministic finish on an already-FILLED page (browser-use did the filling,
@@ -2285,8 +2340,16 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                     "drafted": drafted or None, "fields": _ui_fields(state)}
         if _re.search(_SPAM_RX, body, _re.I):
             if attempt < 2:
+                # The flag RESETS the form ("please submit your application
+                # again"), so a straight retry submits an EMPTY one — which reads
+                # as far more of a bot than the attempt that got flagged. Restore
+                # the answers, then wait: submitting again within milliseconds is
+                # itself the signal these heuristics look for.
                 _emit(pk, "response", agent="browser", url=url,
-                      detail="⚠️ portal flagged the submit as possible spam — resubmitting")
+                      detail="⚠️ flagged as possible spam — restoring the form and "
+                             "waiting before resubmitting")
+                await _restore_wiped_form(page, state, facts, pk, url)
+                await page.wait_for_timeout(20000 * (attempt + 1))
                 continue
             return {"status": "failed", "reason": "spam_flagged",
                     "detail": "The portal flagged the submission as possible spam twice. "
@@ -2305,49 +2368,10 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
         # map for ALL empty required fields from the facts and restore text,
         # choices AND combos, then loop to resubmit; without this the terminal
         # gate blames fields we actually had answers for.
-        if attempt < 2:
-            empty_now = [f for f in state if f.get("required") and not f.get("value")
-                         and f.get("type") not in ("file",)]
-            text_fix, choice_fix2, combo_fix = {}, {}, {}
-            for f in empty_now:
-                hit = _fact_for(f.get("label", ""), facts)
-                if not hit:
-                    continue
-                _, v = hit
-                if f.get("type") == "choice-group":
-                    choice_fix2[f["label"]] = v
-                elif f.get("combo"):
-                    combo_fix[f["label"]] = v
-                else:
-                    text_fix[f["label"]] = v
-            if len(text_fix) + len(choice_fix2) + len(combo_fix) >= 2:
-                import asyncio as _aio
-
-                _emit(pk, "response", agent="browser", url=url,
-                      detail=f"🔄 submit reset the form — restoring "
-                             f"{len(text_fix) + len(choice_fix2) + len(combo_fix)} field(s)")
-
-                # HARD ceiling: evaluate() on a page that is mid-navigation
-                # (Lever reloads on submit) can block forever and wedge the
-                # whole apply lane — a timed-out restore just resubmits.
-                async def _restore() -> None:
-                    if text_fix:
-                        await _fill_human(page, text_fix)
-                        await page.wait_for_timeout(700)
-                    if choice_fix2:
-                        await _set_choices(page, choice_fix2, pk, url)
-                    if combo_fix:
-                        await _fix_fields(page, combo_fix, pk, url)
-                    await _click_fields_pass(page, pk, url)
-                try:
-                    await _aio.wait_for(_restore(), timeout=150)
-                except TimeoutError:
-                    log.warning("restore after form reset timed out — resubmitting anyway")
-                except Exception as exc:
-                    if _page_gone(exc):
-                        raise
-                    log.warning("restore after form reset failed (%s) — resubmitting", exc)
-                continue
+        # A rejected submit can reload the form and wipe good answers; restore
+        # them and try again before blaming the fields.
+        if attempt < 2 and await _restore_wiped_form(page, state, facts, pk, url):
+            continue
         errors = await page.evaluate(_ERRORS_JS)
         if not errors or attempt >= 2:
             break
