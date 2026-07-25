@@ -369,6 +369,29 @@ def _site_rules(url: str, company: str) -> str:
 
 # --- scripted apply: code drives, the model only maps + writes -----------------
 
+# A browser ERROR page — DNS failure, timeout, connection refused, blank tab.
+# This matters because the structural "the form is gone" test cannot tell a
+# confirmation screen from a page that never loaded: an error page has no submit
+# control, no text inputs and a short body, so a DNS failure was being recorded
+# as a submitted application. Positive proof of failure must veto that inference.
+_ERROR_PAGE_RX = re.compile(
+    r"DNS_PROBE|ERR_[A-Z_]+|NXDOMAIN"
+    r"|this site can[’']?t be reached|can[’']?t reach this page"
+    r"|took too long to respond|refused to connect|no internet"
+    r"|server (?:ip address )?could not be found"
+    r"|site cannot be reached|502 bad gateway|503 service unavailable"
+    r"|504 gateway timeout|page (?:not found|isn[’']?t working)|http error 4\d\d",
+    re.I)
+
+
+def _is_error_page(url: str, body: str) -> bool:
+    """True when the browser is showing a failure, not a page from the site."""
+    u = (url or "").lower()
+    if u.startswith(("chrome-error://", "about:blank", "chrome://network-error")):
+        return True
+    return bool(_ERROR_PAGE_RX.search(body or ""))
+
+
 _SUCCESS_RX = (
     r"thank you for applying|thanks for applying|thank you for your (application|interest)"
     r"|application[\w\s,'\-]{0,60}?(submitted|received|complete|sent|on its way|in review)"
@@ -1130,7 +1153,8 @@ async def _applied_signal(page, url_before: str, body: str | None = None,  # noq
             'button:has-text("Submit"), button:has-text("Apply"), input[type=submit]').count()
         n_inputs = await page.locator(
             'input[type=text], input[type=email], input[type=tel], textarea').count()
-        if not has_submit and n_inputs == 0 and body and len(body) < 1800:
+        if (not has_submit and n_inputs == 0 and body and len(body) < 1800
+                and not _is_error_page(page.url, body)):
             return "Application submitted (form replaced by a confirmation page)."
     except Exception:
         pass

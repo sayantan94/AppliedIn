@@ -81,3 +81,24 @@ def test_a_broken_skill_file_never_breaks_an_apply(skills):
 def test_readme_is_not_treated_as_a_skill(skills):
     (skills / "README.md").write_text("How to add a skill: match_hosts: [acme.com]")
     assert company_skills.instructions_for("https://acme.com/job", "Acme") == ""
+
+
+# --- applied-signal safety --------------------------------------------------
+
+def test_browser_error_pages_are_never_read_as_a_confirmation():
+    """The structural 'the form is gone' test cannot tell a confirmation screen
+    from a page that never loaded — an error page also has no submit control, no
+    inputs and a short body. A DNS failure was recorded as a submitted
+    application, so positive proof of failure must veto that inference.
+    """
+    from tools.browser_apply import _is_error_page
+
+    assert _is_error_page("chrome-error://chromewebdata/", "DNS_PROBE_FINISHED_NXDOMAIN")
+    assert _is_error_page("https://x.example/j", "This site can't be reached")
+    assert _is_error_page("https://x.example/j", "ERR_CONNECTION_REFUSED")
+    assert _is_error_page("about:blank", "")
+    # A real confirmation must still pass through.
+    assert not _is_error_page("https://x.example/j",
+                              "Thank you for applying! We have received your application.")
+    assert not _is_error_page("https://x.example/j",
+                              "Application Success\nYour application has been submitted")
