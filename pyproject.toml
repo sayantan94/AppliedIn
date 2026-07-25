@@ -22,8 +22,6 @@ dependencies = [
 # Heavy runtime-only deps (installed in the worker container / when applying).
 # Imported lazily so the rest runs without them.
 runtime = [
-    "google-api-python-client>=2",
-    "google-auth>=2",
 ]
 
 [project.scripts]

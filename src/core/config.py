@@ -7,14 +7,21 @@ in tests (moto) and prod unchanged.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env into the environment so both APPLIEDIN_* settings and the raw
-# ANTHROPIC_API_KEY (read by LiteLLM) are available from one file.
+# provider keys (read by LiteLLM) are available from one file.
 load_dotenv()
+
+# This product runs on the owner's machine and says so. browser-use ships
+# anonymised telemetry ON by default, which quietly contradicts that, so it is
+# turned off here — before browser_use is imported anywhere, since it reads this
+# at import time. Set ANONYMIZED_TELEMETRY=true in .env to opt back in.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 
 # Let LiteLLM silently drop sampling params a model rejects instead of 400ing.
 # Reasoning models (gpt-5*, o-series) only accept temperature=1 and reject

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AppliedIn — one-time setup. Installs EVERYTHING needed to run locally:
-# uv, the Python env (with the browser/gmail runtime extra), the Playwright
+# uv, the Python env (with the browser runtime extra), the Playwright
 # browser, Redis, Tectonic, Node, and the Playwright MCP server. Idempotent —
 # safe to re-run; skips what's already there.
 set -euo pipefail
@@ -15,7 +15,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
-# --- Python env + deps (incl. runtime extra: playwright, gmail) ---------------
+# --- Python env + deps (incl. runtime extra: playwright) ----------------------
 say "installing Python 3.12 + dependencies…"
 uv python install 3.12
 uv sync --extra runtime

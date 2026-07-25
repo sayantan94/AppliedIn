@@ -1,8 +1,9 @@
 """Secrets Manager helper.
 
-Holds portal credentials (including auto-signup passwords, written BEFORE a
-signup form is submitted so a crash can never orphan an account), the WhatsApp
-token + app secret, and the Gmail OAuth refresh token.
+Holds the logins you saved for employer portals — the sessions `appliedin login`
+captures, so an apply behind a sign-in wall can reuse one instead of asking you
+again. Nothing here is ever created by the pipeline: it only reads credentials
+you chose to store.
 """
 
 from __future__ import annotations

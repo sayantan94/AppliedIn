@@ -329,14 +329,10 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
         "and finish your response with exactly:"
         "  MISSING: <the field's QUESTION or LABEL text — never its placeholder like "
         "'Start typing…'>\n"
-        "- If a sign-in wall says it EMAILED a verification code to the candidate, "
-        "call fetch_email_code and type the code it returns (NO_CODE → wait ~20s, "
-        "retry once). Only a code sent by SMS / an authenticator app / a trusted "
-        "device is a hard blocker.\n"
-        "- If the portal requires creating an account, shows a CAPTCHA challenge "
-        "you would have to solve, or wants a verification code you cannot fetch "
-        "(SMS / authenticator / trusted device), STOP and finish with:  "
-        "BLOCKED: <reason>\n"
+        "- If the portal requires creating an account, shows a CAPTCHA challenge, "
+        "or wants a verification code, STOP and finish with:  BLOCKED: <reason>. "
+        "Never create an account and never solve a challenge — those are the "
+        "owner's to do.\n"
         "- BEFORE submitting, call verify_form_filled — dynamic forms silently wipe "
         "fields when they re-render, so never trust that a field you typed earlier "
         "still holds its value. If it reports an empty REQUIRED field, re-fill that "
@@ -2634,33 +2630,6 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
         _emit(pk, "response", agent="writer", url=url,
               detail=f"drafted answer → {question[:70]}")
         return ActionResult(extracted_content=answer, include_in_memory=True)
-
-    @controller.registry.action(
-        "Fetch a login/verification code the portal JUST EMAILED to the candidate. "
-        "Call this when a sign-in wall says it emailed a code (check the wall's own "
-        "words). Returns the digits to type, or NO_CODE when nothing has arrived — "
-        "then wait ~20 seconds and call it ONCE more. Codes sent by SMS, an "
-        "authenticator app, or to a trusted device ('sent to your Apple devices') "
-        "can NEVER be fetched — report those as BLOCKED instead.")
-    async def fetch_email_code() -> ActionResult:
-        import asyncio
-
-        from core.stores import make_stores
-        from tools.gmail import fetch_code
-
-        try:
-            code = await asyncio.to_thread(
-                fetch_code,
-                'newer_than:1h (verification OR verify OR code OR passcode OR "one-time")',
-                make_stores().secrets)
-        except Exception as exc:
-            log.warning("fetch_email_code failed: %s", exc)
-            code = None
-        _emit(pk, "response", agent="browser", url=url,
-              detail=("📧 fetched an emailed verification code" if code
-                      else "📧 no fresh verification code in the inbox"))
-        return ActionResult(extracted_content=code or "NO_CODE",
-                            include_in_memory=True)
 
     @controller.registry.action(
         "Fill MANY form fields in ONE shot. Pass fields_json: a JSON object ENCODED "
