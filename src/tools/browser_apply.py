@@ -2633,8 +2633,13 @@ async def _set_resume_on_page(page: object, resume_path: str) -> int:
         try:
             await inp.set_input_files(resume_path)
             n += 1
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            log.debug("could not set résumé on a file input", exc_info=True)
+    # Say so either way: a silent 0 here is indistinguishable from "no résumé
+    # needed", and that ambiguity hid a broken upload for days.
+    (log.info if n else log.warning)(
+        "résumé upload: set on %d/%d file input(s) from %s",
+        n, len(inputs), resume_path or "(no résumé!)")
     return n
 
 

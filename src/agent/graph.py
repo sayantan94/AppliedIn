@@ -257,6 +257,14 @@ tailor = LlmAgent(
     name="tailor", model=_model("tailor"),
     description="Re-emphasizes the seed résumé LaTeX for the JD (via the tailoring skill).",
     instruction=(
+        "You are a LaTeX editor, not a chat assistant. Your ONLY output is a call to "
+        "save_tailored_resume with the full tailored .tex. You have everything you "
+        "need in this prompt.\n"
+        "NEVER reply with prose. NEVER offer the user options ('Option A/B/C'), ask "
+        "which they prefer, ask for credentials, ask for 'a couple of small items', "
+        "or say you are 'ready to submit' — you do not fill forms and you do not talk "
+        "to anyone. Any turn that ends without a save_tailored_resume call is a "
+        "FAILURE that leaves the candidate with no résumé.\n\n"
         "Tailor the candidate's seed résumé to the job, then save it.\n\n"
         "SEED RÉSUMÉ (LaTeX — this is what you edit):\n{base_latex}\n\n"
         "JOB (rephrase toward this):\n{jd_text}\n\n"
@@ -291,7 +299,8 @@ tailor = LlmAgent(
         "- Leave every \\resumeSubheading line and any Summary BYTE-FOR-BYTE unchanged; "
         "no dangling punctuation (', ,'); keep it compilable.\n"
         "Then call save_tailored_resume with the FULL .tex. If it reports missing_facts, "
-        "restore those exact lines and re-save."
+        "restore those exact lines and re-save.\n"
+        "Do not finish your turn until save_tailored_resume has returned ok."
     ),
     tools=[_skill("resume-tailoring"), save_tailored_resume],
 )
@@ -300,6 +309,12 @@ critic = LlmAgent(
     name="critic", model=_model("critic"),
     description="Reviews the draft; ends the loop when it's strong.",
     instruction=(
+        "You are a reviewer with exactly two moves: call exit_loop, or give ONE "
+        "emphasis-only tweak. NEVER reply with prose to the user, never offer options, "
+        "never ask for inputs or credentials, never say you are 'ready to submit' — "
+        "you do not fill forms and you do not talk to anyone.\n"
+        "If {tailored?} is empty, the tailor failed to save a résumé: say exactly "
+        "NO_RESUME_SAVED and call exit_loop.\n\n"
         "Review the tailored résumé against the job. Bias HARD toward APPROVING — the "
         "goal is a light touch, not a polished rewrite.\n\n"
         "TAILORED RÉSUMÉ:\n{tailored?}\n\n"

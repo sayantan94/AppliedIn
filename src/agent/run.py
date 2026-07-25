@@ -99,6 +99,35 @@ def _github_context() -> str:
         return ""
 
 
+# A job may reach run_job from TWO places at once: the daemon's evaluate worker
+# draining the tailor queue, and process_backlog_once sweeping `found` rows for a
+# scoped run. Both used to score + tailor the SAME job, doubling the LLM bill and
+# producing two contradictory outcomes. This lock makes run_job idempotent.
+_LOCK_TTL_SECONDS = 1800  # longer than any real score+tailor; frees a killed run
+
+
+def _claim(pk: str, stores: Any) -> bool:
+    """Claim exclusive ownership of this job. False = someone else has it."""
+    client = getattr(stores.tracking, "r", None)
+    if client is None:  # cloud mode / a tracking backend without Redis
+        return True
+    try:
+        return bool(client.set(f"lock:job:{pk}", "1", nx=True, ex=_LOCK_TTL_SECONDS))
+    except Exception:  # noqa: BLE001 — a lock outage must not stop the pipeline
+        log.debug("job lock unavailable for %s", pk, exc_info=True)
+        return True
+
+
+def _release(pk: str, stores: Any) -> None:
+    client = getattr(stores.tracking, "r", None)
+    if client is None:
+        return
+    try:
+        client.delete(f"lock:job:{pk}")
+    except Exception:  # noqa: BLE001
+        log.debug("could not release job lock for %s", pk, exc_info=True)
+
+
 def run_job(pk: str, stores: Any = None) -> dict:
     """Run the pipeline for one discovered job through the ADK agent graph."""
     stores = stores or make_stores()
@@ -106,16 +135,28 @@ def run_job(pk: str, stores: Any = None) -> dict:
     if row is None:
         return {"result": "missing", "pk": pk}
 
+    # Already past evaluation? Re-scoring a tailored/applied job wastes an LLM
+    # round trip and can overwrite a good result with a worse one.
+    status = row.get("status")
+    if status not in ("found", "tailoring", None, ""):
+        return {"result": "already_done", "pk": pk, "status": status}
+    if not _claim(pk, stores):
+        log.info("skipping %s — already being processed", pk)
+        return {"result": "already_running", "pk": pk}
+
     from core.events import emit
     # Mark it in-progress so the board shows it WORKING (yellow, in Tailored)
     # instead of sitting silently in Found. The graph resets it to
     # tailored/skipped/gated when it finishes; an orphan (killed mid-run) is
     # recovered back to found on restart.
-    if row.get("status") == "found":
+    if status == "found":
         stores.tracking.set_status(pk, Status.TAILORING)
     emit("running", pk=pk, detail=f"{row.get('title','')} @ {row.get('company','')}",
          url=row.get("jd_url"))
-    return _run(_run_job_async(pk, row, stores))
+    try:
+        return _run(_run_job_async(pk, row, stores))
+    finally:
+        _release(pk, stores)
 
 
 async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
@@ -543,6 +584,22 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
             for call in event.get_function_calls() or []:  # tool call = step INPUT
                 if call.name == "ask_human":
                     question = (call.args or {}).get("question", "")
+                    # NEVER offer "the tailored résumé is saved" unless one actually
+                    # is. The tailor sometimes drifts into chat and finishes without
+                    # calling save_tailored_resume; approving that gate would open a
+                    # browser and submit an application with NO résumé attached.
+                    if question.startswith("Ready to apply") and not (
+                            stores.tracking.get(pk) or {}).get("resume_s3_key"):
+                        stores.tracking.set_status(
+                            pk, Status.FAILED, fail_kind="no_resume",
+                            fail_reason="Tailoring finished without saving a résumé — "
+                                        "nothing to upload, so the apply was not offered. "
+                                        "Retry to tailor it again.")
+                        emit("failed", pk=pk, agent=author,
+                             detail="no résumé was saved — apply gate suppressed",
+                             url=(stores.tracking.get(pk) or {}).get("jd_url"))
+                        log.warning("suppressed apply gate for %s: no resume saved", pk)
+                        return {"result": "failed", "pk": pk, "reason": "no_resume"}
                     if question.startswith("Ready to apply"):
                         verdict = _auto_decision(pk, stores)
                         if verdict == "go":
