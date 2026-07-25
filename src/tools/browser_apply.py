@@ -1297,6 +1297,34 @@ def _with_fields(page, res: dict) -> dict:  # noqa: ANN001 - small shaping helpe
     return res
 
 
+# EEO / self-identification options. These declare something about the owner that
+# only they can declare — a disability, veteran status, an ethnicity. They are
+# also VOLUNTARY, so the safe answer is always the negative or the decline, never
+# the affirmative. An option is not evidence of an answer: "Yes, I have a
+# disability, or have had one in the past" is a sentence the form offers, not
+# something the pipeline may tick on the owner's behalf.
+_SELF_ID_RX = re.compile(
+    r"disabilit|protected veteran|veteran status|hispanic|latino"
+    r"|race|ethnicit|gender identity|transgender|sexual orientation", re.I)
+_SELF_ID_AFFIRM_RX = re.compile(
+    r"^\s*yes\b|^\s*i (identify|have|am)\b|i identify as one or more", re.I)
+
+
+# "I am NOT a protected veteran" and "No, I do not have a disability" are the
+# NEGATIVE answers to the same questions, and refusing those would leave a
+# required EEO field blank instead of correctly declined.
+_SELF_ID_NEGATION_RX = re.compile(r"\bnot?\b|\bdon'?t\b|\bdo not\b|\bnone\b|decline|wish to answer", re.I)
+
+
+def _is_self_id_affirmation(label: str, value: object = "") -> bool:
+    """True when ticking this would DECLARE a protected characteristic."""
+    text = f"{label} {value}".strip()
+    head = str(label).strip()
+    if _SELF_ID_NEGATION_RX.search(head):
+        return False
+    return bool(_SELF_ID_RX.search(text) and _SELF_ID_AFFIRM_RX.search(head))
+
+
 def _consent_default(label: str, options: list | None) -> str | None:
     """Standard job-application CONSENTS — 'I certify the info is true', 'I
     understand the privacy policy', 'I authorize consideration for other roles',
@@ -1963,6 +1991,14 @@ async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
     if blocked:
         log.warning("refusing to type placeholder values: %s", ", ".join(blocked))
         mapping = {k: v for k, v in mapping.items() if k not in blocked}
+    # Never DECLARE a protected characteristic. These questions are voluntary and
+    # the answer is the owner's alone, so an affirmative self-identification is
+    # dropped rather than guessed at.
+    selfid = [k for k, v in mapping.items() if _is_self_id_affirmation(k, v)]
+    if selfid:
+        log.warning("refusing to self-declare on the owner's behalf: %s",
+                    "; ".join(x[:60] for x in selfid))
+        mapping = {k: v for k, v in mapping.items() if k not in selfid}
     if not mapping:
         return [f"PLACEHOLDER (not typed): {k}" for k in blocked]
 
@@ -2521,6 +2557,10 @@ async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict
     for q, vals in choices.items():
         vals = vals if isinstance(vals, list) else [vals]
         vals = _safe_sanctions_answer(q, vals)
+        if any(_is_self_id_affirmation(q, v) or _is_self_id_affirmation(str(v)) for v in vals):
+            log.warning("refusing to self-declare: %s", str(q)[:70])
+            out[q] = "refused: self-identification is the owner's to answer"
+            continue
         statuses = []
         for v in vals:
             try:

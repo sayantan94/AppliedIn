@@ -162,3 +162,26 @@ def test_first_and_last_name_come_out_of_one_full_name():
     assert _split_name("Last Name*", "Alex Rivera") == "Rivera"
     assert _split_name("Preferred First Name*", "Alex Rivera") == "Alex"
     assert _split_name("Full name", "Alex Rivera") == "Alex Rivera"
+
+
+# --- self-identification ----------------------------------------------------
+
+def test_never_declares_a_protected_characteristic():
+    """"Yes, I have a disability" was being ticked on the owner's behalf.
+
+    These questions are voluntary and only the owner can answer them, so an
+    affirmative self-identification is refused. The NEGATIVE answers to the same
+    questions must still go through, or a required EEO field is left blank
+    instead of correctly declined.
+    """
+    from tools.browser_apply import _is_self_id_affirmation as declares
+
+    assert declares("Yes, I have a disability, or have had one in the past")
+    assert declares("I identify as one or more of the classifications of protected veteran")
+
+    assert not declares("No, I do not have a disability")
+    assert not declares("I am not a protected veteran")
+    assert not declares("I do not wish to answer")
+    # ordinary questions are untouched
+    assert not declares("Are you authorized to work in the country?", "Yes")
+    assert not declares("Are you able to work from our US office three days per week?", "Yes")
