@@ -85,6 +85,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "resume_url": link("resume_s3_key"),
         "has_diff": bool(row.get("resume_tex_key")),
         "jd_url": row.get("jd_url"),
+        "location": row.get("location", ""),
         "screenshot_url": link("screenshot_s3_key"),
         "confirmation_id": row.get("confirmation_id"),
         "discovered_at": row.get("discovered_at") or (events[0]["at"] if events else None),
@@ -756,13 +757,18 @@ def _recover_stuck(settings) -> None:  # noqa: ANN001
         stores = make_stores(settings)
         rows = [r for r in stores.tracking.all()
                 if not str(r.get("pk", "")).startswith("meta#")]
+        from agent.run import release_claim
+
         stuck = [r for r in rows if r.get("status") == "submitting"]
         for r in stuck:
             stores.tracking.set_status(r["pk"], Status.TAILORED)
+            release_claim(r["pk"], stores)
         # A killed score/tailor leaves the row in 'tailoring' — reset to found.
+        # Free its claim too, or every retry is refused until the TTL expires.
         mid = [r for r in rows if r.get("status") == "tailoring"]
         for r in mid:
             stores.tracking.set_status(r["pk"], Status.FOUND)
+            release_claim(r["pk"], stores)
         if stuck or mid:
             logging.getLogger("server").info(
                 "recovered %d 'submitting' -> tailored, %d 'tailoring' -> found",

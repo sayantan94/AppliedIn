@@ -294,6 +294,7 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
     """On startup, any SUBMITTING job is an ORPHAN — its browser apply was killed
     by the last restart, so it never finished. Reset it to TAILORED and re-queue it
     so the apply worker retries it. Nothing stays stuck in 'applying' forever."""
+    from agent.run import release_claim
     from core.models import Status
 
     n = t = 0
@@ -305,9 +306,11 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
         if st == "submitting":
             stores.tracking.set_status(pk, Status.TAILORED)
             stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+            release_claim(pk, stores)
             n += 1
         elif st == "tailoring":  # score/tailor was killed mid-run → back to found
             stores.tracking.set_status(pk, Status.FOUND)
+            release_claim(pk, stores)  # else every retry is refused until the TTL
             t += 1
     if n:
         log.info("recovered %d orphaned 'submitting' job(s) → re-queued to apply", n)

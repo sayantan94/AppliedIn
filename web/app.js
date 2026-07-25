@@ -398,6 +398,19 @@ const LANES = [
     hint: "The automation couldn't finish — reason & screenshot inside" },
 ];
 
+// A job's location, marked when it matches the FIRST tier of the location
+// preference (Washington) so the ranking is visible at a glance rather than
+// something you have to open each card to check.
+const TOP_LOCATIONS = ["seattle", "bellevue", "washington", "redmond", "kirkland"];
+function locHtml(loc) {
+  if (!loc) return "";
+  const l = String(loc).toLowerCase();
+  const top = TOP_LOCATIONS.some((t) => l.includes(t));
+  const remote = /\bremote\b/.test(l);
+  const cls = top ? "kc-loc top" : remote ? "kc-loc remote" : "kc-loc";
+  return `<div class="${cls}" title="${esc(loc)}">${top ? "★ " : ""}${esc(String(loc).slice(0, 44))}</div>`;
+}
+
 function laneCard(r) {
   let retry = "";
   if (r.status === "failed" && r.fail_kind === "spam_flagged") {
@@ -420,6 +433,7 @@ function laneCard(r) {
       title="Open details">
     <div class="kc-co">${esc(r.company)}</div>
     <div class="kc-role">${esc(r.title)}</div>
+    ${locHtml(r.location)}
     ${live}
     <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${retry}</div>
   </div>`;
@@ -1166,10 +1180,11 @@ function openDrawer(pk) {
   `;
   $("#drawer-title").textContent = r.company;
   // The posting URL, always one click away — not buried in the artifacts row.
+  const loc = r.location ? ` · <span class="drawer-loc">${esc(r.location)}</span>` : "";
   $("#drawer-sub").innerHTML = r.jd_url
-    ? `${esc(r.title)} · <a class="drawer-jd" href="${esc(r.jd_url)}" target="_blank"
+    ? `${esc(r.title)}${loc} · <a class="drawer-jd" href="${esc(r.jd_url)}" target="_blank"
          rel="noopener" title="${esc(r.jd_url)}">open job posting ↗</a>`
-    : esc(r.title);
+    : esc(r.title) + loc;
   $("#scrim").hidden = false;
   $("#drawer").hidden = false;
   requestAnimationFrame(() => {

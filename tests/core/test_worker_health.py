@@ -64,3 +64,26 @@ def test_restart_script_starts_the_daemon_not_the_bare_server():
     assert "-m daemon" in script, "restart script must launch the daemon (workers + web)"
     assert "nohup .venv/bin/python -m server" not in script, (
         "restart script must NOT launch the bare server — it has no workers")
+
+
+def test_orphan_recovery_frees_the_job_claim():
+    """A run killed mid-flight never releases its claim.
+
+    Recovery resets the job's status, and must clear the claim in the same
+    breath. Otherwise the job looks runnable but every attempt is refused as
+    "already being processed" until the TTL expires — silent, and it reads as a
+    hang rather than a lock.
+    """
+    from agent.run import _claim, release_claim
+
+    class _Tracking:
+        def __init__(self, client):
+            self.r = client
+
+    client = fakeredis.FakeRedis(decode_responses=True)
+    stores = type("S", (), {"tracking": _Tracking(client)})()
+
+    assert _claim("acme#1", stores) is True          # a run starts
+    assert _claim("acme#1", stores) is False         # ...and is killed; claim persists
+    release_claim("acme#1", stores)                  # recovery frees it
+    assert _claim("acme#1", stores) is True          # the retry can now run

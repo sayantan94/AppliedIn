@@ -1867,3 +1867,17 @@ a.rowlk, button.rowlk { display: inline-block; }
 }
 .drawer-jd { color: var(--scan); text-decoration: none; }
 .drawer-jd:hover { text-decoration: underline; }
+
+/* Job location on a pipeline card. The ranking in preferences is Washington
+   first, so a top-tier location is marked; everything else stays quiet. */
+.kc-loc {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kc-loc.top { color: var(--scan); font-weight: 600; }
+.kc-loc.remote { color: var(--info); }
+.drawer-loc { color: var(--muted); }

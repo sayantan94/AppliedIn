@@ -128,6 +128,14 @@ def _release(pk: str, stores: Any) -> None:
         log.debug("could not release job lock for %s", pk, exc_info=True)
 
 
+# A run killed mid-flight (daemon restart, kill -9) never reaches the `finally`
+# that frees its claim, so the claim survives for the whole TTL. Startup recovery
+# resets such a job's status, and MUST clear its claim in the same breath —
+# otherwise the job looks runnable but every attempt is refused as "already being
+# processed" until the TTL expires, which is silent and looks like a hang.
+release_claim = _release
+
+
 def run_job(pk: str, stores: Any = None) -> dict:
     """Run the pipeline for one discovered job through the ADK agent graph."""
     stores = stores or make_stores()
