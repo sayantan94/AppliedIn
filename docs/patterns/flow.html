@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin:0; padding:0; width:1200px; height:660px; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(120% 90% at 16% 4%, rgba(255,255,255,.06), transparent 55%),
+      radial-gradient(80% 60% at 88% 96%, rgba(255,255,255,.03), transparent 60%),
+      linear-gradient(163deg, #26342e 0%, #1b2723 46%, #121b18 100%);
+  }
+  .grit { position:absolute; inset:0; pointer-events:none; z-index:5; opacity:.2; mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>"); }
+  .smear { position:absolute; inset:0; pointer-events:none; z-index:4; opacity:.5;
+    background: radial-gradient(42% 18% at 26% 74%, rgba(255,255,255,.05), transparent 70%),
+                radial-gradient(30% 12% at 70% 22%, rgba(255,255,255,.035), transparent 70%),
+                repeating-linear-gradient(96deg, rgba(255,255,255,.012) 0 2px, transparent 2px 18px); }
+  svg { position:absolute; inset:0; z-index:1; }
+  text { font-family:"Caveat", cursive; fill:#f4f1e8; }
+  .k { letter-spacing:1.6px; }
+</style>
+</head>
+<body>
+<svg id="s" width="1200" height="660" viewBox="0 0 1200 660" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="chalk" x="-16%" y="-16%" width="132%" height="132%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.055" numOctaves="4" seed="11" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="3.2" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="chalkFine" x="-16%" y="-16%" width="132%" height="132%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.07" numOctaves="3" seed="3" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="1.9" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="bloom" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="tip" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#cfd8cc" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="tipWarm" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#f5cf80" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="tipRose" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1 L11 6 L1 11" fill="none" stroke="#f3a99d" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <g filter="url(#bloom)"><text x="52" y="68" font-size="43" font-weight="700">most postings die at the door</text></g>
+  <text id="phase" x="54" y="102" font-size="24" fill="#a7b4aa">—</text>
+
+  <!-- ══ 1 · the funnel ═══════════════════════════════════════════════════ -->
+  <g filter="url(#chalkFine)" fill="none" stroke-linecap="round" opacity=".55">
+    <path d="M44 300 L 150 300" stroke="#8b988e" stroke-width="2"/>
+  </g>
+  <g id="intake"></g>
+
+  <g filter="url(#chalk)" fill="none" stroke-linecap="round">
+    <path d="M176 236 L 262 300 L 176 364" stroke="#9ed6ee" stroke-width="3.4" stroke-linejoin="round"/>
+  </g>
+  <text x="196" y="205" font-size="27" font-weight="700" fill="#9ed6ee" text-anchor="middle">scorer</text>
+  <text x="196" y="404" font-size="19" fill="#8b988e" text-anchor="middle" class="k">STRUCTURED OUTPUT</text>
+  <text id="tally" x="196" y="432" font-size="20" fill="#8b988e" text-anchor="middle" opacity="0">—</text>
+
+  <!-- ══ 2 · the argument — the piece that is not a straight line ═════════ -->
+  <g filter="url(#chalk)" fill="none" stroke-linecap="round">
+    <rect id="stage" x="336" y="150" width="470" height="316" rx="20" stroke="#f5cf80" stroke-width="3.4" opacity=".45"/>
+    <rect x="382" y="208" width="164" height="150" rx="13" stroke="#f5cf80" stroke-width="2.8" opacity=".8"/>
+    <rect x="596" y="208" width="164" height="150" rx="13" stroke="#f5cf80" stroke-width="2.8" opacity=".8"/>
+  </g>
+  <text x="571" y="128" font-size="30" font-weight="700" fill="#f5cf80" text-anchor="middle">it argues with itself</text>
+  <text x="464" y="246" font-size="27" font-weight="700" fill="#f5cf80" text-anchor="middle">tailor</text>
+  <text x="464" y="272" font-size="18" fill="#8b988e" text-anchor="middle">rewrites</text>
+  <text x="678" y="246" font-size="27" font-weight="700" fill="#f5cf80" text-anchor="middle">critic</text>
+  <text x="678" y="272" font-size="18" fill="#8b988e" text-anchor="middle">pushes back</text>
+  <text x="571" y="444" font-size="19" fill="#8b988e" text-anchor="middle" class="k">REFLECTION LOOP · MAX 2</text>
+
+  <g filter="url(#chalk)" fill="none" stroke-linecap="round">
+    <path id="arcFwd"  d="M552 200 C 580 168, 604 168, 632 200" stroke="#f5cf80" stroke-width="3.4" marker-end="url(#tipWarm)" opacity="0"/>
+    <path id="arcBack" d="M632 366 C 604 398, 580 398, 552 366" stroke="#f3a99d" stroke-width="3.6" marker-end="url(#tipRose)" opacity="0"/>
+  </g>
+  <text id="verdict" x="571" y="418" font-size="23" font-weight="700" fill="#f3a99d" text-anchor="middle" opacity="0">—</text>
+
+  <!-- ══ 3 · the form ════════════════════════════════════════════════════ -->
+  <g filter="url(#chalk)" fill="none" stroke-linecap="round">
+    <rect x="892" y="196" width="212" height="208" rx="16" stroke="#f3a99d" stroke-width="3.4"/>
+    <path d="M812 300 L 884 300" stroke="#cfd8cc" stroke-width="2.8" marker-end="url(#tip)" opacity=".8"/>
+    <path d="M268 300 L 328 300" stroke="#cfd8cc" stroke-width="2.8" marker-end="url(#tip)" opacity=".8"/>
+  </g>
+  <text x="998" y="176" font-size="28" font-weight="700" fill="#f3a99d" text-anchor="middle">the real form</text>
+  <text x="998" y="428" font-size="19" fill="#8b988e" text-anchor="middle" class="k">PLAIN CODE · NO MODEL</text>
+  <g id="form">
+    <g filter="url(#chalkFine)" fill="none" stroke-linecap="round">
+      <path id="f1" d="M922 238 L 1074 238" stroke="#8fe3ad" stroke-width="5" stroke-dasharray="152" stroke-dashoffset="152"/>
+      <path id="f2" d="M922 268 L 1074 268" stroke="#8fe3ad" stroke-width="5" stroke-dasharray="152" stroke-dashoffset="152"/>
+      <path id="f3" d="M922 298 L 1074 298" stroke="#8fe3ad" stroke-width="5" stroke-dasharray="152" stroke-dashoffset="152"/>
+      <path id="f4" d="M922 328 L 1030 328" stroke="#8fe3ad" stroke-width="5" stroke-dasharray="108" stroke-dashoffset="108"/>
+      <path id="f5" d="M922 358 L 1074 358" stroke="#8fe3ad" stroke-width="5" stroke-dasharray="152" stroke-dashoffset="152"/>
+    </g>
+    <g id="done" opacity="0">
+      <path id="tick" d="M960 300 L 986 328 L 1046 258" fill="none" stroke="#8fe3ad" stroke-width="7"
+            stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="140" stroke-dashoffset="140" filter="url(#chalk)"/>
+    </g>
+  </g>
+
+  <!-- the packet that carries the work -->
+  <g id="pkt" opacity="0">
+    <g filter="url(#chalk)"><rect id="pktBox" x="-40" y="-23" width="80" height="46" rx="9" fill="#182320" stroke="#f4f1e8" stroke-width="2.6"/></g>
+    <text id="pktTxt" x="0" y="8" font-size="22" font-weight="700" text-anchor="middle">posting</text>
+  </g>
+
+  <!-- ══ the standing rule ═══════════════════════════════════════════════ -->
+  <g filter="url(#chalk)" fill="none"><path d="M52 512 L 52 604" stroke="#8fe3ad" stroke-width="3.6" stroke-linecap="round"/></g>
+  <text x="78" y="546" font-size="28" font-weight="700">the model is the fallback, not the default</text>
+  <text x="78" y="578" font-size="20" fill="#8b988e">a known form is filled by plain code — the LLM is called only when the page can't be read</text>
+  <text x="78" y="606" font-size="20" fill="#8b988e">it never solves a CAPTCHA, never makes an account, never re-sends a submit it can't confirm</text>
+  <text x="1150" y="606" font-size="20" fill="#78857b" text-anchor="end">AppliedIn</text>
+</svg>
+
+<div class="smear"></div><div class="grit"></div>
+
+<script>
+/* One pure function of time. Every frame is reproducible, so the GIF is captured
+   by stepping t rather than racing a real animation and hoping. */
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+const lerp = (a,b,u) => a + (b-a)*u;
+const cl = (u) => Math.max(0, Math.min(1, u));
+const ease = (u) => u < .5 ? 4*u*u*u : 1 - Math.pow(-2*u+2, 3)/2;
+const seg = (t,a,b) => cl((t-a)/(b-a));
+
+/* The funnel is the honest part: a real Cohere run screened 137 postings down to
+   8 worth tailoring. Five arrive, four are dropped, one goes on. */
+const INTAKE = [
+  { d: 0.00, score: 4, keep: false },
+  { d: 0.26, score: 6, keep: false },
+  { d: 0.52, score: 9, keep: true  },
+  { d: 0.78, score: 3, keep: false },
+  { d: 1.04, score: 5, keep: false },
+];
+const g = $("intake");
+INTAKE.forEach((j, i) => {
+  const n = document.createElementNS(NS, "g");
+  n.setAttribute("id", "j" + i);
+  n.innerHTML =
+    `<g filter="url(#chalkFine)"><rect x="-26" y="-15" width="52" height="30" rx="6"
+       fill="#182320" stroke="#8b988e" stroke-width="2"/></g>
+     <text x="0" y="6" font-size="17" font-weight="700" text-anchor="middle" fill="#c9d3cb">${j.score}</text>`;
+  g.appendChild(n);
+});
+
+const PHASES = [
+  [0.0, "postings arrive from the boards you follow"],
+  [1.9, "each is scored against your résumé — most never get further"],
+  [3.2, "the survivor is rewritten for this posting, in its own words"],
+  [4.0, "the critic reads it back and sends it away"],
+  [5.2, "second pass — this time it holds"],
+  [6.3, "the form is filled from answers you already approved"],
+  [7.7, "submitted, and the confirmation read back to you"],
+];
+
+function render(t) {
+  // ── intake: five postings drift to the scorer, four fall away ──────────
+  INTAKE.forEach((j, i) => {
+    const n = $("j" + i);
+    const inU = ease(seg(t, j.d, j.d + 1.0));
+    let x = lerp(-60, 196, inU), y = 300, op = seg(t, j.d, j.d + .25);
+    if (!j.keep) {
+      const out = seg(t, 1.9 + i * .12, 2.5 + i * .12);   // rejected: sink away
+      y += out * 96; op *= (1 - out); x += out * 26;
+    } else {
+      const on = seg(t, 3.0, 3.35);                        // survivor moves on
+      x = lerp(196, 240, on); op *= (1 - seg(t, 3.1, 3.35));
+    }
+    n.setAttribute("transform", `translate(${x.toFixed(1)}, ${y.toFixed(1)})`);
+    n.setAttribute("opacity", op.toFixed(2));
+  });
+  $("tally").setAttribute("opacity", Math.max(0, seg(t, 2.2, 2.6) - seg(t, 8.4, 8.7)).toFixed(2));
+  $("tally").textContent = "4 of 5 dropped";
+
+  // ── the packet: only the survivor is carried ───────────────────────────
+  const P = $("pkt"), txt = $("pktTxt"), box = $("pktBox");
+  let x = 464, y = 322, o = 0, label = "résumé", tone = "#f4f1e8";
+
+  if (t >= 3.2 && t < 3.7)      { x = lerp(268, 464, ease(seg(t,3.2,3.7))); o = seg(t,3.2,3.4); }
+  else if (t < 4.0 && t >= 3.7) { x = 464; o = 1; }
+  else if (t < 4.35)            { x = lerp(464, 678, ease(seg(t,4.0,4.35))); o = 1; label = "draft 1"; }
+  else if (t < 5.0)             { x = lerp(678, 464, ease(seg(t,4.5,5.0))); o = 1; label = "rejected"; tone = "#f3a99d"; }
+  else if (t < 5.5)             { x = 464; o = 1; label = "rewritten"; }
+  else if (t < 5.95)            { x = lerp(464, 678, ease(seg(t,5.5,5.95))); o = 1; label = "draft 2"; }
+  else if (t < 6.3)             { x = 678; o = 1; label = "approved"; tone = "#8fe3ad"; }
+  else if (t < 6.75)            { x = lerp(678, 998, ease(seg(t,6.3,6.75))); y = lerp(322,300,ease(seg(t,6.3,6.75)));
+                                  o = 1 - seg(t,6.55,6.75); label = "approved"; tone = "#8fe3ad"; }
+  P.setAttribute("transform", `translate(${x.toFixed(1)}, ${y.toFixed(1)})`);
+  P.setAttribute("opacity", o.toFixed(2));
+  txt.textContent = label; txt.setAttribute("fill", tone); box.setAttribute("stroke", tone);
+
+  // ── the argument: arcs light only while that leg is in flight ──────────
+  $("arcFwd").setAttribute("opacity", Math.max(
+      seg(t,4.0,4.15) - seg(t,4.35,4.5), seg(t,5.5,5.65) - seg(t,5.95,6.1)).toFixed(2));
+  $("arcBack").setAttribute("opacity", Math.max(0, seg(t,4.45,4.6) - seg(t,5.0,5.15)).toFixed(2));
+  $("stage").setAttribute("opacity", (0.45 + 0.5 * Math.max(0, seg(t,3.4,3.8) - seg(t,6.3,6.6))).toFixed(2));
+
+  const v = $("verdict");
+  if (t >= 4.45 && t < 5.15)      { v.setAttribute("opacity","1"); v.setAttribute("fill","#f3a99d"); v.textContent = "not good enough — again"; }
+  else if (t >= 5.95 && t < 6.5)  { v.setAttribute("opacity","1"); v.setAttribute("fill","#8fe3ad"); v.textContent = "exit_loop"; }
+  else                            { v.setAttribute("opacity","0"); }
+
+  // ── the form fills, then is confirmed ──────────────────────────────────
+  const fills = [[6.55,6.85,152],[6.75,7.05,152],[6.95,7.25,152],[7.15,7.45,108],[7.35,7.65,152]];
+  fills.forEach(([a,b,len], i) =>
+    $("f"+(i+1)).setAttribute("stroke-dashoffset", (len*(1-ease(seg(t,a,b)))).toFixed(1)));
+  $("done").setAttribute("opacity", seg(t,7.7,7.9).toFixed(2));
+  $("tick").setAttribute("stroke-dashoffset", (140*(1-ease(seg(t,7.75,8.35)))).toFixed(1));
+
+  let phase = PHASES[0][1];
+  for (const [at, p] of PHASES) if (t >= at) phase = p;
+  $("phase").textContent = phase;
+}
+window.render = render;
+render(0);
+</script>
+</body>
+</html>
