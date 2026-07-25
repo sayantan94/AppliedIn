@@ -74,6 +74,10 @@
                   <span class="cp-state mono" id="cp-state">all</span>
                 </div>
                 <div class="cp-list" id="cp-list" aria-label="Companies"></div>
+                <div class="cp-prof">
+                  <label for="cp-profile">apply as</label>
+                  <select id="cp-profile" class="cp-profsel"><option value="">default profile</option></select>
+                </div>
                 <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
                 <div class="cp-add">
                   <input id="cp-add-name" class="cp-search" type="text"
@@ -202,6 +206,24 @@
                     <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>
                     <button id="rp-go" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
                   </div>
+                </div>
+              </div>
+              <div class="profmgr" id="profmgr">
+                <button id="btn-profiles" class="skipbtn profbtn" aria-haspopup="true" aria-expanded="false"
+                  title="Which email + phone an application goes out under">◐ Profiles<span
+                    id="prof-count" class="skip-count mono" hidden>0</span></button>
+                <div id="profpicker" class="copicker profpicker" hidden>
+                  <div class="cp-role-h">Who the application comes from</div>
+                  <div class="pr-list" id="pr-list"></div>
+                  <div class="pr-add">
+                    <input id="pr-label" class="cp-search" type="text" placeholder="label — e.g. Job hunt" autocomplete="off" />
+                    <input id="pr-email" class="cp-search" type="email" placeholder="email address" autocomplete="off" />
+                    <input id="pr-phone" class="cp-search" type="tel" placeholder="phone (optional)" autocomplete="off" />
+                    <button id="pr-add" class="cp-lk cp-add-btn" type="button">Add profile</button>
+                  </div>
+                  <div class="cp-foot">The résumé is re-rendered with the profile's
+                    address, so the form and the PDF never disagree. Marked
+                    <b>default</b> is used by anything you don't set.</div>
                 </div>
               </div>
               <div class="prefmgr" id="prefmgr">

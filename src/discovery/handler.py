@@ -54,6 +54,7 @@ def discover_company(
     queue: Any,
     client: httpx.Client,
     tailor_queue_url: str,
+    profile_id: str = "",
 ) -> int:
     """Discover one company; returns the number of jobs newly enqueued."""
     from core.events import emit
@@ -104,6 +105,10 @@ def discover_company(
     enqueued, new_jobs = 0, []
     for job in matched:
         if tracking.put_new(job):  # False => already seen, skip
+            if profile_id:
+                # Stamped at discovery so the whole batch applies from one
+                # identity — the résumé is rendered to match when it's tailored.
+                tracking.set_status(job.pk, Status.FOUND, profile_id=profile_id)
             queue.enqueue(tailor_queue_url, {"pk": job.pk})
             emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
             new_jobs.append(job)
@@ -180,12 +185,16 @@ def add_watchlist_company(name: str, careers_url: str = "") -> dict:
     return {"ok": True, "companies": list_watchlist_companies()}
 
 
-def run_discovery(only: list[str] | None = None) -> dict:
+def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
 
     `only` scopes the run to specific companies (case-insensitive names, matched
     against the watchlist); None/empty = the whole watchlist. The UI passes the
     user's picked companies so discovery isn't always all-or-nothing.
+
+    `profile_id` stamps every job this run finds with the identity it should be
+    sent under, so a whole batch can go out from one address without touching each
+    job afterwards. Empty = the default profile decides at apply time.
 
     Mode-agnostic: stores come from the factory, so this is the SAME finder on
     a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
@@ -227,9 +236,7 @@ def run_discovery(only: list[str] | None = None) -> dict:
                 crawl_companies.append(company)  # custom career page -> crawler
                 continue
             try:
-                total += discover_company(
-                    company, prefs, stores.tracking, stores.queue, client, stores.tailor_queue
-                )
+                total += discover_company(company, prefs, stores.tracking, stores.queue, client, stores.tailor_queue, profile_id)
             except Exception:
                 log.exception("discovery failed for %s", company.name)
 

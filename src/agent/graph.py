@@ -69,6 +69,13 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
 
     pk = tool_context.state.get("pk", "resume")
     stores = make_stores()
+
+    # The application goes out under a chosen profile, so the PDF must carry that
+    # profile's contact details — a form saying one address while the attached
+    # résumé says another is the kind of mismatch a recruiter notices.
+    from core import profiles as _profiles
+    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    tailored_latex = _profiles.apply_to_latex(tailored_latex, _prof)
     artifacts = stores.artifacts  # filesystem (local) or S3 (cloud) — same call
     tex_key = artifacts.put("resumes", f"{pk}.tex", tailored_latex.encode(), "text/x-tex")
     try:
@@ -141,6 +148,12 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
     company = st.get("company", "")
     stores = make_stores()
     facts = stores.answer_bank.all_facts(company)
+    # Same override as the direct-apply path: the chosen profile's contact details
+    # win, so the form and the attached résumé always agree.
+    from core import profiles as _profiles
+    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    if _prof:
+        facts = _prof.override(facts)
     creds = get_login(company, stores.secrets)
     if creds:  # let the browser agent sign in with the saved login
         facts["Login email/username"] = creds.get("username", "")

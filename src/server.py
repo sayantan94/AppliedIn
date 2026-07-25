@@ -86,6 +86,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "has_diff": bool(row.get("resume_tex_key")),
         "jd_url": row.get("jd_url"),
         "location": row.get("location", ""),
+        "profile_id": row.get("profile_id", ""),
         "screenshot_url": link("screenshot_s3_key"),
         "confirmation_id": row.get("confirmation_id"),
         "discovered_at": row.get("discovered_at") or (events[0]["at"] if events else None),
@@ -459,6 +460,63 @@ def create_app() -> FastAPI:
                 "company": row.get("company", ""), "title": row.get("title", ""),
                 "status": row.get("status", ""), "events": events[-limit:]}
 
+    @app.get("/profiles")
+    def get_profiles():
+        """The identities applications can go out under."""
+        from core import profiles as prof
+
+        items, default = prof.load()
+        return {"default": default,
+                "profiles": [{"id": x.id, "label": x.label, "email": x.email,
+                              "phone": x.phone} for x in items]}
+
+    @app.post("/profiles")
+    def set_profiles(body: dict):
+        """Replace the profile list. Each needs at least an email; a phone is
+        optional. The default is used by any job that hasn't chosen one."""
+        from core import profiles as prof
+
+        try:
+            items, default = prof.save((body or {}).get("profiles") or [],
+                                       (body or {}).get("default", ""))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "default": default,
+                "profiles": [{"id": x.id, "label": x.label, "email": x.email,
+                              "phone": x.phone} for x in items]}
+
+    @app.post("/actions/job-profile/{pk:path}")
+    def set_job_profile(pk: str, body: dict):
+        """Choose which identity THIS application goes out under.
+
+        Re-tailoring is required for the change to reach the PDF, since the
+        contact line is written at render time — so a job that has already been
+        tailored is put back to `found`, and its next run produces a résumé whose
+        details match the form.
+        """
+        from core import profiles as prof
+
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk)
+        if not row:
+            return {"ok": False, "error": "unknown job"}
+        profile_id = str((body or {}).get("profile_id") or "")
+        if profile_id and not prof.get(profile_id):
+            return {"ok": False, "error": f"no profile {profile_id!r}"}
+
+        status = row.get("status")
+        retailor = bool(profile_id and status in ("tailored", "failed")
+                        and row.get("resume_s3_key"))
+        stores.tracking.set_status(pk, Status.FOUND if retailor else status,
+                                   profile_id=profile_id)
+        if retailor:
+            stores.queue.enqueue(stores.tailor_queue, {"pk": pk})
+        from core.events import emit
+        emit("running", pk=pk, agent="workflow",
+             detail=(f"profile → {profile_id or 'default'}"
+                     + (" · re-tailoring so the résumé matches" if retailor else "")))
+        return {"ok": True, "profile_id": profile_id, "retailoring": retailor}
+
     @app.get("/preferences")
     def get_preferences():
         """The job-matching preferences the discovery screen and scorer read."""
@@ -536,6 +594,7 @@ def create_app() -> FastAPI:
         if _RUNNING["discover"] or _RUNNING["process"]:
             return {"ok": False, "status": "already_running"}
         careers_url = ((body or {}).get("careers_url") or "").strip()
+        profile_id = str((body or {}).get("profile_id") or "")
         from discovery.handler import add_watchlist_company, list_watchlist_companies
         if name.lower() not in (c.lower() for c in list_watchlist_companies()):
             added = add_watchlist_company(name, careers_url)
@@ -552,7 +611,7 @@ def create_app() -> FastAPI:
                 emit("running", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
                      detail=f"▶ {name}: one-company run — discovering…")
-                found = run_discovery(only=[name])
+                found = run_discovery(only=[name], profile_id=profile_id)
                 n_new = (found.get("enqueued") or 0) + (found.get("crawled") or 0)
                 emit("running", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
@@ -711,12 +770,15 @@ def create_app() -> FastAPI:
         if _RUNNING["discover"]:
             return {"ok": False, "status": "already_running"}
         only = [c for c in ((body or {}).get("companies") or []) if isinstance(c, str)]
+        # Everything this run finds is stamped with the chosen identity, so a whole
+        # batch applies from one address without touching each job afterwards.
+        profile_id = str((body or {}).get("profile_id") or "")
 
         def _run() -> None:
             from daemon import run_discovery_once
             _RUNNING["discover"] = True
             try:
-                run_discovery_once(only=only or None)
+                run_discovery_once(only=only or None, profile_id=profile_id)
             except Exception:  # noqa: BLE001
                 import logging
                 logging.getLogger("server").exception("manual discovery failed")

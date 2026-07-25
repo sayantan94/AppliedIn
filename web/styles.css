@@ -1949,3 +1949,40 @@ a.rowlk, button.rowlk { display: inline-block; }
 .bucket.bk-remote .bk-caret { color: var(--info); }
 .bucket.bk-other  .bk-name,
 .bucket.bk-other  .bk-caret { color: var(--faint); }
+
+/* ─── Profiles ─────────────────────────────────────────────────────────────
+   Which identity an application goes out under. Kept beside the other
+   top-level tools rather than in settings, because it is a per-run choice. */
+.profmgr { position: relative; }
+.profpicker { left: 0; right: auto; width: min(360px, calc(100vw - 32px)); }
+.pr-list { display: flex; flex-direction: column; padding: 4px 10px 0; gap: 5px; max-height: 240px; overflow-y: auto; }
+.pr-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 9px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--border);
+}
+.pr-row.is-default { border-color: color-mix(in srgb, var(--scan) 50%, transparent); }
+.pr-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.pr-label { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.pr-tag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em;
+          color: var(--scan); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; }
+.pr-meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-act { background: none; border: 0; cursor: pointer; color: var(--faint); font-size: 11.5px; padding: 2px 4px; }
+.pr-act:hover { color: var(--fg); }
+.pr-act.del:hover { color: var(--bad); }
+.pr-add { display: flex; flex-direction: column; gap: 6px; padding: 10px; }
+.cp-prof { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0; font-size: 11.5px; color: var(--muted); }
+.cp-profsel {
+  flex: 1; background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; font-family: var(--sans); font-size: 11.5px; padding: 3px 5px; cursor: pointer;
+}
+.cp-profsel:hover { border-color: var(--scan); }
+.kc-prof { font-size: 10.5px; color: var(--info); margin-top: 2px; }
+.profpick { display: flex; flex-direction: column; gap: 7px; }
+.profpick select {
+  width: 100%; padding: 8px 10px; border-radius: var(--r-md);
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  font-family: var(--sans); font-size: 13px; cursor: pointer;
+}
+.profpick select:hover { border-color: var(--scan); }
+.profpick-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }

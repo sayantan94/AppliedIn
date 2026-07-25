@@ -25,6 +25,8 @@ const state = {
   coFilter: "",       // board filter: show one company only ("" = all)
   openPk: "",         // pk in the open detail drawer (streams its agent log)
   locFilter: "",      // Tailored lane: show one location tier only ("" = all)
+  profiles: [],       // identities an application can go out under
+  profileDefault: "", // the one used by any job that has not chosen
   collapsed: null,    // folded location buckets (null = pick the default once)
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
@@ -431,6 +433,15 @@ function locHtml(loc) {
   return `<div class="${cls}" title="${esc(loc)}">${top ? "★ " : ""}${esc(String(loc).slice(0, 44))}</div>`;
 }
 
+/* Only shown when a job uses something other than the default identity — a
+   badge on every card would be noise, but a job quietly going out from the wrong
+   address is exactly the thing worth surfacing. */
+function profHtml(id) {
+  if (!id || id === state.profileDefault) return "";
+  const p = state.profiles.find((x) => x.id === id);
+  return `<div class="kc-prof" title="${esc((p && p.email) || id)}">◐ ${esc((p && p.label) || id)}</div>`;
+}
+
 function laneCard(r) {
   let retry = "";
   if (r.status === "failed" && r.fail_kind === "spam_flagged") {
@@ -454,6 +465,7 @@ function laneCard(r) {
     <div class="kc-co">${esc(r.company)}</div>
     <div class="kc-role">${esc(r.title)}</div>
     ${locHtml(r.location)}
+    ${profHtml(r.profile_id)}
     ${live}
     <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${retry}</div>
   </div>`;
@@ -1042,9 +1054,13 @@ async function runDiscover() {
   const scope = discoverScope();
   state.stats.discovering = true;   // optimistic; poll confirms
   renderDeck();
-  const d = await post("/actions/discover", { companies: scope });
+  const profile = ($("#cp-profile") || {}).value || "";
+  const d = await post("/actions/discover", { companies: scope, profile_id: profile });
   if (d && d.status === "already_running") toast("Discovery is already running.");
-  else if (d && d.ok) toast(scope.length
+  else if (d && d.ok && profile) {
+    const p = state.profiles.find((x) => x.id === profile);
+    toast(`Discovering — everything found will apply as ${p ? p.label : profile}.`);
+  } else if (d && d.ok) toast(scope.length
     ? `Discovery started — scanning ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`}.`
     : "Discovery started — scanning the whole watchlist.");
   else if (!d) { state.stats.discovering = false; renderDeck(); }
@@ -1251,6 +1267,17 @@ function openDrawer(pk) {
         border-radius:var(--r-md);padding:13px 15px;max-height:160px;overflow:auto">${esc(r.jd_excerpt)}</div></div>` : ""}
 
     ${tl ? `<div class="section"><div class="section-t">timeline</div><div class="timeline">${tl}</div></div>` : ""}
+
+    <div class="section"><div class="section-t">applying as</div>
+      <div class="profpick">
+        <select id="job-profile" data-job-profile="${esc(r.pk)}">
+          <option value=""${r.profile_id ? "" : " selected"}>default${
+            state.profileDefault ? " — " + esc((state.profiles.find(p => p.id === state.profileDefault) || {}).label || "") : ""}</option>
+          ${state.profiles.map((p) => `<option value="${esc(p.id)}"${p.id === r.profile_id ? " selected" : ""}>${esc(p.label)} · ${esc(p.email)}</option>`).join("")}
+        </select>
+        <div class="profpick-note">Changing this re-tailors the résumé so its
+          contact details match what gets typed into the form.</div>
+      </div></div>
 
     <div class="section"><div class="section-t">everything the agent did
       <button class="cp-lk agentlog-re" data-agentlog="${esc(r.pk)}" type="button">refresh</button></div>
@@ -1555,6 +1582,91 @@ function wire() {
   $("#rp-go").addEventListener("click", runRole);
   $("#rp-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
 
+  // --- profiles: which identity an application goes out under ---------------
+  const pm = $("#profpicker"), pmBtn = $("#btn-profiles");
+  const closePm = () => {
+    if (!pm.hidden) { pm.hidden = true; pmBtn.setAttribute("aria-expanded", "false"); }
+  };
+  async function loadProfiles() {
+    try {
+      const r = await fetch(api("/profiles"), { headers: auth.header() });
+      const d = (await r.json()) || {};
+      state.profiles = d.profiles || [];
+      state.profileDefault = d.default || "";
+    } catch { state.profiles = []; }
+    renderProfiles();
+    renderProfilePickers();
+  }
+  function renderProfiles() {
+    const list = $("#pr-list");
+    const n = state.profiles.length;
+    $("#prof-count").hidden = !n;
+    $("#prof-count").textContent = String(n);
+    if (!n) {
+      list.innerHTML = `<div class="cp-none">No profiles yet — applications use
+        whatever is in your facts.</div>`;
+      return;
+    }
+    list.innerHTML = state.profiles.map((p) => `
+      <div class="pr-row${p.id === state.profileDefault ? " is-default" : ""}">
+        <div class="pr-main">
+          <div class="pr-label">${esc(p.label)}${p.id === state.profileDefault
+            ? '<span class="pr-tag">DEFAULT</span>' : ""}</div>
+          <div class="pr-meta">${esc(p.email)}${p.phone ? " · " + esc(p.phone) : ""}</div>
+        </div>
+        ${p.id === state.profileDefault ? "" :
+          `<button class="pr-act" data-prof-default="${esc(p.id)}" title="Make default">set default</button>`}
+        <button class="pr-act del" data-prof-del="${esc(p.id)}" title="Remove">✕</button>
+      </div>`).join("");
+  }
+  function renderProfilePickers() {
+    const sel = $("#cp-profile");
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">default profile</option>` +
+      state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+    sel.value = cur;
+  }
+  async function saveProfiles(profiles, def) {
+    const d = await post("/profiles", { profiles, default: def });
+    if (d && d.ok) { state.profiles = d.profiles; state.profileDefault = d.default;
+                     renderProfiles(); renderProfilePickers(); }
+    else toast((d && d.error) || "Couldn't save profiles.");
+  }
+  pmBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = pm.hidden;
+    pm.hidden = !show;
+    pmBtn.setAttribute("aria-expanded", String(show));
+    if (show) loadProfiles();
+  });
+  pm.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", (e) => {
+    if (!pm.hidden && !e.target.closest(".profmgr")) closePm();
+  });
+  loadProfiles();          // boot: the board needs these to label its cards
+
+  $("#pr-add").addEventListener("click", () => {
+    if (demoGuard()) return;
+    const email = $("#pr-email").value.trim();
+    if (!email) { toast("An email address is required."); return; }
+    const label = $("#pr-label").value.trim() || email.split("@")[0];
+    const next = [...state.profiles, { id: label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+                                       label, email, phone: $("#pr-phone").value.trim() }];
+    $("#pr-label").value = $("#pr-email").value = $("#pr-phone").value = "";
+    saveProfiles(next, state.profileDefault || next[0].id);
+  });
+  pm.addEventListener("click", (e) => {
+    const mk = e.target.closest("[data-prof-default]");
+    if (mk) { saveProfiles(state.profiles, mk.dataset.profDefault); return; }
+    const del = e.target.closest("[data-prof-del]");
+    if (del) {
+      const keep = state.profiles.filter((p) => p.id !== del.dataset.profDel);
+      saveProfiles(keep, keep.some((p) => p.id === state.profileDefault)
+        ? state.profileDefault : (keep[0] || {}).id || "");
+    }
+  });
+
   // --- job preferences ---
   // What counts as a match. Every stage re-reads preferences.yaml per job, so a
   // save here changes the very next job scored — no restart, no file editing.
@@ -1747,6 +1859,20 @@ function wire() {
       state.collapsed.has(key) ? state.collapsed.delete(key) : state.collapsed.add(key);
       renderPane();
     }
+  });
+
+  // Choosing an identity for one job — and re-tailoring so the PDF follows.
+  $("#drawer").addEventListener("change", async (e) => {
+    const sel = e.target.closest("[data-job-profile]");
+    if (!sel || demoGuard()) return;
+    const pk = sel.dataset.jobProfile;
+    const d = await post(`/actions/job-profile/${encodeURIComponent(pk)}`,
+                         { profile_id: sel.value });
+    if (!d || !d.ok) { toast((d && d.error) || "Couldn't set the profile."); return; }
+    toast(d.retailoring
+      ? "Profile set — re-tailoring so the résumé carries that address."
+      : "Profile set for this application.");
+    reload();
   });
 
   $("#drawer").addEventListener("click", (e) => {

@@ -335,6 +335,12 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         return {"result": "failed", "pk": pk, "reason": "no_sponsorship"}
 
     facts = stores.answer_bank.all_facts(company)
+    # Whichever profile this application is going out under supplies the contact
+    # details, overriding the bank's defaults for this job only.
+    from core import profiles as _profiles
+    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    if _prof:
+        facts = _prof.override(facts)
     creds = get_login(company, stores.secrets)
     if creds:
         facts["Login email/username"] = creds.get("username", "")
