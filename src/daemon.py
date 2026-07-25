@@ -59,11 +59,44 @@ def _sweep_found(stores) -> None:  # noqa: ANN001
         log.info("sweep: queued waiting job %s", row["pk"])
 
 
-def _worker_loop() -> None:
-    """EVALUATE worker — drain the tailor queue and score + tailor each job (fast,
-    LLM-only). Auto-approved jobs are handed to the apply queue, NOT applied here,
-    so a slow browser apply never blocks the backlog. Runs 24/7."""
+# Concurrent score+tailor jobs. Evaluating is pure NETWORK wait (multi-turn LLM
+# calls), not CPU, so serial evaluation was the pipeline's worst bottleneck: one
+# slow tailor blocked the entire backlog behind it, and a discovery cycle that
+# finds 150 relevant roles took hours to clear while the board sat on "tailoring 1".
+_EVAL_LANES = int(os.environ.get("APPLIEDIN_EVAL_LANES", "4"))
+
+
+def _evaluate_one(pk: str) -> None:
+    """Score + tailor ONE job. Each lane builds its OWN Stores bundle rather than
+    sharing one across threads — the same rule the apply lanes follow."""
     from agent.run import run_job
+    from core import flags
+
+    stores = make_stores()
+    if flags.paused():  # pause must interrupt a long batch, not just start one
+        stores.queue.enqueue(stores.tailor_queue, {"pk": pk})
+        return
+    try:
+        log.info("pipeline: %s", run_job(pk, stores))
+    except Exception:
+        # NEVER get stuck: mark the job errored so it leaves the `found`
+        # pool and isn't re-swept into an infinite error loop. Move on.
+        log.exception("pipeline failed for %s", pk)
+        try:
+            from core.models import Status
+            stores.tracking.set_status(pk, Status.ERROR,
+                                       error="pipeline error — see logs")
+        except Exception:
+            log.exception("could not mark %s errored", pk)
+
+
+def _worker_loop() -> None:
+    """EVALUATE worker — drain the tailor queue and score + tailor each job
+    (LLM-only). Runs _EVAL_LANES jobs CONCURRENTLY so one slow tailor never
+    stalls the backlog. Auto-approved jobs are handed to the apply queue, NOT
+    applied here, so a slow browser apply never blocks evaluation. Runs 24/7."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from core import flags
 
     stores = make_stores()
@@ -72,20 +105,13 @@ def _worker_loop() -> None:
             time.sleep(POLL_INTERVAL)
             continue
         items = stores.queue.drain(stores.tailor_queue)
-        for item in items:
-            try:
-                log.info("pipeline: %s", run_job(item["pk"], stores))
-            except Exception:
-                # NEVER get stuck: mark the job errored so it leaves the `found`
-                # pool and isn't re-swept into an infinite error loop. Move on.
-                log.exception("pipeline failed for %s", item.get("pk"))
-                try:
-                    from core.models import Status
-                    stores.tracking.set_status(item["pk"], Status.ERROR,
-                                               error="pipeline error — see logs")
-                except Exception:
-                    log.exception("could not mark %s errored", item.get("pk"))
-        if not items:  # queue idle → keep the backlog moving (both modes)
+        pks = [pk for it in items if (pk := it.get("pk"))]
+        if pks:
+            log.info("evaluate: %d job(s), %d lanes", len(pks), _EVAL_LANES)
+            with ThreadPoolExecutor(max_workers=_EVAL_LANES,
+                                    thread_name_prefix="eval") as pool:
+                list(pool.map(_evaluate_one, pks))
+        else:  # queue idle → keep the backlog moving (both modes)
             try:
                 _sweep_found(stores)
             except Exception:
@@ -289,6 +315,25 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
         log.info("recovered %d orphaned 'tailoring' job(s) → reset to found", t)
 
 
+def _heartbeat_loop() -> None:
+    """Publish which worker loops are ALIVE, so a process without them can't
+    masquerade as a healthy pipeline (`python -m server` serves the board and
+    answers /stats while discovering, tailoring and applying exactly nothing).
+
+    Runs in its OWN thread and only inspects thread liveness — never work
+    progress — so a worker legitimately busy for ten minutes inside one browser
+    apply still reads as alive."""
+    from core import flags
+
+    names = {"discovery", "evaluate", "apply"}
+    while True:
+        try:
+            flags.beat_workers(sorted({t.name for t in threading.enumerate()} & names))
+        except Exception:
+            log.debug("heartbeat failed", exc_info=True)
+        time.sleep(10)
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -308,6 +353,7 @@ def main() -> None:
         threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
     threading.Thread(target=_worker_loop, daemon=True, name="evaluate").start()
     threading.Thread(target=_apply_loop, daemon=True, name="apply").start()
+    threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)

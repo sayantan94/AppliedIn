@@ -129,6 +129,10 @@ def create_app() -> FastAPI:
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _RUNNING["discover"], "processing": _RUNNING["process"],
+                # Empty = healthy. ["daemon"] = NOTHING is running the pipeline
+                # (e.g. someone started `python -m server`, which serves this very
+                # response but has no workers). Named loops = that thread died.
+                "workers_down": flags.workers_down(),
                 # `found` = discovered but not yet processed; the number the
                 # 'Process applications' button will act on.
                 "found_waiting": counts.get("found", 0)}

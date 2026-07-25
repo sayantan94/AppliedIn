@@ -154,3 +154,63 @@ def set_company_skip(name: str, skip: bool) -> set:
 
 def paused() -> bool:
     return get_flag("paused", "no") == "yes"
+
+
+# --- worker heartbeat ------------------------------------------------------
+# The pipeline must never LOOK healthy while doing nothing. `python -m server`
+# is uvicorn ONLY — the board renders and /stats returns 200, but no job is ever
+# discovered, scored, tailored or applied. `python -m daemon` is the real entry
+# point: it spawns the discovery/evaluate/apply loops and then serves the web app.
+# Only the daemon beats, so a workerless process is detectable instead of silent.
+#
+# The beat comes from a dedicated thread that reports which loops are ALIVE
+# (threading.enumerate), not which are idle — so a worker legitimately busy for
+# ten minutes inside one browser apply still reads as healthy.
+
+# Loops the pipeline cannot function without. Discovery is deliberately absent:
+# it's opt-out via APPLIEDIN_DISCOVERY=off, so its absence is a choice, not a fault.
+_REQUIRED_WORKERS = ("evaluate", "apply")
+_HEARTBEAT_STALE_SECONDS = 90.0  # beat is every ~10s; 90s tolerates a slow host
+
+
+def beat_workers(names: list[str], *, now: float | None = None) -> None:
+    """Record that `names` worker loops are alive right now."""
+    import json
+    import time
+
+    set_flag("heartbeat", json.dumps(
+        {"at": now if now is not None else time.time(), "workers": sorted(names)}))
+
+
+def worker_heartbeat() -> dict | None:
+    import json
+
+    raw = get_flag("heartbeat", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) or None
+    except Exception:
+        return None
+
+
+def workers_down(*, now: float | None = None,
+                 stale_after: float = _HEARTBEAT_STALE_SECONDS) -> list[str]:
+    """Which workers are NOT running.
+
+    ``["daemon"]``  — nothing is beating at all: no daemon, or it died/wedged.
+                      This is the bare-`python -m server` case.
+    ``["evaluate"]``— the daemon is up but that loop is gone.
+    ``[]``          — healthy.
+    """
+    import time
+
+    hb = worker_heartbeat()
+    if not hb:
+        return ["daemon"]
+    at = hb.get("at")
+    clock = now if now is not None else time.time()
+    if not isinstance(at, (int, float)) or clock - at > stale_after:
+        return ["daemon"]
+    alive = set(hb.get("workers") or [])
+    return [w for w in _REQUIRED_WORKERS if w not in alive]
