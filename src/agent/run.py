@@ -341,6 +341,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
     if _prof:
         facts = _prof.override(facts)
+    facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date
     creds = get_login(company, stores.secrets)
     if creds:
         facts["Login email/username"] = creds.get("username", "")

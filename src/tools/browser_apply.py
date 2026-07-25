@@ -778,12 +778,15 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                     else:
                         missing_required.append(label)
 
+            # A missing answer is NOT a reason to leave the rest of the form
+            # blank. Filling first means the owner meets a form that needs one
+            # field rather than an empty page and a question — the difference
+            # between ten seconds and doing the whole application by hand. The
+            # gate is raised after everything known has been entered, below.
             if missing_required:
-                shot = base64.b64encode(await top_page.screenshot()).decode()
-                return _with_fields(page, {
-                    "status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
-                    "question": "I need answers for: " + "; ".join(missing_required[:5]),
-                    "drafted": drafted or None})
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"⏸ will need you for: {'; '.join(missing_required[:3])} "
+                             f"— filling everything else first")
 
             _emit(pk, "response", agent="browser", url=url,
                   detail=f"⚡ one-shot fill: {len(fill_map)} fields")
@@ -848,6 +851,20 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
 
             # Last fill step before the submit loop: click-commit every box/text field.
             await _click_fields_pass(page, pk, url)
+
+            # Now hand over — with the form as complete as it can be. Anything the
+            # owner answers here is banked, so the next application that asks the
+            # same question never stops.
+            if missing_required:
+                shot = base64.b64encode(await top_page.screenshot()).decode()
+                _emit(pk, "response", agent="browser", url=url,
+                      detail=f"⏸ filled {len(fill_map)} field(s) — over to you for "
+                             f"{len(missing_required)} more")
+                return _with_fields(page, {
+                    "status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
+                    "question": "The form is filled apart from these — what should they say? "
+                                + "; ".join(missing_required[:5]),
+                    "drafted": drafted or None})
 
             import re as _re
 

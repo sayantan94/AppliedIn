@@ -207,3 +207,30 @@ def retarget(pk: str, profile: "Profile | None", stores=None) -> bool:  # noqa: 
                                resume_s3_key=key, profile_id=profile.id)
     log.info("retargeted %s to profile %r", pk, profile.id)
     return True
+
+
+# A start date written down today is wrong next month, so an answer may carry a
+# relative token — "{date:+6w}" — which is resolved when a form is actually
+# filled. Weeks (w), days (d) and months (m) are supported.
+_DATE_TOKEN_RX = re.compile(r"\{date:\+(\d+)([dwm])\}", re.I)
+
+
+def expand_dates(value: str, today=None) -> str:  # noqa: ANN001
+    """Turn any relative-date token in an answer into a real date."""
+    from datetime import date, timedelta
+
+    if not value or "{date:" not in str(value):
+        return value
+    base = today or date.today()
+
+    def _sub(m: "re.Match") -> str:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        days = n * (7 if unit == "w" else 30 if unit == "m" else 1)
+        return (base + timedelta(days=days)).isoformat()
+
+    return _DATE_TOKEN_RX.sub(_sub, str(value))
+
+
+def expand_all(facts: dict) -> dict:
+    """Resolve relative dates across a whole answer set."""
+    return {k: expand_dates(v) for k, v in facts.items()}

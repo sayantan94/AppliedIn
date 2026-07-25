@@ -154,6 +154,7 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
     _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
     if _prof:
         facts = _prof.override(facts)
+    facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date
     creds = get_login(company, stores.secrets)
     if creds:  # let the browser agent sign in with the saved login
         facts["Login email/username"] = creds.get("username", "")
