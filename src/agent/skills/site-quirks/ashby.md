@@ -26,4 +26,8 @@ success_phrases:
 - Some boards put an "Autofill from resume" uploader above the real Résumé field.
   It is a PARSER: giving it the résumé re-populates the form and overwrites
   answers already typed. Attach only to the field labelled Resume/CV.
+- A Yes/No question is **two visible `<button>`s plus a hidden checkbox** that
+  carries the state — not a radio group. Clicking the input does nothing because
+  it is `display:none`. Click the visible button whose text is the answer; the
+  hidden input follows.
 

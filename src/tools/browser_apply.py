@@ -1380,7 +1380,7 @@ async def _fill_combobox(page, label: str, value: str, pk: str = "", url: str = 
         if el is None:
             return False
         try:
-            await el.scroll_into_view_if_needed(timeout=1500)
+            await _bring_into_view(el)
         except Exception:
             pass
         await el.click(timeout=2500)
@@ -1926,6 +1926,20 @@ def _is_placeholder(value: object) -> bool:
     return isinstance(value, str) and bool(_PLACEHOLDER_RX.match(value))
 
 
+async def _bring_into_view(target, timeout: int = 2500) -> None:  # noqa: ANN001
+    """Scroll an element into view, best-effort.
+
+    Playwright scrolls before a click regardless, so this is only about making
+    the right thing visible in a headed window. It must never raise: under load
+    the scroll times out long before the click would, and an application was lost
+    to exactly that — two answerable radio questions reported as unsettable.
+    """
+    try:
+        await target.scroll_into_view_if_needed(timeout=timeout)
+    except Exception:  # noqa: BLE001
+        log.debug("scroll_into_view timed out — clicking anyway", exc_info=True)
+
+
 async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
     """Fill a form the way a PERSON does — real mouse clicks, real keystrokes.
 
@@ -1968,7 +1982,7 @@ async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
             kind = step.get("kind")
             loc = page.locator(f'[data-ai-fill="{step.get("token")}"]').first
             try:
-                await loc.scroll_into_view_if_needed(timeout=2000)
+                await _bring_into_view(loc)
                 if kind == "check":
                     if not await loc.is_checked():
                         await loc.click(timeout=3000)  # real click on the box/label
@@ -2065,7 +2079,7 @@ async def _click_submit(page, pk: str = "", url: str = "") -> str:  # noqa: ANN0
                    (await el.get_attribute("value")) or "").strip()
             if _re.search(r"linkedin|indeed|dropbox|google|autofill|with\s", txt, _re.I):
                 continue  # third-party "Apply with …" buttons are not the submit
-            await el.scroll_into_view_if_needed(timeout=1500)
+            await _bring_into_view(el)
             await el.click(timeout=2500)
             return txt or "Submit"
         except Exception:
@@ -2134,7 +2148,7 @@ async def _click_fields_pass(page, pk: str, url: str) -> int:  # noqa: ANN001
         for i in range(total):
             loc = page.locator(f'[data-appliedin-clickpass="{i}"]').first
             try:
-                await loc.scroll_into_view_if_needed(timeout=1500)
+                await _bring_into_view(loc)
                 await loc.click(timeout=2000)
                 clicked += 1
             except Exception:
@@ -2451,6 +2465,52 @@ async def _ensure_sanctions_safe(page, pk: str = "", url: str = "") -> str:  # n
             pass
 
 
+# Ashby renders a Yes/No question as two visible <button>s plus a HIDDEN
+# <input type=checkbox> that carries the state. Every choice path here looked for
+# the input, found the hidden one, and clicking it did nothing — so answerable
+# questions ("do you require sponsorship?") were reported as unsettable and the
+# application stopped. The visible control is what a person clicks, so click that.
+_LOCATE_OPTION_CONTROL_JS = r"""
+({q, v}) => {
+  const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const nq = norm(q), nv = norm(v);
+  if (!nq || !nv) return 'NOQUESTION';
+
+  // The field wrapper whose OWN text carries the question.
+  const heads = [...document.querySelectorAll('label,legend,p,div,span')]
+    .filter(e => e.children.length < 8 && norm(e.textContent).includes(nq.slice(0, 48)))
+    .sort((a, b) => a.textContent.length - b.textContent.length);
+  if (!heads.length) return 'NOQUESTION';
+
+  for (const head of heads.slice(0, 3)) {
+    let w = head;
+    for (let i = 0; i < 5 && w.parentElement; i++) {
+      w = w.parentElement;
+      const opts = [...w.querySelectorAll('button, [role=radio], [role=option], label')]
+        .filter(e => e.offsetParent !== null)          // visible only
+        .filter(e => !/submit application/i.test(norm(e.textContent)));
+      if (!opts.length) continue;
+      const hit = opts.find(e => norm(e.textContent) === nv)
+               || opts.find(e => { const t = norm(e.textContent);
+                                   return t && t.length < 42 && (t.includes(nv) || nv.includes(t)); });
+      if (hit) {
+        // Already chosen? Ashby marks the picked option on the button itself or
+        // on the hidden input it controls.
+        const box = hit.querySelector('input') ||
+                    (hit.closest('div') || {}).querySelector?.('input[type=checkbox],input[type=radio]');
+        const on = (box && box.checked) ||
+                   /selected|checked|_active|aria-checked="true"/i.test(hit.className + ' ' + hit.outerHTML.slice(0, 200));
+        if (on) return 'ALREADY';
+        return hit;
+      }
+      if (opts.length >= 2) break;   // right group, wrong value — do not wander up
+    }
+  }
+  return 'NOMATCH';
+}
+"""
+
+
 async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict:  # noqa: ANN001
     """Select radio/checkbox options with REAL Playwright clicks — the only thing
     React groups (Ashby) accept. `choices` maps question -> option (str OR list for
@@ -2464,15 +2524,20 @@ async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict
         statuses = []
         for v in vals:
             try:
-                h = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": str(v)})
+                # Visible option control first (Ashby buttons); the classic
+                # radio/checkbox locator is the fallback for ordinary forms.
+                h = await page.evaluate_handle(_LOCATE_OPTION_CONTROL_JS, {"q": q, "v": str(v)})
                 el = h.as_element()
+                if el is None:
+                    h = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": str(v)})
+                    el = h.as_element()
                 if el is None:
                     statuses.append(str(await h.json_value() or "NOQUESTION"))
                     continue
-                await el.scroll_into_view_if_needed(timeout=2000)
+                await _bring_into_view(el)
                 await el.click(timeout=3000)
                 await page.wait_for_timeout(250)
-                h2 = await page.evaluate_handle(_LOCATE_CHOICE_JS, {"q": q, "v": str(v)})
+                h2 = await page.evaluate_handle(_LOCATE_OPTION_CONTROL_JS, {"q": q, "v": str(v)})
                 statuses.append("set" if (h2.as_element() is None
                                 and await h2.json_value() == "ALREADY") else "click-no-effect")
             except Exception as exc:  # noqa: BLE001
