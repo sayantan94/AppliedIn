@@ -133,10 +133,35 @@ touching code.
 Unset stages fall back to `APPLIEDIN_ORCHESTRATOR_MODEL`, so one variable moves
 everything. A stronger model for the writer (essays) is the usual first upgrade.
 
-`APPLIEDIN_APPLY_ENGINE` is `scripted` by default — a deterministic Playwright
-pipeline with no model in the click loop. `agent` hands the form to browser-use
-instead: slower and pricier, but it copes with layouts the scripted path can't
-read.
+### Two engines, and when it switches by itself
+
+`APPLIEDIN_APPLY_ENGINE` is **`scripted`** by default: a deterministic Playwright
+pipeline with **no model in the click loop**. It reads the form, matches each
+field to an answer you approved, and types. On a known ATS — Ashby, Greenhouse,
+Lever, Workday — that is the whole apply, which is why the running cost is mostly
+scoring and tailoring rather than clicking.
+
+**It escalates on its own.** You do not choose per job:
+
+| What happened | What it does |
+| --- | --- |
+| Can't find a real form (fewer than 2 fillable fields) | Re-runs the apply under **browser-use**, which can read the page visually |
+| The scripted pass throws | Same — falls back to **browser-use** |
+| **The browser closed or crashed** | **Stops.** Reports *uncertain* and asks you to check the portal |
+
+That last row is deliberate. If the browser died, the form may already have been
+filled and submitted, so re-running it could submit a **second** application. A
+duplicate is worse than an unconfirmed one, so it never retries blind.
+
+There is a second, narrower escalation once a form *has* been filled — deciding
+who presses Submit:
+
+- **Known ATS** → scripted submits and reads the confirmation. No model involved.
+- **Unknown or custom form** → handed to the vision agent to finish and confirm.
+
+Setting `APPLIEDIN_APPLY_ENGINE=agent` skips the scripted attempt entirely and
+hands every form to browser-use: slower and pricier, but useful if you are
+working with employers whose pages the scripted path cannot read.
 
 ### Site quirks
 
