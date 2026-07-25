@@ -71,6 +71,19 @@ class Profile:
         return out
 
 
+_INVISIBLE_RX = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def clean(value: str) -> str:
+    """Strip what a paste drags in: zero-width and bidi format characters.
+
+    A phone copied from a contacts app often carries U+202C; it renders as
+    nothing, so the profile looks right in the UI and the employer receives a
+    number with a control character embedded in it.
+    """
+    return _INVISIBLE_RX.sub("", str(value or "")).strip()
+
+
 def _path() -> Path:
     return Path(get_settings().local_dir) / "profiles.yaml"
 
@@ -90,12 +103,12 @@ def load() -> tuple[list[Profile], str]:
         return [], ""
     profiles = []
     for row in data.get("profiles") or []:
-        email = str(row.get("email") or "").strip()
+        email = clean(row.get("email"))
         if not email:
             continue  # a profile without an address cannot answer anything
         pid = str(row.get("id") or email.split("@")[0]).strip()
         profiles.append(Profile(id=pid, label=str(row.get("label") or pid),
-                                email=email, phone=str(row.get("phone") or "").strip()))
+                                email=email, phone=clean(row.get("phone"))))
     default = str(data.get("default") or (profiles[0].id if profiles else ""))
     return profiles, default
 
@@ -105,12 +118,12 @@ def save(profiles: list[dict], default: str = "") -> tuple[list[Profile], str]:
 
     rows = []
     for p in profiles:
-        email = str(p.get("email") or "").strip()
+        email = clean(p.get("email"))
         if not email:
             continue
         pid = str(p.get("id") or email.split("@")[0]).strip()
-        rows.append({"id": pid, "label": str(p.get("label") or pid).strip(),
-                     "email": email, "phone": str(p.get("phone") or "").strip()})
+        rows.append({"id": pid, "label": clean(p.get("label")) or pid,
+                     "email": email, "phone": clean(p.get("phone"))})
     ids = {r["id"] for r in rows}
     chosen = default if default in ids else (rows[0]["id"] if rows else "")
     path = _path()
@@ -153,3 +166,44 @@ def apply_to_latex(tex: str, profile: Profile | None) -> str:
     if out != tex:
         log.info("résumé contact rewritten for profile %r", profile.id)
     return out
+
+
+def retarget(pk: str, profile: "Profile | None", stores=None) -> bool:  # noqa: ANN001
+    """Point an already-tailored résumé at a different profile.
+
+    The tailoring is the expensive part and it does not change: only the contact
+    line does. So this rewrites the saved .tex and re-renders the PDF, rather than
+    sending the job back through the tailor — switching identity on a whole board
+    should not cost a single token.
+
+    Returns True when a new PDF was written.
+    """
+    from tools.render import render_pdf
+
+    if stores is None:
+        from .stores import make_stores
+        stores = make_stores()
+    row = stores.tracking.get(pk) or {}
+    tex_key = row.get("resume_tex_key")
+    if not tex_key or not profile:
+        return False
+    try:
+        tex = stores.artifacts.get(tex_key).decode()
+    except Exception:  # noqa: BLE001
+        log.warning("no saved .tex for %s — cannot retarget", pk)
+        return False
+    updated = apply_to_latex(tex, profile)
+    if updated == tex:
+        return False
+    try:
+        pdf = render_pdf(updated)
+    except Exception:  # noqa: BLE001 — keep the good PDF rather than break the job
+        log.warning("retarget render failed for %s — keeping the previous PDF", pk,
+                    exc_info=True)
+        return False
+    stores.artifacts.put("resumes", f"{pk}.tex", updated.encode(), "text/x-tex")
+    key = stores.artifacts.put("resumes", f"{pk}.pdf", pdf, "application/pdf")
+    stores.tracking.set_status(pk, row.get("status", "tailored"),
+                               resume_s3_key=key, profile_id=profile.id)
+    log.info("retargeted %s to profile %r", pk, profile.id)
+    return True

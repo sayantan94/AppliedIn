@@ -1,4 +1,4 @@
-# AppliedIn: The Agentic Job-Application Workflow That Knows When to Stop
+# The Agentic Workflow That Tailors Your Resume and Automates Applications
 
 Applying to jobs is mostly retyping.
 
@@ -162,4 +162,3 @@ If you are building agents that interact with real websites, produce user-facing
 [github.com/sayantan94/AppliedIn](https://github.com/sayantan94/AppliedIn)
 
 Applications still go out under your name. Review them, respect employer terms, and keep the human boundary intact.
-

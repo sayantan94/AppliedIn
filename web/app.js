@@ -1614,8 +1614,10 @@ function wire() {
             ? '<span class="pr-tag">DEFAULT</span>' : ""}</div>
           <div class="pr-meta">${esc(p.email)}${p.phone ? " · " + esc(p.phone) : ""}</div>
         </div>
+        <button class="pr-act use" data-prof-all="${esc(p.id)}"
+          title="Re-render every tailored résumé with this profile's details, ready to apply. No model is called.">use for all</button>
         ${p.id === state.profileDefault ? "" :
-          `<button class="pr-act" data-prof-default="${esc(p.id)}" title="Make default">set default</button>`}
+          `<button class="pr-act" data-prof-default="${esc(p.id)}" title="Make default">default</button>`}
         <button class="pr-act del" data-prof-del="${esc(p.id)}" title="Remove">✕</button>
       </div>`).join("");
   }
@@ -1659,6 +1661,25 @@ function wire() {
   pm.addEventListener("click", (e) => {
     const mk = e.target.closest("[data-prof-default]");
     if (mk) { saveProfiles(state.profiles, mk.dataset.profDefault); return; }
+    const all = e.target.closest("[data-prof-all]");
+    if (all) {
+      if (demoGuard()) return;
+      const p = state.profiles.find((x) => x.id === all.dataset.profAll) || {};
+      if (!confirm(`Re-render every tailored résumé with ${p.label}'s details `
+                 + `(${p.email})?\n\nThe tailoring itself is kept — only the contact `
+                 + `line changes, so no model is called and nothing is re-written.`)) return;
+      all.textContent = "re-rendering…";
+      post("/actions/apply-profile-to-all", { profile_id: all.dataset.profAll })
+        .then((d) => {
+          all.textContent = "use for all";
+          if (d && d.ok) {
+            toast(`${d.rerendered} résumé(s) now go out as ${p.label}`
+                + (d.left_alone ? ` · ${d.left_alone} already applied, left alone` : ""));
+            reload();
+          } else toast((d && d.error) || "Couldn't re-render.");
+        });
+      return;
+    }
     const del = e.target.closest("[data-prof-del]");
     if (del) {
       const keep = state.profiles.filter((p) => p.id !== del.dataset.profDel);

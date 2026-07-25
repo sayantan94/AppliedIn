@@ -1986,3 +1986,5 @@ a.rowlk, button.rowlk { display: inline-block; }
 }
 .profpick select:hover { border-color: var(--scan); }
 .profpick-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.pr-act.use { color: var(--scan); border: 1px solid transparent; border-radius: 5px; }
+.pr-act.use:hover { border-color: currentColor; }

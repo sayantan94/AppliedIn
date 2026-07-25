@@ -504,18 +504,48 @@ def create_app() -> FastAPI:
         if profile_id and not prof.get(profile_id):
             return {"ok": False, "error": f"no profile {profile_id!r}"}
 
-        status = row.get("status")
-        retailor = bool(profile_id and status in ("tailored", "failed")
-                        and row.get("resume_s3_key"))
-        stores.tracking.set_status(pk, Status.FOUND if retailor else status,
-                                   profile_id=profile_id)
-        if retailor:
-            stores.queue.enqueue(stores.tailor_queue, {"pk": pk})
+        stores.tracking.set_status(pk, row.get("status"), profile_id=profile_id)
+        # Only the contact line changes, and the tailoring is already saved — so
+        # re-render from the stored .tex rather than sending the job back through
+        # the tailor. Switching identity costs nothing.
+        rendered = prof.retarget(pk, prof.resolve(profile_id), stores)
         from core.events import emit
         emit("running", pk=pk, agent="workflow",
              detail=(f"profile → {profile_id or 'default'}"
-                     + (" · re-tailoring so the résumé matches" if retailor else "")))
-        return {"ok": True, "profile_id": profile_id, "retailoring": retailor}
+                     + (" · résumé re-rendered to match" if rendered else "")))
+        return {"ok": True, "profile_id": profile_id, "rerendered": rendered}
+
+    @app.post("/actions/apply-profile-to-all")
+    def apply_profile_to_all(body: dict):
+        """Point every tailored job at one profile, re-rendering each résumé.
+
+        Changing who you apply as is a decision about the whole board more often
+        than about one job, and doing it job-by-job through the drawer is the kind
+        of chore that stops people using the feature at all. No model is called.
+        """
+        from core import profiles as prof
+
+        profile_id = str((body or {}).get("profile_id") or "")
+        profile = prof.resolve(profile_id)
+        if not profile:
+            return {"ok": False, "error": "no such profile"}
+        stores = make_stores(settings)
+        done, skipped = 0, 0
+        for row in stores.tracking.all():
+            pk = row.get("pk", "")
+            if str(pk).startswith("meta#") or not row.get("resume_tex_key"):
+                continue
+            if row.get("status") in ("applied", "applied_manual", "submitting"):
+                skipped += 1          # already sent — its identity is history now
+                continue
+            stores.tracking.set_status(pk, row.get("status"), profile_id=profile.id)
+            if prof.retarget(pk, profile, stores):
+                done += 1
+        from core.events import emit
+        emit("running", agent="workflow", pk="meta#profiles",
+             detail=f"{done} résumé(s) re-rendered as {profile.label}")
+        return {"ok": True, "profile": profile.id, "rerendered": done,
+                "left_alone": skipped}
 
     @app.get("/preferences")
     def get_preferences():
