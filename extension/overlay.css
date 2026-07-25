@@ -1,0 +1,3 @@
+/* Marks the fields AppliedIn filled, so a glance is enough to review them. */
+.appliedin-filled { outline: 2px solid rgba(63, 214, 143, .55) !important; outline-offset: 1px; }
+.appliedin-needs  { outline: 2px solid rgba(242, 177, 62, .75) !important; outline-offset: 1px; }

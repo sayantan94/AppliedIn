@@ -96,6 +96,45 @@ def _to_ui(row: dict, artifacts) -> dict:
     }
 
 
+def _pick_option(value: str, options: list) -> str:
+    """The option that MEANS `value` — never a bare substring match.
+
+    "No" is a substring of "North Korea", which is how a sanctions question once
+    resolved to the country option instead of the negative one. Exact match wins;
+    otherwise the value must appear as a whole word, longest option first so
+    "None of the above" is preferred over a shorter accidental hit.
+    """
+    import re
+
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    for o in options:
+        if str(o).strip().lower() == v:
+            return str(o)
+    for o in sorted(options, key=lambda x: len(str(x)), reverse=True):
+        if re.search(rf"\b{re.escape(v)}\b", str(o).lower()):
+            return str(o)
+    return ""
+
+
+def _split_name(label: str, full: str) -> str:
+    """First/Last name fields from a single 'Full name' fact.
+
+    Without this both fields receive the whole name, which is what a mapper does
+    when the profile holds one name and the form wants two.
+    """
+    parts = (full or "").split()
+    low = (label or "").lower()
+    if len(parts) < 2:
+        return full
+    if "last" in low or "surname" in low or "family name" in low:
+        return parts[-1]
+    if "first" in low or "given name" in low:
+        return parts[0]
+    return full
+
+
 def _render_preferences_yaml(prefs) -> str:  # noqa: ANN001
     """Write preferences.yaml with its documentation intact.
 
@@ -166,6 +205,19 @@ def create_app() -> FastAPI:
     app = FastAPI(title="AppliedIn")
     settings = get_settings()
 
+    # The browser extension is a DRIVER, not the app: it runs on the employer's
+    # page and calls back here for every decision. That means cross-origin
+    # requests from a chrome-extension:// origin, which the browser blocks by
+    # default. Scoped to a local server the owner runs themselves.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
     @app.get("/config.js")
     def config_js():
         # Live config: same-origin API, real data (not demo). Overrides web/config.js.
@@ -203,6 +255,140 @@ def create_app() -> FastAPI:
                 # `found` = discovered but not yet processed; the number the
                 # 'Process applications' button will act on.
                 "found_waiting": counts.get("found", 0)}
+
+    # ── Browser-extension ("assisted apply") API ─────────────────────────────
+    # The extension runs in the owner's OWN Chrome, so the employer sees a real
+    # session with real history rather than an automated browser — which is what
+    # trips bot detection. It reads the form, asks here what to put in it, fills,
+    # and leaves the person to review and submit. The LLM work stays server-side:
+    # the extension never holds a key and never invents an answer.
+
+    @app.get("/extension/context")
+    def extension_context(url: str = "", company: str = ""):
+        """Who this posting belongs to, plus the résumé and rules for the site."""
+        from discovery.handler import company_for_url
+        from tools.company_skills import load_skill
+
+        stores = make_stores(settings)
+        name = company or company_for_url(url) or ""
+        row = next((r for r in stores.tracking.all()
+                    if r.get("jd_url") and url and
+                    r["jd_url"].split("?")[0] in url), None)
+        if row and not name:
+            name = row.get("company", "")
+        skill = load_skill(url, name)
+        resume = None
+        if row and row.get("resume_s3_key"):
+            from urllib.parse import quote
+            resume = f"/artifact/{quote(row['resume_s3_key'], safe='/')}"
+        return {
+            "company": name,
+            "title": (row or {}).get("title", ""),
+            "pk": (row or {}).get("pk", ""),
+            "status": (row or {}).get("status", ""),
+            "resume_url": resume,
+            "resume_name": f"{(stores.answer_bank.all_facts(name) or {}).get('Full name', 'Resume')}"
+                           " Resume.pdf",
+            "site_rules": skill.notes,
+            "known_site": bool(skill.names),
+        }
+
+    @app.post("/extension/plan")
+    def extension_plan(body: dict):
+        """LLM-driven fill plan for the fields the extension found on the page.
+
+        Same mapper the pipeline uses: the model chooses WHICH approved fact
+        answers each field (or that it needs an essay), and values are substituted
+        here in code — so a field can only ever receive an owner-approved answer or
+        a drafted essay, never something the model made up.
+        """
+        from tools.browser_apply import (
+            _SAFE_OPTION_RX,
+            _SANCTIONS_RX,
+            _map_fields,
+            _safe_sanctions_answer,
+        )
+        from tools.narrative import draft_answer
+
+        url = (body or {}).get("url", "")
+        company = (body or {}).get("company", "")
+        fields = (body or {}).get("fields") or []
+        jd_text = (body or {}).get("jd_text", "")
+        stores = make_stores(settings)
+        facts = stores.answer_bank.all_facts(company) or {}
+
+        try:
+            mapped = _map_fields(fields, facts, company, jd_text)
+        except Exception as exc:  # noqa: BLE001 — degrade, never 500 the popup
+            return {"ok": False, "error": f"mapping failed: {exc}"}
+
+        by_label = {str(f.get("label", "")): f for f in fields}
+        values, essays, missing = {}, [], []
+        for label, key in (mapped or {}).items():
+            field = by_label.get(label) or {}
+            if key == "SKIP":
+                continue
+            if key == "ESSAY":
+                try:
+                    drafted = draft_answer(label, company, jd_text)
+                    answer = (drafted or {}).get("answer") or ""
+                except Exception:  # noqa: BLE001
+                    answer = ""
+                if answer:
+                    values[label] = answer
+                    essays.append(label)
+                else:
+                    missing.append(label)
+                continue
+            answer = facts.get(key, "")
+            if not answer:
+                missing.append(label)
+                continue
+            value = _split_name(label, str(answer)) if "name" in label.lower() else str(answer)
+            opts = [str(o) for o in (field.get("options") or [])]
+            if field.get("type") == "choice-group" and opts:
+                # A choice must end up as one of the ACTUAL options — an answer the
+                # form has no option for cannot be selected, and leaving generic
+                # wording ("No") invites the driver to substring-match it onto
+                # something else entirely ("North Korea").
+                value = _pick_option(value, opts) or value
+            # LAST word on a sanctions question, after the option is resolved:
+            # doing this earlier let a safe "No" be re-expanded into a country option.
+            safe = _safe_sanctions_answer(label, [value])
+            if safe and safe[0] != value:
+                value = safe[0]
+            if opts and value not in opts:
+                snapped = _pick_option(value, opts)
+                if not snapped and _SANCTIONS_RX.search(label or ""):
+                    snapped = next((o for o in opts if _SAFE_OPTION_RX.match(o)), "")
+                if snapped:
+                    value = snapped
+                elif field.get("type") == "choice-group":
+                    missing.append(label)   # no option means this answer — ask the owner
+                    continue
+            values[label] = value
+        return {"ok": True, "values": values, "essays": essays, "missing": missing,
+                "unanswered": [str(f.get("label")) for f in fields
+                               if f.get("required") and str(f.get("label")) not in values]}
+
+    @app.post("/extension/applied")
+    def extension_applied(body: dict):
+        """The owner confirmed they submitted it — record it on the board."""
+        pk = (body or {}).get("pk", "")
+        if not pk:
+            return {"ok": False, "error": "pk required"}
+        stores = make_stores(settings)
+        if not stores.tracking.get(pk):
+            return {"ok": False, "error": "unknown job"}
+        stores.tracking.set_status(
+            pk, Status.APPLIED,
+            confirmation_id=str((body or {}).get("confirmation") or
+                                "submitted via the browser extension")[:200],
+            gate_pending=None, gate_reason="")
+        from core.events import emit
+        emit("applied", pk=pk, agent="extension",
+             detail="submitted by hand via the extension")
+        return {"ok": True}
 
     @app.get("/job-log/{pk:path}")
     def job_log(pk: str, limit: int = 500):
@@ -562,8 +748,8 @@ def create_app() -> FastAPI:
         """Flip apply mode: 'gated' (approve each) / 'auto' (apply while asleep)."""
         from core import flags
         mode = (body.get("mode") or "").lower()
-        if mode not in ("gated", "auto"):
-            return {"ok": False, "note": "mode must be 'gated' or 'auto'"}
+        if mode not in ("gated", "auto", "assisted"):
+            return {"ok": False, "note": "mode must be 'gated', 'auto' or 'assisted'"}
         flags.set_flag("apply_mode", mode)
         return {"ok": True, "apply_mode": mode}
 

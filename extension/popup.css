@@ -1,0 +1,52 @@
+/* Same console language as the dashboard: calm, dark, Inter, colour used for
+   meaning only — green = done, amber = needs you, red = failed. */
+:root {
+  --bg: #101312; --panel: #151917; --card: #1a1f1c; --border: #262d28;
+  --fg: #e8ede9; --muted: #9fada3; --faint: #66716a;
+  --scan: #3fd68f; --run: #f2b13e; --bad: #f07b71; --ink: #08130d;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  width: 328px; margin: 0; padding: 14px;
+  background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 13px;
+}
+.hd { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.mark { display: grid; place-items: center; width: 30px; height: 30px;
+        border: 1px solid var(--border); border-radius: 9px; background: var(--card); }
+.name { font-weight: 700; letter-spacing: -0.01em; }
+.sub { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.sub.up { color: var(--scan); }
+.sub.down { color: var(--bad); }
+
+.job { background: var(--card); border: 1px solid var(--border);
+       border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.co { font-weight: 650; }
+.role { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.tag { font-family: var(--mono); font-size: 10px; letter-spacing: .03em;
+       padding: 2px 6px; border-radius: 5px; background: #202622; color: var(--muted); }
+.tag.ok { color: var(--scan); }
+
+.go { width: 100%; padding: 10px; border: 0; border-radius: 9px; cursor: pointer;
+      background: var(--scan); color: var(--ink); font-family: var(--sans);
+      font-weight: 650; font-size: 13px; }
+.go:disabled { background: #24312b; color: var(--faint); cursor: not-allowed; }
+.go.busy { background: var(--run); color: #221703; }
+
+.out { margin-top: 11px; border: 1px solid var(--border); border-radius: 10px;
+       background: var(--panel); padding: 9px 11px; }
+.row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 2px 0; }
+.row b { font-family: var(--mono); font-size: 11px; color: var(--scan); font-weight: 600; }
+.row.warn b { color: var(--run); }
+.row span { color: var(--muted); }
+.list { margin: 5px 0 0; padding-left: 15px; color: var(--run); font-size: 11.5px; line-height: 1.5; }
+
+.done { margin-top: 11px; }
+.hint { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin: 0 0 8px; }
+.ghost { width: 100%; padding: 8px; border-radius: 8px; cursor: pointer;
+         background: transparent; border: 1px solid var(--border); color: var(--fg);
+         font-family: var(--sans); font-size: 12.5px; }
+.ghost:hover { border-color: var(--scan); color: var(--scan); }
+.ft { margin-top: 10px; font-size: 10.5px; color: var(--faint); line-height: 1.5; }

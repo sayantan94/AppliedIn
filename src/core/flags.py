@@ -46,9 +46,22 @@ def set_flag(name: str, value: str) -> None:
 
 
 def apply_mode() -> str:
-    """'gated' (approve each apply) or 'auto' (apply overnight up to the cap)."""
+    """How an approved job gets submitted.
+
+      gated    — the pipeline drives a browser, you approve each apply (default)
+      auto     — the pipeline applies by itself up to the daily cap
+      assisted — the pipeline stops at TAILORED and you finish each application
+                 in your OWN browser with the extension. Slower per job, but the
+                 employer sees a real session instead of an automated one, which
+                 is what avoids the bot challenges that block the other modes.
+    """
     mode = get_flag("apply_mode", get_settings().apply_mode).lower()
-    return mode if mode in ("gated", "auto") else "gated"
+    return mode if mode in ("gated", "auto", "assisted") else "gated"
+
+
+def assisted() -> bool:
+    """True when applications are finished by hand via the browser extension."""
+    return apply_mode() == "assisted"
 
 
 def browser_headless() -> bool:

@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "AppliedIn — assisted apply",
+  "version": "0.1.0",
+  "description": "Fills a job application from your AppliedIn profile, in your own browser. You review and submit.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*",
+    "https://*.ashbyhq.com/*",
+    "https://*.greenhouse.io/*",
+    "https://*.lever.co/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_title": "AppliedIn",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

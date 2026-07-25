@@ -326,8 +326,8 @@ function renderMenuState() {
   pause.textContent = state.paused ? "paused" : "running";
   pause.className = "menu-state mono " + (state.paused ? "warn" : "on");
   const mode = $("#m-mode-state");
-  mode.textContent = state.mode === "auto" ? "auto ☾" : "gated";
-  mode.className = "menu-state mono " + (state.mode === "auto" ? "on" : "");
+  mode.textContent = { auto: "auto ☾", assisted: "assisted ⎋", gated: "gated" }[state.mode] || "gated";
+  mode.className = "menu-state mono " + (state.mode === "gated" ? "" : "on");
   const hl = $("#m-headless-state");
   if (hl) {
     hl.textContent = state.headless ? "headless" : "visible";
@@ -1047,14 +1047,18 @@ async function toggleHeadless() {
     : "Visible — you'll see the Chrome windows while it applies.");
 }
 
+const MODES = ["gated", "auto", "assisted"];
 async function toggleMode() {
   if (demoGuard()) return;
-  state.mode = state.mode === "auto" ? "gated" : "auto";
+  state.mode = MODES[(MODES.indexOf(state.mode) + 1) % MODES.length];
   renderDeck();
   await post("/actions/mode", { mode: state.mode });
-  toast(state.mode === "auto"
-    ? `Auto ☾ — applies jobs scoring ≥ ${state.autoMin} by itself.`
-    : "Gated — every application waits for your approval.");
+  toast({
+    auto: `Auto ☾ — applies jobs scoring ≥ ${state.autoMin} by itself.`,
+    gated: "Gated — every application waits for your approval.",
+    assisted: "Assisted — jobs stop at Tailored; finish them in your own browser "
+            + "with the extension. Slower, but employers see a real session.",
+  }[state.mode]);
 }
 async function resetPipeline() {
   if (demoGuard()) return;

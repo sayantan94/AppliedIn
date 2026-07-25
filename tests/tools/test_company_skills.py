@@ -133,3 +133,32 @@ async def test_success_wording_is_vetoed_while_the_form_still_needs_input():
             assert await _applied_signal(page, "http://x/", allow_vision=False)
         finally:
             await browser.close()
+
+
+# --- choice resolution ------------------------------------------------------
+
+def test_an_option_is_matched_by_meaning_not_substring():
+    """"No" is a substring of "North Korea".
+
+    A bare substring match once resolved a sanctions question's "No" onto the
+    sanctioned-country option — the single worst wrong answer on a form.
+    """
+    from server import _pick_option
+
+    sanctions = ["Citizen or permanent resident of Cuba, Iran, North Korea, or Syria",
+                 "Ordinarily a resident of Russia or Belarus", "None of the above"]
+    assert _pick_option("No", sanctions) == ""            # nothing means plain "No"
+    assert _pick_option("None of the above", sanctions) == "None of the above"
+    assert _pick_option("Yes", ["Yes", "No"]) == "Yes"
+    assert _pick_option("No", ["Yes", "No"]) == "No"
+    # The longer, correct option must win over a shorter accidental hit.
+    assert _pick_option("none of the above", sanctions) == "None of the above"
+
+
+def test_first_and_last_name_come_out_of_one_full_name():
+    from server import _split_name
+
+    assert _split_name("First Name*", "Sayantan Bhowmik") == "Sayantan"
+    assert _split_name("Last Name*", "Sayantan Bhowmik") == "Bhowmik"
+    assert _split_name("Preferred First Name*", "Sayantan Bhowmik") == "Sayantan"
+    assert _split_name("Full name", "Sayantan Bhowmik") == "Sayantan Bhowmik"

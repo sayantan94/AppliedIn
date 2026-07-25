@@ -2337,7 +2337,7 @@ _SANCTIONS_RX = re.compile(
     r"|\bbelarus\b|sanction|embargo|export control|restricted (?:country|party)",
     re.I)
 # Option wording that SAFELY answers such a question.
-_SANCTIONS_SAFE_RX = re.compile(
+_SAFE_OPTION_RX = _SANCTIONS_SAFE_RX = re.compile(
     r"^\s*(?:no|none of the above|not applicable|n/?a|neither|none)\b", re.I)
 
 

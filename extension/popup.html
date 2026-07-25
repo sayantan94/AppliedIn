@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>AppliedIn</title>
+  </head>
+  <body>
+    <header class="hd">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="20" height="20" fill="none"
+          stroke="#3fd68f" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11.5 37 L24 11 L36.5 37" /><path d="M17 27 L21.5 31.5 L31.5 20" />
+        </svg>
+      </span>
+      <div>
+        <div class="name">AppliedIn</div>
+        <div class="sub" id="server">checking the server…</div>
+      </div>
+    </header>
+
+    <section id="job" class="job" hidden>
+      <div class="co" id="co">—</div>
+      <div class="role" id="role">—</div>
+      <div class="tags" id="tags"></div>
+    </section>
+
+    <button id="fill" class="go" disabled>Fill this application</button>
+
+    <section id="out" class="out" hidden></section>
+
+    <section id="done" class="done" hidden>
+      <p class="hint">
+        Review every answer, then submit it yourself. If a security check appears,
+        clear it — this never touches one.
+      </p>
+      <button id="applied" class="ghost">I submitted it — mark applied</button>
+    </section>
+
+    <footer class="ft" id="ft"></footer>
+    <script src="popup.js"></script>
+  </body>
+</html>
