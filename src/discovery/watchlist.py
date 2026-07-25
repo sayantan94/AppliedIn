@@ -41,6 +41,11 @@ class Preferences(BaseModel):
     remote_only: bool = False
     seniority: list[str] = []
     min_match_score: int = 7
+    # How many NEW postings one company run may hand to the pipeline. The
+    # relevance screen returns them best-first, so this keeps a run to the top few
+    # rather than tailoring dozens of marginal roles (a big board can match 85).
+    # 0 = no cap.
+    max_new_per_run: int = 5
     github: str = ""  # candidate's GitHub profile — extra context for tailoring
     notes: str = ""   # free-text hard constraints, read by BOTH the title screen
                       # and the JD scorer (e.g. no clearance, WA/CA only)

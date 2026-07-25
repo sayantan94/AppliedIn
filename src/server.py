@@ -151,6 +151,10 @@ notes: |
 # Stage-2: minimum LLM relevance score (0-10) for a job to proceed to apply.
 min_match_score: {int(prefs.min_match_score)}
 
+# How many NEW postings one company run hands to the pipeline, best-first.
+# Tailoring is the expensive stage and a big board can match dozens. 0 = no cap.
+max_new_per_run: {int(prefs.max_new_per_run)}
+
 # Candidate's public GitHub — the tailor reads the repos (names, languages,
 # topics) as extra context to reword bullets toward each JD.
 github: {prefs.github or '""'}

@@ -1477,6 +1477,7 @@ function wire() {
       $("#pf-seniority").value = (p.seniority || []).join(", ");
       $("#pf-locations").value = (p.locations || []).join(", ");
       $("#pf-score").value = p.min_match_score ?? 7;
+      $("#pf-topn").value = p.max_new_per_run ?? 5;
       $("#pf-notes").value = p.notes || "";
       $("#pf-remote").checked = !!p.remote_only;
       state.prefsGithub = p.github || "";
@@ -1492,6 +1493,7 @@ function wire() {
       seniority: csv($("#pf-seniority").value),
       locations: csv($("#pf-locations").value),
       min_match_score: Number($("#pf-score").value || 7),
+      max_new_per_run: Number($("#pf-topn").value || 0),
       notes: $("#pf-notes").value,
       remote_only: $("#pf-remote").checked,
       github: state.prefsGithub || "",

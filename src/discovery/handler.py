@@ -92,6 +92,14 @@ def discover_company(
     wm_row = tracking.get(_watermark_pk(company.name))
     if wm_row is None:  # first run — cap the backfill
         matched = matched[:BACKFILL_CAP]
+    # Take only the best few per run. Tailoring is the expensive stage, and a big
+    # board can match dozens of roles that are merely acceptable; the relevance
+    # screen already returns them best-first.
+    top_n = getattr(prefs, "max_new_per_run", 0) or 0
+    if top_n > 0 and len(matched) > top_n:
+        log.info("%s: keeping the top %d of %d matches this run",
+                 company.name, top_n, len(matched))
+        matched = matched[:top_n]
 
     enqueued, new_jobs = 0, []
     for job in matched:
