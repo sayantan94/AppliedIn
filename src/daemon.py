@@ -119,7 +119,20 @@ def _worker_loop() -> None:
         time.sleep(POLL_INTERVAL)
 
 
-_APPLY_LANES = 3  # concurrent applications (each on its own Chrome profile)
+def _apply_lanes() -> int:
+    """How many applications may run at once.
+
+    The Chrome engine acts in the owner's ONE browser, so lanes cannot be
+    isolated the way separate Playwright profiles were: two sessions clicking in
+    the same window interleave and both fail. Anything else keeps the old
+    concurrency.
+    """
+    from core.config import get_settings
+
+    return 1 if (get_settings().apply_engine or "").lower() == "chrome" else 3
+
+
+_APPLY_LANES = _apply_lanes()
 
 
 def _apply_loop() -> None:

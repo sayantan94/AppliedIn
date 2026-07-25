@@ -158,7 +158,22 @@ async def run_task(task: str, *, report_key: str, model: str = "",
     if not report:
         return {}, ("The Chrome session ended without a structured result, so what "
                     "it did is unknown. Check the browser.")
+    # The session's own account of what it did, so the owner can read the whole
+    # thing rather than the one-line outcome.
+    report.setdefault("_transcript", _transcript(stdout))
     return report, ""
+
+
+def _transcript(stdout: str) -> str:
+    """Everything the session said, for the job log."""
+    try:
+        env = json.loads(stdout)
+        text = env.get("result") or env.get("text") or ""
+    except Exception:  # noqa: BLE001
+        text = stdout
+    if isinstance(text, list):
+        text = " ".join(str(b.get("text", "")) for b in text if isinstance(b, dict))
+    return str(text)[:20000]
 
 
 def resume_dirs(resume_path: str) -> list[str]:
@@ -302,6 +317,7 @@ honest:
 4. Free text should be grounded in the owner's real work from the answers above,
    written in plain sentences. Do not use dashes as connectors. Make it
    genuinely useful to a reader deciding whether to interview them.
+5. Remember to click each text box / radio button / checkbox after selecting
 
 When the form is complete, submit it and then find out what happened. Submitting
 often navigates somewhere: wait for the page to settle, read the page you have
@@ -309,6 +325,9 @@ ENDED UP ON, and scroll it — a confirmation is frequently on that destination
 rather than where you clicked. Only report "blocked" once you have actually looked
 at where you landed. If you genuinely cannot find a confirmation, say so plainly
 and say what the final page was, so the owner knows where to check.
+
+When you are completely finished, CLOSE the tabs you opened. The owner is working
+in this browser; leaving your tabs behind makes them clean up after you.
 
 Then end your reply with ONLY this JSON object and nothing after it:
 
@@ -383,6 +402,13 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     )
     if problem:
         return {"status": "unknown", "detail": problem}
+
+    # The whole account, into the job's feed. The one-line outcome says whether it
+    # worked; this says what it did, which is what you want when it did not.
+    transcript = str(report.pop("_transcript", "") or "").strip()
+    if transcript:
+        for para in [p.strip() for p in transcript.split("\n\n") if p.strip()][:40]:
+            emit("running", pk=pk, agent="browser", url=url, detail=para[:400])
 
     return classify(report)
 
