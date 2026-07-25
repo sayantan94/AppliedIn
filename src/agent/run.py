@@ -28,7 +28,7 @@ from .graph import root_agent
 
 log = get_logger(__name__)
 _APP = "appliedin"
-_USER = "sayantan"
+_USER = "owner"   # ADK session namespace — one local user per install
 
 
 def _session_service():

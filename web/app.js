@@ -1377,8 +1377,8 @@ function demoResume(r) {
     : /data/i.test(r.title) ? "data platforms" : "backend systems";
   const skills = ["Python", "Go", "AWS", "DynamoDB", "Kafka", "Postgres", "Kubernetes", "gRPC"];
   return `<div class="resume">
-    <h1>Sayantan Bhowmik</h1>
-    <div class="r-contact">Backend Engineer · sayantan.bhowmik94@gmail.com · github.com/sayantan</div>
+    <h1>Alex Rivera</h1>
+    <div class="r-contact">Backend Engineer · alex.rivera@example.com · github.com/your-handle</div>
     <p class="r-lead">Backend engineer focused on ${focus}. Tailored for
       <b>${esc(r.company)} — ${esc(r.title)}</b> (resume ${esc(r.resume_version)}).</p>
     <h2>Experience</h2>

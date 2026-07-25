@@ -20,7 +20,8 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from playwright.async_api import async_playwright  # noqa: E402
 
@@ -40,8 +41,7 @@ from tools.browser_apply import (  # noqa: E402
 DEFAULT_URL = ("https://www.databricks.com/company/careers/engineering---pipeline/"
                "senior-software-engineer---fullstack-6544403002?gh_jid=6544403002")
 
-OUT = Path("/private/tmp/claude-501/-Users-sayantan/"
-           "36533b0e-a43f-4ab9-b74b-1d1c323f1e31/scratchpad/filled_form.png")
+OUT = ROOT / ".local" / "form-demo" / "filled_form.png"
 
 _STOP = {"the", "your", "you", "please", "a", "an", "of", "to", "for", "and", "or",
          "is", "in", "on", "this", "that", "what", "which", "are", "will", "do",

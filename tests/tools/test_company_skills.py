@@ -158,7 +158,7 @@ def test_an_option_is_matched_by_meaning_not_substring():
 def test_first_and_last_name_come_out_of_one_full_name():
     from server import _split_name
 
-    assert _split_name("First Name*", "Sayantan Bhowmik") == "Sayantan"
-    assert _split_name("Last Name*", "Sayantan Bhowmik") == "Bhowmik"
-    assert _split_name("Preferred First Name*", "Sayantan Bhowmik") == "Sayantan"
-    assert _split_name("Full name", "Sayantan Bhowmik") == "Sayantan Bhowmik"
+    assert _split_name("First Name*", "Alex Rivera") == "Alex"
+    assert _split_name("Last Name*", "Alex Rivera") == "Rivera"
+    assert _split_name("Preferred First Name*", "Alex Rivera") == "Alex"
+    assert _split_name("Full name", "Alex Rivera") == "Alex Rivera"

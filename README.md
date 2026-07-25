@@ -1,140 +1,179 @@
 # AppliedIn
 
-Autonomous, agentic job-application pipeline. It finds jobs, tailors your résumé
-to each one, and applies through the company's portal — pausing for you only at
-the moments that need a human (approving a submission, or a fact it hasn't been
-told). One codebase, two modes: local on your Mac, or cloud on AWS.
+Applying to jobs is mostly retyping. The same name, the same phone number, the
+same "why are you interested in this role" — a hundred times, until you stop
+applying to good roles because the form is tedious.
+
+AppliedIn does the retyping. It finds roles worth your time, tailors your résumé
+to each one, fills the employer's form from answers you approved, and stops for
+you only where a person is genuinely required.
+
+**It runs entirely on your own machine.** Your résumé, your answers and your
+history stay on your disk. Nothing is uploaded anywhere except to the employer
+you are applying to.
 
 ![AppliedIn — the pipeline board: jobs flow found → tailored → applied, with a live feed of every agent step](docs/screenshots/01-pipeline.png)
 
-*The console (demo data): jobs flow **found → tailored → applied** across the
-board, every agent step streams to the live feed, and the pipeline stops for
-you exactly where you want it to — a one-click **▶ Apply** on each tailored
-job, or fully automatic while you sleep.*
+*Jobs move **found → tailored → applied**. Every step streams to the live feed,
+so you can always see what it did and why.*
 
-## How it works
+---
 
-The pipeline is Google ADK agents over a durable queue. Discovery finds jobs and
-enqueues them; each job then runs through a sequential agent graph:
+## ⚠️ For learning purposes only
 
-- **score** — an LLM rates fit 0–10 against your résumé + the JD; anything below
-  your `min_match_score` is skipped before any tailoring is wasted on it.
-- **tailor → critic** — a light-touch loop rewords the résumé's bullets toward
-  the JD's vocabulary (never inventing facts, never touching your titles or
-  summary), compiles it to PDF (Tectonic), and saves it — with a "what changed"
-  diff.
-- **apply** — human-gated by default (approve first); flip **auto ☾** and jobs
-  scoring ≥ your threshold apply themselves, up to a daily cap, while you sleep.
-  The browser uploads the tailored résumé and fills every field from your approved
-  facts; a **writer** model drafts any free-text answers ("why this role?") from
-  your résumé + GitHub. If a required field is genuinely unknown, or a CAPTCHA
-  blocks the submit, it stops and asks you — your answer is banked as a fact and
-  never asked again.
+This is a personal project published to learn from and build on — not a product,
+a service, or advice.
 
-Everything streams to a live dashboard — every agent step's input and output,
-grouped by job, plus a screenshot of what the browser saw.
+- **Applications go out under your name.** Read them before they are sent. An
+  application you didn't check is still one you signed.
+- **Employers' terms may prohibit automated applications.** Check them. Where you
+  point this, and whether you should, is your call and your responsibility.
+- **It never solves CAPTCHAs or bot checks.** When one appears the run stops and
+  hands you the page. That boundary is deliberate — please leave it in.
+- **No warranty.** It gets things wrong. The failure modes are documented rather
+  than hidden, which is the most useful thing about reading the code.
+
+---
+
+## What it actually does
+
+- **Finds roles** on your watchlist's job boards, screened against what you
+  said you want — titles, seniority, locations, hard rules like "no security
+  clearance". Ranked, so Seattle beats San Francisco if that's your preference.
+- **Tailors your résumé** per job: rewords bullets toward the posting's own
+  vocabulary, never inventing anything and never touching your job titles.
+  Compiles to PDF, and shows you a diff of exactly what changed.
+- **Fills the form** — name, contact, work authorisation, the awkward dropdowns,
+  and drafts the free-text answers from your résumé and GitHub.
+- **Stops when it should.** An unknown field, a login wall or a security check
+  becomes a question for you, and your answer is remembered so it is never asked
+  twice.
+
+## Getting started
+
+```bash
+cp .env.example .env          # paste your key: OPENAI_API_KEY=sk-...
+./setup.sh                    # venv, deps, Redis, Tectonic, Playwright
+./appliedin start             # → http://127.0.0.1:8787
+```
+
+Two things to set up first:
+
+1. **Your résumé** — put its LaTeX in `resume/base.tex`. This file is
+   git-ignored, and the tailor only ever re-words it.
+2. **What you want** — employers in `config/watchlist.yaml`, and your criteria in
+   the dashboard's **Job preferences** panel (titles, keywords, locations, the
+   score bar, and free-text rules).
+
+Then press **Discover**, and **Process** when jobs appear.
+
+```bash
+./appliedin start | stop | status | logs   # daemon lifecycle
+./appliedin discover | work | run          # one-shot passes, no server
+./appliedin resume <pk> "<answer>"         # answer a gate from the CLI
+```
+
+## How much it applies is up to you
+
+| Mode | What happens |
+| --- | --- |
+| **Gated** *(default)* | Tailors everything, applies to nothing until you press ▶ Apply. |
+| **Auto** | Applies by itself to jobs scoring above your bar, up to a daily cap. |
+| **Assisted** | Stops at tailored; the [browser extension](extension/) finishes each one in your own Chrome. |
+
+**Assisted** is worth understanding. Employers increasingly challenge automated
+browsers — one posting will go through untouched while the next demands a
+security code. In your own browser, with your own session, that challenge usually
+never appears; when it does, you are already there to clear it. The extension
+opens each waiting application, fills it, and leaves you the check and Submit.
+
+## Under the hood
+
+Google ADK agents over a durable queue.
 
 ```mermaid
 sequenceDiagram
-    participant Cron as Daemon / EventBridge
+    participant Cron as Daemon
     participant Disc as Discovery
-    participant Q as Queue (Redis · SQS)
-    participant Pipe as Apply pipeline (ADK)
-    participant BU as browser-use
-    participant Store as Store (Redis·DDB + FS·S3)
+    participant Q as Queue
+    participant Pipe as Pipeline (ADK)
+    participant Web as Browser
     participant You
 
-    Cron->>Disc: discover (feeds + browser crawl)
-    Disc->>Store: dedup (put_new + seen.json)
-    Disc->>Q: enqueue {pk}
-    Q->>Pipe: job {pk}
-    Pipe->>Pipe: score (skip if below threshold)
+    Cron->>Disc: discover (board feeds + crawl)
+    Disc->>Q: enqueue new postings (deduped)
+    Q->>Pipe: job
+    Pipe->>Pipe: score — skip below your bar
     Pipe->>Pipe: tailor + critic → render PDF
-    Pipe->>Store: save résumé + diff
-    Pipe->>You: gate — "ready to apply?"
+    Pipe->>You: "ready to apply?"
     You->>Pipe: approve
-    Pipe->>BU: fill + submit (approved answers only)
-    alt missing answer / account / CAPTCHA
-        BU-->>You: ask, then bank the answer as a fact
+    Pipe->>Web: fill + submit (approved answers only)
+    alt security check, login wall, unknown field
+        Web-->>You: hand off — you finish it
     end
-    Pipe->>Store: status = applied
+    Pipe->>You: confirmation captured
 ```
 
-## Models
+### Models
 
-Every stage runs on the model that fits it — cheap where the judgment is
-mechanical, stronger where writing quality matters. Each is a full LiteLLM string,
-so you can mix providers, and each is overridable by its own `APPLIEDIN_*_MODEL`
-env var (`APPLIEDIN_ORCHESTRATOR_MODEL` is the base the agents fall back to).
+One key, one model, every stage — all defaulting to **`openai/gpt-5-mini`**.
+Each is a full LiteLLM string, so any stage can point at another provider without
+touching code.
 
-| Stage | What it does | Default model | Env var |
-| --- | --- | --- | --- |
-| Relevance | stage-1 title screen | `openai/gpt-5-mini` | `APPLIEDIN_RELEVANCE_MODEL` → orchestrator |
-| Scorer | rate fit 0–10 vs your résumé | `openai/gpt-5-mini` | `APPLIEDIN_SCORER_MODEL` → orchestrator |
-| Tailor | reword the résumé for the JD | `anthropic/claude-haiku-4-5` | `APPLIEDIN_TAILOR_MODEL` |
-| Critic | review the tailored résumé | `anthropic/claude-haiku-4-5` | `APPLIEDIN_CRITIC_MODEL` |
-| Writer | draft free-text answers / essays | `anthropic/claude-sonnet-4-6` | `APPLIEDIN_WRITER_MODEL` |
-| Applier / field-mapper | orchestrate the apply | `openai/gpt-5-mini` | `APPLIEDIN_ORCHESTRATOR_MODEL` |
-| Browser | drive Chrome (crawl + apply) | `gpt-5-mini` | `APPLIEDIN_BROWSER_MODEL` |
-
-The split in one line: **gpt-5-mini** for the high-volume mechanical work
-(screening, scoring, field-mapping, driving the browser), **Haiku** for résumé
-writing, **Sonnet** for the essays — they must read well and run rarely. The
-browser model is deliberately separate from orchestration; a stronger vision model
-(e.g. `claude-sonnet-4-6`) picks tricky dropdowns more reliably if you want it.
-
-`APPLIEDIN_APPLY_ENGINE=agent` (the default) runs the unified engine: browser-use
-fills the form (uploads the résumé, types fields, picks dropdowns by vision, drafts
-essays) and a deterministic finalize step submits, reads validation errors, and
-self-heals — handing off to you only for a CAPTCHA or a genuinely unknown field.
-
-## Two modes (same code)
-
-| | Local (your Mac) | Cloud (AWS) |
+| Stage | What it does | Env var |
 | --- | --- | --- |
-| Store | Redis | DynamoDB |
-| Queue | Redis list | SQS |
-| Artifacts | filesystem | S3 |
-| LLMs | per-stage mix (see [Models](#models)) | same models via Bedrock/hosted |
-| Triggers | `daemon` (cron + queue loop + web) | EventBridge + SQS |
-| UI | localhost | Vercel |
+| Relevance | first-pass title screen | `APPLIEDIN_RELEVANCE_MODEL` |
+| Scorer | rate fit 0–10 against your résumé | `APPLIEDIN_SCORER_MODEL` |
+| Tailor | reword the résumé for the posting | `APPLIEDIN_TAILOR_MODEL` |
+| Critic | review the tailored résumé | `APPLIEDIN_CRITIC_MODEL` |
+| Writer | draft free-text answers | `APPLIEDIN_WRITER_MODEL` |
+| Field mapper | match form fields to your answers | `APPLIEDIN_ORCHESTRATOR_MODEL` |
+| Browser | drive Chrome when a form needs vision | `APPLIEDIN_BROWSER_MODEL` |
 
-`APPLIEDIN_MODE` picks the backends via `core/stores.py`; nothing else changes.
+Unset stages fall back to `APPLIEDIN_ORCHESTRATOR_MODEL`, so one variable moves
+everything. A stronger model for the writer (essays) is the usual first upgrade.
 
-## Run locally
+`APPLIEDIN_APPLY_ENGINE` is `scripted` by default — a deterministic Playwright
+pipeline with no model in the click loop. `agent` hands the form to browser-use
+instead: slower and pricier, but it copes with layouts the scripted path can't
+read.
+
+### Site quirks
+
+Some employers need rules the generic path can't infer — a form inside an iframe,
+a combobox that ignores typed text, a confirmation with unusual wording. Each is
+one markdown file in [`src/agent/skills/site-quirks/`](src/agent/skills/site-quirks/),
+injected into the apply for that site only. Adding a site is one file, no code.
+
+## Checking it without spending anything
+
+These drive the real code paths with Playwright and **no model calls**, so they
+cost nothing to run as often as you like:
 
 ```bash
-# 1. cp .env.example .env, then paste your Anthropic key: ANTHROPIC_API_KEY=sk-ant-...
-# 2. save YOUR résumé's LaTeX to resume/base.tex (git-ignored; the tailor edits
-#    this — it never invents facts, only re-emphasizes)
-# 3. list company career URLs in config/watchlist.yaml + your criteria in
-#    config/preferences.yaml
-./setup.sh            # one-time: venv, deps, Redis, Tectonic, Playwright/Chromium
-./appliedin start     # → dashboard at http://127.0.0.1:8787
+.venv/bin/python scripts/verify_form_targeting.py   # finds the real form, ignores cookie banners
+.venv/bin/python scripts/verify_submit_path.py      # fill → submit → confirmation, local fixture
+.venv/bin/python scripts/fill_form_demo.py <url>    # fills a real posting, screenshots, never submits
+.venv/bin/python scripts/survey_company_forms.py    # what each employer's form will demand
 ```
-
-Daemon + CLI:
-
-```bash
-./appliedin start | stop | status | logs      # background daemon lifecycle
-./appliedin discover | work | run             # one-shot passes (no server)
-./appliedin resume <pk> "<answer>"            # answer a gate from the CLI
-```
-
-`setup.sh` installs everything; `appliedin start` runs the daemon detached — it
-serves the dashboard, finds jobs on a schedule, tailors + applies, and waits on
-you at gates (your answers become facts in `.local/facts.md`). Per-job output
-(the JD + tailored résumé) lands in `output/` for inspection.
 
 ## Layout
 
 ```
-src/core/       models, config, stores factory, storage interfaces + local/cloud backends
-src/discovery/  feed adapters, ATS resolver, browser crawler, agentic relevance filter
-src/tools/      résumé render/validate/diff, JD fetch, browser-use (apply/crawl/llm),
-                per-job output, seen-list, github context, credentials, gmail
-src/agent/      ADK: graph.py (score→tailor→apply), finder.py, run.py, skills/
-src/daemon.py   local always-on (cron + queue + web)   src/server.py  dashboard + API
-src/cli.py      start/stop/status/logs/…               src/pipeline.py  find→queue→apply
-web/            live dashboard (Logs, gates, résumé PDF + diff)   infra/  AWS CDK
+src/core/       models, config, stores factory, storage backends
+src/discovery/  board feed adapters, ATS resolver, crawler, relevance filter
+src/tools/      résumé render/diff, JD fetch, the browser apply engine
+src/agent/      ADK graph (score→tailor→apply), skills/, site-quirks/
+src/daemon.py   the always-on process (discovery + workers + web)
+src/server.py   dashboard, API, extension endpoints
+web/            the dashboard          extension/  assisted-apply driver
+scripts/        no-cost verification and survey tools
 ```
+
+## Requirements
+
+Python 3.12, Redis, Chrome, and an OpenAI API key. `setup.sh` handles the rest.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

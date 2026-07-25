@@ -36,7 +36,7 @@ def test_raise_gate_persists_sets_status_and_notifies(applications_table, artifa
     artifacts = ArtifactStore(artifacts_bucket)
     notifier = FakeNotifier()
     pk = _seed_job(tracking)
-    fieldmap = {"First Name": "Sayantan"}
+    fieldmap = {"First Name": "Alex"}
     snapshot = {"engine": "scripted", "fields": [{"label": "First Name"}]}
 
     raise_gate(

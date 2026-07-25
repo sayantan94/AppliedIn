@@ -47,17 +47,19 @@ class Settings(BaseSettings):
     tailor_queue_url: str = "tailor"
     apply_queue_url: str = "apply"
 
-    # LLM provider follows the mode (same as the data stores):
-    #   local -> Anthropic API (ANTHROPIC_API_KEY)
-    #   cloud -> Amazon Bedrock
-    # Both point at the same Claude Haiku; only the transport differs.
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    # LLM. Every stage runs OpenAI by default — one key to get started, and one
+    # model that is cheap enough to score and tailor a whole backlog. Any stage
+    # can be pointed elsewhere with its own env var (see agent_model below);
+    # LiteLLM handles the provider prefix, so "anthropic/claude-…" or
+    # "openrouter/…" work without code changes.
+    openai_model: str = "openai/gpt-5-mini"
+    # Cloud mode reaches the same class of model through Bedrock.
     bedrock_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     # browser-use (crawl + apply) drives a real browser and needs a model that
     # reliably emits structured tool actions. Only the browser-use calls use this;
     # orchestration models are set by orchestrator_model / the per-agent overrides.
-    browser_model: str = "gpt-4.1-mini"
+    browser_model: str = "gpt-5-mini"
     # Apply engine: "agent" = browser-use (LLM drives, using our deterministic
     # helper tools) — swap browser_model to change the driver. "scripted" = pure
     # Playwright pipeline (no LLM in the click loop).
@@ -78,19 +80,16 @@ class Settings(BaseSettings):
     assist_wait_seconds: int = 21600  # hold the human-handoff window ~6h — closing it releases
 
     @property
-    def llm_provider(self) -> str:
-        return "anthropic" if self.mode == "local" else "bedrock"
-
-    @property
     def llm_model(self) -> str:
-        return self.anthropic_model if self.mode == "local" else self.bedrock_model
+        """The mode's default model, already a full LiteLLM string."""
+        return self.openai_model if self.mode == "local" else f"bedrock/{self.bedrock_model}"
 
     @property
     def litellm_model(self) -> str:
-        """Base model string for ADK/LiteLLM. Prefers the configured orchestrator
-        model so EVERY path — the agent fallback AND direct users like the discovery
-        crawler — uses it; only falls back to the mode default if it's unset."""
-        return self.orchestrator_model or f"{self.llm_provider}/{self.llm_model}"
+        """Base model for ADK/LiteLLM. The configured orchestrator model wins, so
+        EVERY path — the agent fallback and direct users like the discovery
+        crawler — follows one setting; the mode default is only the fallback."""
+        return self.orchestrator_model or self.llm_model
 
     # Base model for ALL orchestration agents (a full LiteLLM string, e.g.
     # "openai/gpt-4.1-mini"). Empty => the mode default (litellm_model). The

@@ -165,8 +165,8 @@ async def full_submit(browser, base: str, rep: Report) -> None:  # noqa: ANN001
         rep.check(frame is not page, "works inside the embedded form")
 
         fields = await frame.evaluate(_READ_FORM_JS)
-        mapping = {"First Name*": "Sayantan", "Last Name*": "Bhowmik",
-                   "Email*": "sayantanbhow@gmail.com", "Phone*": "4132758723",
+        mapping = {"First Name*": "Alex", "Last Name*": "Rivera",
+                   "Email*": "alex.rivera@example.com", "Phone*": "5551234567",
                    "Location (City)*": "Seattle"}
         await _fill_human(frame, mapping)
         await _fix_fields(frame, {"Are you legally authorized to work in the country "
@@ -196,9 +196,9 @@ async def full_submit(browser, base: str, rep: Report) -> None:  # noqa: ANN001
         rep.check(bool(signal), "confirmation detected after submit", str(signal))
 
         # What the SERVER actually received — the part a screenshot cannot show.
-        rep.check(RECEIVED.get("first") == "Sayantan" and RECEIVED.get("last") == "Bhowmik",
+        rep.check(RECEIVED.get("first") == "Alex" and RECEIVED.get("last") == "Rivera",
                   "server received the name", f"{RECEIVED.get('first')} {RECEIVED.get('last')}")
-        rep.check(RECEIVED.get("email") == "sayantanbhow@gmail.com",
+        rep.check(RECEIVED.get("email") == "alex.rivera@example.com",
                   "server received the email", RECEIVED.get("email", ""))
         rep.check(RECEIVED.get("auth") == "Yes",
                   "server received the authorization answer", RECEIVED.get("auth", ""))

@@ -25,8 +25,8 @@ export const applications = [
     confirmation_id: "GH-8842190", submitted_at: min(14), updated_at: min(14),
     jd_excerpt: "We're looking for a staff engineer to own reliability of the payments ledger…",
     fields: [
-      { label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" },
-      { label: "Email", value: "sayantan.bhowmik94@gmail.com", type: "text", confidence: "high" },
+      { label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" },
+      { label: "Email", value: "alex.rivera@example.com", type: "text", confidence: "high" },
       { label: "Notice period", value: "30 days", type: "text", confidence: "high" },
       { label: "Desired salary", value: "$240,000", type: "text", confidence: "high" },
       ...eeo,
@@ -40,7 +40,7 @@ export const applications = [
     confirmation_id: null, submitted_at: null, updated_at: min(41),
     jd_excerpt: "You'll work on the core platform team building primitives other teams rely on…",
     fields: [
-      { label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" },
+      { label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" },
       { label: "Why do you want to work at Ramp?", value: "(awaiting your answer)", type: "text", confidence: "low" },
       { label: "Notice period", value: "30 days", type: "text", confidence: "high" },
       ...eeo,
@@ -54,8 +54,8 @@ export const applications = [
     confirmation_id: null, submitted_at: null, updated_at: min(3),
     jd_excerpt: "Product engineers at Linear own features end to end…",
     fields: [
-      { label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" },
-      { label: "Portfolio / GitHub", value: "github.com/sayantan", type: "text", confidence: "high" },
+      { label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" },
+      { label: "Portfolio / GitHub", value: "github.com/your-handle", type: "text", confidence: "high" },
       ...eeo,
     ],
     timeline: tl([["Discovered", 40], ["Tailored · score 8", 20], ["Submitting…", 3, false]]),
@@ -66,7 +66,7 @@ export const applications = [
     resume_version: "v4-infra", resume_url: "#", jd_url: "#", screenshot_url: null,
     confirmation_id: null, submitted_at: null, updated_at: min(8),
     jd_excerpt: "Own the infrastructure that powers millions of deployments…",
-    fields: [{ label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" }, ...eeo],
+    fields: [{ label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" }, ...eeo],
     timeline: tl([["Discovered", 22], ["Tailored · score 7", 8, false]]),
   },
   {
@@ -83,7 +83,7 @@ export const applications = [
     resume_version: "v3-data", resume_url: "#", jd_url: "#", screenshot_url: "#",
     confirmation_id: null, submitted_at: null, updated_at: min(62),
     jd_excerpt: "Build the data platform powering Notion's analytics…",
-    fields: [{ label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" }, ...eeo],
+    fields: [{ label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" }, ...eeo],
     timeline: tl([["Discovered", 140], ["Tailored · score 7", 120], ["Gated: no account", 62, false]]),
   },
   {
@@ -92,7 +92,7 @@ export const applications = [
     resume_version: "v4-payments", resume_url: "#", jd_url: "#", screenshot_url: "#",
     confirmation_id: "GH-7710233", submitted_at: min(120), updated_at: min(120),
     jd_excerpt: "Lead the payments platform serving millions of hosts and guests…",
-    fields: [{ label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" },
+    fields: [{ label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" },
       { label: "Desired salary", value: "$250,000", type: "text", confidence: "high" }, ...eeo],
     timeline: tl([["Discovered", 400], ["Tailored · score 8", 300], ["Submitted", 120]]),
   },
@@ -102,7 +102,7 @@ export const applications = [
     resume_version: "v4-applied", resume_url: "#", jd_url: "#", screenshot_url: null,
     confirmation_id: "manual", submitted_at: min(200), updated_at: min(200),
     jd_excerpt: "Ship applied AI products used by hundreds of millions…",
-    fields: [{ label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" }, ...eeo],
+    fields: [{ label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" }, ...eeo],
     timeline: tl([["Discovered", 520], ["Tailored · score 9", 420], ["CAPTCHA — applied manually", 200]]),
   },
   {
@@ -111,7 +111,7 @@ export const applications = [
     resume_version: "v4-dist", resume_url: "#", jd_url: "#", screenshot_url: null,
     confirmation_id: null, submitted_at: null, updated_at: min(30),
     jd_excerpt: "Work on the distributed query engine at petabyte scale…",
-    fields: [{ label: "Full name", value: "Sayantan Bhowmik", type: "text", confidence: "high" }, ...eeo],
+    fields: [{ label: "Full name", value: "Alex Rivera", type: "text", confidence: "high" }, ...eeo],
     timeline: tl([["Discovered", 60], ["Tailored · score 9", 40], ["Daily cap reached — parked", 30, false]]),
   },
   {

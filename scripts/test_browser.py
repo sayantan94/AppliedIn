@@ -194,7 +194,7 @@ async def run_company(company: str, urls: list) -> None:
     facts = make_stores().answer_bank.all_facts(company)
     facts_str = "\n".join(f"- {q}: {a}" for q, a in facts.items() if a) or "(none)"
     resume_pdf = _find_resume_pdf()
-    upload_path = _clean_resume_copy(resume_pdf, facts.get("Full name") or "Sayantan Bhowmik") if resume_pdf else ""
+    upload_path = _clean_resume_copy(resume_pdf, facts.get("Full name") or "Alex Rivera") if resume_pdf else ""
     resume_line = ("This application REQUIRES a résumé — call upload_resume (NOT the "
                    "'Autofill from resume' box).\n" if upload_path else "")
     model = s.browser_model
