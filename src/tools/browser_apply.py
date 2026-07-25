@@ -31,6 +31,9 @@ def set_profile_override(path: str) -> None:
 
 
 
+_APPLIED_STATUSES = ("applied", "applied_manual")
+
+
 def _tracking_status(pk: str) -> str:
     """The tracking row's current status for pk, '' when unavailable.
 

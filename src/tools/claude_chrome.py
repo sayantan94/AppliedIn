@@ -303,7 +303,12 @@ honest:
    written in plain sentences. Do not use dashes as connectors. Make it
    genuinely useful to a reader deciding whether to interview them.
 
-When the form is complete, submit it and read what the page says afterwards.
+When the form is complete, submit it and then find out what happened. Submitting
+often navigates somewhere: wait for the page to settle, read the page you have
+ENDED UP ON, and scroll it — a confirmation is frequently on that destination
+rather than where you clicked. Only report "blocked" once you have actually looked
+at where you landed. If you genuinely cannot find a confirmation, say so plainly
+and say what the final page was, so the owner knows where to check.
 
 Then end your reply with ONLY this JSON object and nothing after it:
 

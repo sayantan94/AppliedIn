@@ -52,4 +52,9 @@ success_phrases:
 - Race and ethnicity are often ONE dropdown whose options encode both, e.g.
   "Asian (Not Hispanic or Latino)". Pick the single option matching both of the
   owner's answers rather than looking for two separate questions.
+- Submitting can NAVIGATE rather than swap the form for a panel. When it does, the
+  confirmation is on the page you land on, not the one you clicked from — wait for
+  it to settle and read it before concluding nothing happened. Reporting "no
+  confirmation" without looking at the destination leaves the owner unsure whether
+  they have applied, which is the one state worse than a clean failure.
 
