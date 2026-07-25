@@ -73,9 +73,26 @@ async def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     url = args[0] if args else DEFAULT_URL
     stores = make_stores()
-    facts = stores.answer_bank.all_facts("Databricks")
+    # Resolve the job from its URL, so this works on any posting rather than the
+    # one it was first written against — and so it uses that job's own tailored
+    # résumé and whichever profile the application is set to go out under.
+    row = next((r for r in stores.tracking.all()
+                if r.get("jd_url") and r["jd_url"].split("?")[0].rstrip("/") in url), {})
+    company = row.get("company") or ""
+    if not company:
+        from discovery.handler import company_for_url
+        company = company_for_url(url) or "this employer"
+    facts = stores.answer_bank.all_facts(company)
 
-    resume = Path(".local/artifacts/resumes/databricks#6544403002.pdf")
+    from core import profiles as _profiles
+    prof = _profiles.resolve(row.get("profile_id", ""))
+    if prof:
+        facts = prof.override(facts)
+        print(f"applying as: {prof.label} <{prof.email}>"
+              + (f" · {prof.phone}" if prof.phone else ""))
+    print(f"company: {company}  |  job: {row.get('title') or '(not on the board)'}")
+
+    resume = Path(".local/artifacts") / (row.get("resume_s3_key") or "resumes/none.pdf")
     # Give the recruiter a sensibly named file, exactly as the pipeline does —
     # "databricks#6544403002.pdf" is not what should land in an inbox.
     resume_path = (_clean_resume_copy(str(resume.resolve()),
@@ -88,7 +105,20 @@ async def main() -> int:
         try:
             print(f"opening {url[:90]}…")
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(6000)
+            await page.wait_for_timeout(5000)
+
+            # Reach the FORM, exactly as the pipeline does. A job page is not an
+            # application: on Ashby the fields live behind an "Application" tab,
+            # and reading the posting itself finds nothing at all.
+            for sel in ('role=tab[name*="Application"]', 'text="Application"',
+                        'a:has-text("Apply for this job")', 'a:has-text("Apply now")',
+                        'button:has-text("Apply")'):
+                try:
+                    await page.locator(sel).first.click(timeout=2500)
+                    await page.wait_for_timeout(2500)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
 
             frame = await _form_frame(page)
             print(f"form frame: {'EMBEDDED iframe' if frame is not page else 'the page itself'}")
@@ -110,7 +140,7 @@ async def main() -> int:
                 "location (city)": "Seattle, Washington",
                 "are you legally authorized": "Yes",
                 "need sponsorship": "Yes",
-                "worked for databricks": "No",
+                "worked for": "No",
                 "country": "United States",
             }
 
@@ -273,7 +303,7 @@ async def main() -> int:
             print(f"   screenshot:   {OUT.with_name('after_submit.png')}")
             if signal:
                 from core.models import Status
-                stores.tracking.set_status("databricks#6544403002", Status.APPLIED,
+                stores.tracking.set_status(row.get("pk", ""), Status.APPLIED,
                                            confirmation_id=str(signal)[:200],
                                            gate_pending=None, gate_reason="")
                 print("   board updated -> applied")

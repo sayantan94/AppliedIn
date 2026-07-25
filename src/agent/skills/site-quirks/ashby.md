@@ -20,3 +20,10 @@ success_phrases:
   the application is in. Do not re-submit.
 - The confirmation replaces the form with a short "Application Success" panel.
   Read it as the confirmation rather than looking for an email.
+- A job page is **not** the application. The fields sit behind an "Application"
+  tab and reading the posting itself finds none at all — click the tab, or append
+  `/application` to the job URL, before treating an empty form as a failure.
+- Some boards put an "Autofill from resume" uploader above the real Résumé field.
+  It is a PARSER: giving it the résumé re-populates the form and overwrites
+  answers already typed. Attach only to the field labelled Resume/CV.
+

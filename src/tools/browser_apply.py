@@ -2925,6 +2925,12 @@ async def _set_resume_on_page(page: object, resume_path: str) -> int:
         desc = await _describe(inp)
         if "cover letter" in desc or "coverletter" in desc:
             continue  # never the résumé's slot
+        # An "Autofill from resume" box is a PARSER, not the résumé field. Feeding
+        # it re-populates the form from whatever it reads and overwrites answers
+        # already typed from the owner's approved facts — the apply task has always
+        # told the agent to avoid it; the scripted path must too.
+        if "autofill" in desc or "auto-fill" in desc or "parse" in desc:
+            continue
         (resume_inputs if ("resume" in desc or "résumé" in desc or "cv" in desc)
          else doc_inputs).append(inp)
 
