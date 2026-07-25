@@ -346,7 +346,7 @@ def create_app() -> FastAPI:
                 continue
             value = _split_name(label, str(answer)) if "name" in label.lower() else str(answer)
             opts = [str(o) for o in (field.get("options") or [])]
-            if field.get("type") == "choice-group" and opts:
+            if opts:
                 # A choice must end up as one of the ACTUAL options — an answer the
                 # form has no option for cannot be selected, and leaving generic
                 # wording ("No") invites the driver to substring-match it onto
@@ -363,8 +363,12 @@ def create_app() -> FastAPI:
                     snapped = next((o for o in opts if _SAFE_OPTION_RX.match(o)), "")
                 if snapped:
                     value = snapped
-                elif field.get("type") == "choice-group":
-                    missing.append(label)   # no option means this answer — ask the owner
+                else:
+                    # ANY field with options must end up on one of them. A
+                    # "Veteran Status" whose choices are full sentences cannot be
+                    # answered "No", and returning it anyway promises the driver
+                    # something it cannot enter.
+                    missing.append(label)
                     continue
             values[label] = value
         return {"ok": True, "values": values, "essays": essays, "missing": missing,
