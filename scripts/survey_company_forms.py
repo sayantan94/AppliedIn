@@ -37,8 +37,9 @@ from tools.browser_apply import _READ_FORM_JS, _form_frame  # noqa: E402
 OUT_JSON = ROOT / ".local" / "form_survey.json"
 QUIRK_DIR = ROOT / "src" / "agent" / "skills" / "site-quirks" / "companies"
 
-CONCURRENCY = 4
-PAGE_TIMEOUT = 45000
+CONCURRENCY = 6
+PAGE_TIMEOUT = 20000
+PER_COMPANY_TIMEOUT = 75   # seconds; a slow site must not stall the survey
 
 SANCTION_WORDS = ("cuba", "north korea", "sanction", "export control")
 LOGIN_WORDS = ("sign in", "log in", "create an account", "create account")
@@ -168,10 +169,26 @@ async def main() -> int:
     print(f"surveying {len(companies)} companies ({CONCURRENCY} at a time)…\n")
 
     sem = asyncio.Semaphore(CONCURRENCY)
+    done = 0
+
+    async def _guarded(browser, company):  # noqa: ANN001
+        nonlocal done
+        try:
+            row = await asyncio.wait_for(survey_one(browser, company, sem),
+                                         timeout=PER_COMPANY_TIMEOUT)
+        except asyncio.TimeoutError:
+            row = {"company": company.name, "ats": "", "job_url": "", "status": "timeout",
+                   "embedded": False, "fields": 0, "file_inputs": 0, "combos": 0,
+                   "choice_groups": 0, "sanctions": False, "login_wall": False}
+        done += 1
+        print(f"  [{done:>2}/{len(companies)}] {row['company'][:22]:<24}"
+              f"{row['ats'][:11]:<12} {row['status']}", flush=True)
+        return row
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
-            rows = await asyncio.gather(*(survey_one(browser, c, sem) for c in companies))
+            rows = await asyncio.gather(*(_guarded(browser, c) for c in companies))
         finally:
             await browser.close()
 

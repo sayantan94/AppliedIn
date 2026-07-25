@@ -10,12 +10,35 @@ site's quirks and is injected into the apply task for that site only.
 
 ## Available sites
 
-| Site | File | Applies to |
+### By ATS — applies to every posting on that system
+
+| ATS | File | Matches |
 |---|---|---|
-| Ashby | [ashby.md](ashby.md) | any `ashbyhq.com` posting |
-| Greenhouse | [greenhouse.md](greenhouse.md) | any `greenhouse.io` posting |
-| Workday | [workday.md](workday.md) | any `myworkdayjobs.com` posting |
-| Uber | [companies/uber.md](companies/uber.md) | Uber only |
+| Ashby | [ashby.md](ashby.md) | `ashbyhq.com` |
+| Greenhouse | [greenhouse.md](greenhouse.md) | `greenhouse.io`, `boards.greenhouse.io`, `job-boards.greenhouse.io` |
+| Workday | [workday.md](workday.md) | `myworkdayjobs.com`, `myworkdaysite.com` |
+
+### By company — applies to that employer only
+
+| Company | File | Why it needs one |
+|---|---|---|
+| Airbnb | [companies/airbnb.md](companies/airbnb.md) | embedded form, combobox-heavy |
+| Anthropic | [companies/anthropic.md](companies/anthropic.md) | combobox-heavy |
+| Cerebras | [companies/cerebras.md](companies/cerebras.md) | sanctions question |
+| Databricks | [companies/databricks.md](companies/databricks.md) | embedded form, off-site redirect |
+| Datadog | [companies/datadog.md](companies/datadog.md) | embedded form, combobox-heavy |
+| Figma | [companies/figma.md](companies/figma.md) | combobox-heavy |
+| Google DeepMind | [companies/google-deepmind.md](companies/google-deepmind.md) | combobox-heavy |
+| Nebius | [companies/nebius.md](companies/nebius.md) | embedded form, combobox-heavy |
+| Notion | [companies/notion.md](companies/notion.md) | sanctions question |
+| OpenAI | [companies/openai.md](companies/openai.md) | sanctions question |
+| Replit | [companies/replit.md](companies/replit.md) | sanctions question |
+| Rivian | [companies/rivian.md](companies/rivian.md) | sanctions question |
+| Scale AI | [companies/scale-ai.md](companies/scale-ai.md) | combobox-heavy |
+| Snowflake | [companies/snowflake.md](companies/snowflake.md) | sanctions question |
+| Stripe | [companies/stripe.md](companies/stripe.md) | embedded form, combobox-heavy |
+| Uber | [companies/uber.md](companies/uber.md) | off-site redirect |
+| Vercel | [companies/vercel.md](companies/vercel.md) | combobox-heavy |
 
 A company file and an ATS file both apply when both match; the company file is
 read last and is the final word.
