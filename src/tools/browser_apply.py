@@ -1824,15 +1824,27 @@ _FILL_JS = """
     const k = norm(key);
     if (!k || !val) { report.push('SKIPPED (empty): ' + key); continue; }
     let done = false;
-    for (const el of ctrls) {  // 1) text / textarea / select, matched by label
-      if (!isText(el)) continue;
-      const l = norm(labelOf(el));
-      if (l && (l.includes(k) || k.includes(l))) {
-        if (el.tagName === 'SELECT') {
-          const opt = [...el.options].find(o => norm(o.textContent).includes(norm(val)));
-          if (opt) { done = act(el, key, 'select', val, opt.value); }
-        } else { done = act(el, key, 'text', val); }
-        break;
+    // 1) text / textarea / select, matched by label. Take the BEST match, not
+    // the first: "First Name" is a substring of "Preferred First Name", so
+    // first-match-wins let one key consume the other field and left a required
+    // one empty. Exact label wins; otherwise the closest-length containment.
+    {
+      let pick = null, pickCost = Infinity;
+      for (const el of ctrls) {
+        if (!isText(el)) continue;
+        if (el.hasAttribute('data-ai-fill')) continue;   // already claimed this pass
+        const l = norm(labelOf(el));
+        if (!l) continue;
+        let cost = null;
+        if (l === k) cost = 0;
+        else if (l.includes(k) || k.includes(l)) cost = Math.abs(l.length - k.length) + 1;
+        if (cost !== null && cost < pickCost) { pick = el; pickCost = cost; }
+      }
+      if (pick) {
+        if (pick.tagName === 'SELECT') {
+          const opt = [...pick.options].find(o => norm(o.textContent).includes(norm(val)));
+          if (opt) { done = act(pick, key, 'select', val, opt.value); }
+        } else { done = act(pick, key, 'text', val); }
       }
     }
     if (!done && k.length > 6) {  // 2) radio/checkbox: question text -> option label
@@ -2309,6 +2321,37 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
             "screenshot_b64": shot, "drafted": drafted or None, "fields": _ui_fields(state)}
 
 
+# Export-control / sanctions screening questions. The candidate has no such
+# citizenship, residency or tie, so the answer is ALWAYS negative. This is not a
+# preference: a false affirmative is a self-reported disqualifier that no
+# recruiter revisits, and it would be entered under the owner's name. Enforced in
+# code rather than left to a label match, because the cost of one wrong click
+# here is categorically worse than for any other field on the form.
+_SANCTIONS_RX = re.compile(
+    r"cuba|iran\b|north korea|syria|crimea|donetsk|luhansk|zaporizhzhia|kherson"
+    r"|\bbelarus\b|sanction|embargo|export control|restricted (?:country|party)",
+    re.I)
+# Option wording that SAFELY answers such a question.
+_SANCTIONS_SAFE_RX = re.compile(
+    r"^\s*(?:no|none of the above|not applicable|n/?a|neither|none)\b", re.I)
+
+
+def _safe_sanctions_answer(question: str, values: list) -> list:
+    """Force a sanctions question to its negative answer.
+
+    Keeps only options that are plainly negative. If the caller proposed an
+    affirmative one, it is dropped and 'None of the above' / 'No' is used, so a
+    mis-mapped answer cannot tick "citizen of a sanctioned country".
+    """
+    if not _SANCTIONS_RX.search(question or ""):
+        return values
+    safe = [v for v in values if _SANCTIONS_SAFE_RX.match(str(v))]
+    if safe != list(values):
+        log.warning("sanctions question — forcing the negative answer for %r "
+                    "(proposed %r)", (question or "")[:70], values)
+    return safe or ["None of the above", "No", "Not applicable"]
+
+
 async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict:  # noqa: ANN001
     """Select radio/checkbox options with REAL Playwright clicks — the only thing
     React groups (Ashby) accept. `choices` maps question -> option (str OR list for
@@ -2318,6 +2361,7 @@ async def _set_choices(page, choices: dict, pk: str = "", url: str = "") -> dict
     out = {}
     for q, vals in choices.items():
         vals = vals if isinstance(vals, list) else [vals]
+        vals = _safe_sanctions_answer(q, vals)
         statuses = []
         for v in vals:
             try:

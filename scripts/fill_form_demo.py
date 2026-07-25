@@ -28,6 +28,8 @@ from core.stores import make_stores  # noqa: E402
 from tools.browser_apply import (  # noqa: E402
     _READ_FORM_JS,
     _fill_human,
+    _fix_fields,
+    _set_choices,
     _form_frame,
     _set_resume_on_page,
 )
@@ -132,6 +134,36 @@ async def main() -> int:
             print(f"   filled {len(filled)}/{len(mapping)}")
             if missed:
                 print(f"   not found: {missed}")
+
+            # CHOICE PASS — radio/checkbox GROUPS (sanctions confirmations,
+            # consents). These are required on many forms and cannot be typed.
+            choice_map = {}
+            for f in fields:
+                if f.get("type") != "choice-group":
+                    continue
+                label = str(f.get("label", ""))
+                opts = [str(o) for o in (f.get("options") or [])]
+                none_opt = next((o for o in opts if "none of the above" in o.lower()), "")
+                if none_opt:                       # sanctions-style confirmation
+                    choice_map[label] = none_opt
+            if choice_map:
+                print(f"\nchoice pass on {len(choice_map)}: "
+                      f"{[(k[:34], v[:24]) for k, v in choice_map.items()]}")
+                await _set_choices(frame, choice_map, "", url)
+
+            # COMBOBOX PASS — the same one the pipeline runs after the bulk fill.
+            # React combobox widgets ignore a typed value: they need a real
+            # click, then the option picked out of the popup list. Without this
+            # pass every dropdown stays on "Select..." and the form cannot submit.
+            combos = {f["label"]: mapping[f["label"]] for f in fields
+                      if (f.get("combo") or "location" in str(f.get("label", "")).lower())
+                      and f.get("type") not in ("choice-group",)
+                      and f.get("label") in mapping}
+            if combos:
+                combos = {k: (v.split(",")[0].strip() if "location" in k.lower() else v)
+                          for k, v in combos.items()}
+                print(f"\ncombobox pass on {len(combos)}: {list(combos)[:6]}")
+                await _fix_fields(frame, combos, "", url)
 
             if resume_path:
                 n = await _set_resume_on_page(frame, resume_path)
