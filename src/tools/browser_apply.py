@@ -206,6 +206,15 @@ async def _agent_apply(url: str, company: str, facts: dict, model: str, *, pk: s
     # agent wandering to the company homepage, but it must let these legit
     # application hosts through, or the apply can never reach the form.
     allowed += _ATS_DOMAINS
+    # A site skill can name further hosts this employer's apply legitimately
+    # bounces through (an identity provider, a regional portal).
+    try:
+        from tools.company_skills import load_skill
+
+        for extra in load_skill(url, company).allow_domains:
+            allowed += [extra, f"*.{extra}"]
+    except Exception:  # noqa: BLE001
+        log.debug("could not load site allow_domains", exc_info=True)
     # Deterministic helpers: upload_resume sets the file straight onto the page's
     # résumé input(s); verify_form_filled reads the ACTUAL field values from the
     # DOM right before submit (dynamic forms wipe fields on re-render, and the
@@ -340,7 +349,22 @@ def _task(url: str, company: str, facts: dict, resume_path: str) -> str:
         "- If you clicked submit but there is NO confirmation (the page redirected, "
         "went blank, or returned to a job-listings page), do NOT claim success — "
         "finish with:  UNCERTAIN: <what the page shows now>"
+        # Hard-won knowledge about THIS site, from config/company-skills/. Last in
+        # the prompt so it reads as the final word over the general rules above.
+        + _site_rules(url, company)
     )
+
+
+def _site_rules(url: str, company: str) -> str:
+    """Custom instructions for this site, if we've learned any. Never raises —
+    a bad note must not stop an application."""
+    try:
+        from tools.company_skills import instructions_for
+
+        return instructions_for(url, company)
+    except Exception:  # noqa: BLE001
+        log.debug("could not load company skills", exc_info=True)
+        return ""
 
 
 # --- scripted apply: code drives, the model only maps + writes -----------------

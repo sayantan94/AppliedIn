@@ -37,7 +37,7 @@ def resolve_company(company: CompanyConfig, client: httpx.Client) -> CompanyConf
     """Fill ats/board/discovery from careers_url when not explicitly set."""
     if not company.needs_resolution or not company.careers_url:
         return company
-    match = resolve(company.careers_url, client)
+    match = resolve(company.careers_url, client, name=company.name)
     log.info(
         "resolved %s (%s) -> ats=%s discovery=%s",
         company.name, company.careers_url, match.ats, match.discovery.value,

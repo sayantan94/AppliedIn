@@ -142,3 +142,7 @@ companies:
     discovery: crawl
     login_secret: portal/apple
     mode: gated
+
+  - name: Rivian
+    careers_url: https://jobs.ashbyhq.com/rivianvw.tech
+    mode: gated

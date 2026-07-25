@@ -130,7 +130,124 @@ def detect_from_page(html: str) -> AtsMatch | None:
     return None
 
 
-def resolve(careers_url: str, client: httpx.Client | None = None) -> AtsMatch:
+# Board APIs we can query directly by slug, and how to tell a real board from a
+# 200 that means nothing. Ordered by how common they are.
+_BOARD_PROBES = (
+    ("greenhouse", "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
+     lambda d: bool(d.get("jobs"))),
+    ("ashby", "https://api.ashbyhq.com/posting-api/job-board/{slug}",
+     lambda d: bool(d.get("jobs"))),
+    ("lever", "https://api.lever.co/v0/postings/{slug}?mode=json",
+     lambda d: bool(d) if isinstance(d, list) else False),
+)
+
+
+def _registrable(host: str) -> str:
+    """The company label of a hostname — the one before the public suffix.
+
+    Careers sites are routinely served from a multi-label subdomain
+    (<anything>.jobs.<company>.<tld>). Taking the FIRST label picks up whatever
+    marketing word happens to lead the hostname, which then collides with an
+    unrelated board that really is named that — and a stranger's postings enter
+    the pipeline. Always reduce to the company label.
+    """
+    labels = [x for x in (host or "").lower().split(".") if x]
+    if len(labels) < 2:
+        return labels[0] if labels else ""
+    # Handle two-part suffixes (.co.uk, .com.au) before falling back to labels[-2].
+    if len(labels) >= 3 and labels[-2] in {"co", "com", "net", "org", "ac", "gov"}:
+        return labels[-3]
+    return labels[-2]
+
+
+def _slug_candidates(name: str, careers_url: str) -> list[str]:
+    """Plausible board slugs for a company: its name, and its careers domain.
+
+    The name alone is not enough ("Google DeepMind" is never a slug) and the
+    domain alone is not either (scale.com hosts the "scaleai" board), so try both.
+    """
+    out: list[str] = []
+    n = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    if n:
+        out.append(n)
+        hyphen = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+        if hyphen and hyphen != n:
+            out.append(hyphen)
+    domain = _registrable(urlparse(careers_url or "").netloc)
+    if domain and domain not in out:
+        out.append(domain)
+    # "Scale AI" -> scaleai is covered by `n`; scale.com -> "scale" by the domain.
+    return out
+
+
+def _same_company(board_name: str, company: str, slug: str) -> bool:
+    """Does this board actually belong to this company?
+
+    A slug can collide with an unrelated board, and pulling a stranger's postings
+    into the pipeline means tailoring and applying to the wrong company. Require
+    the board's own name to line up with the company name (or the slug we asked
+    for) before trusting it.
+    """
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())  # noqa: E731
+    b, c = norm(board_name), norm(company)
+    if not b or not c:
+        return False
+    return b in c or c in b or b == norm(slug)
+
+
+def probe_boards(name: str, careers_url: str,
+                 client: httpx.Client | None = None) -> AtsMatch | None:
+    """Ask the known board APIs whether this company has a board.
+
+    A custom careers page that renders its jobs client-side leaves no ATS
+    signature in the HTML, so page scanning finds nothing and we fall back to an
+    expensive, flaky browser crawl. Usually the real board is one request away —
+    Databricks looked like a crawl target while a Greenhouse board with 800 jobs
+    answered on the first probe.
+    """
+    if client is None:
+        return None
+    for slug in _slug_candidates(name, careers_url):
+        for ats, template, has_jobs in _BOARD_PROBES:
+            try:
+                resp = client.get(template.format(slug=slug), timeout=12,
+                                  follow_redirects=True)
+                if resp.status_code != 200:
+                    continue
+                payload = resp.json()
+                if not has_jobs(payload):
+                    continue
+                # A live board is not necessarily THIS company's board.
+                owner = _board_owner(ats, slug, payload, client)
+                if owner and not _same_company(owner, name, slug):
+                    log.info("probe: %s board %r belongs to %r, not %s — ignoring",
+                             ats, slug, owner, name)
+                    continue
+                log.info("probed %s -> %s board %r", name, ats, slug)
+                return AtsMatch(ats, slug)
+            except (httpx.HTTPError, ValueError):
+                continue  # unreachable or not JSON — just try the next probe
+    return None
+
+
+def _board_owner(ats: str, slug: str, payload: object,
+                 client: httpx.Client) -> str:
+    """The name the board reports for itself, when it publishes one."""
+    if isinstance(payload, dict) and payload.get("name"):
+        return str(payload["name"])
+    if ats == "greenhouse":
+        try:
+            r = client.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}",
+                           timeout=10, follow_redirects=True)
+            if r.status_code == 200:
+                return str((r.json() or {}).get("name") or "")
+        except (httpx.HTTPError, ValueError):
+            return ""
+    return ""
+
+
+def resolve(careers_url: str, client: httpx.Client | None = None,
+            name: str = "") -> AtsMatch:
     """Resolve a career-page URL to an AtsMatch; CRAWL if unrecognized."""
     direct = detect_from_url(careers_url)
     if direct:
@@ -146,5 +263,11 @@ def resolve(careers_url: str, client: httpx.Client | None = None) -> AtsMatch:
                 return embedded
         except httpx.HTTPError as exc:
             log.warning("could not fetch %s for ATS detection: %s", careers_url, exc)
+
+    # Nothing in the HTML — the page may render its jobs from an API. Ask the
+    # board APIs directly before settling for a crawl.
+    probed = probe_boards(name, careers_url, client)
+    if probed:
+        return probed
 
     return AtsMatch("custom", careers_url, discovery=DiscoveryMode.CRAWL)
