@@ -420,7 +420,7 @@ async def _resubmit_with_fallback(page, pk: str, url: str) -> bool:  # noqa: ANN
     except Exception:  # noqa: BLE001
         pass
     await page.wait_for_timeout(300)
-    await page.evaluate(_FILL_JS, ident)  # label-match overwrites even autofilled fields
+    await _fill_human(page, ident)  # label-match overwrites even autofilled fields
     await page.wait_for_timeout(600)
     return True
 
@@ -720,7 +720,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
 
             _emit(pk, "response", agent="browser", url=url,
                   detail=f"⚡ one-shot fill: {len(fill_map)} fields")
-            await page.evaluate(_FILL_JS, fill_map)
+            await _fill_human(page, fill_map)
             wanted = list(fill_map.values())
             for _ in range(4):  # commit autocomplete dropdowns (Location etc.)
                 await page.wait_for_timeout(700)
@@ -771,7 +771,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             if refill:
                 _emit(pk, "response", agent="browser", url=url,
                       detail=f"🔁 refill after re-render: {list(refill)[:4]}")
-                await page.evaluate(_FILL_JS, refill)
+                await _fill_human(page, refill)
                 await page.wait_for_timeout(800)
 
             # Last fill step before the submit loop: click-commit every box/text field.
@@ -860,7 +860,7 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
                         # Same hard ceiling as the finalize path: a page mid-
                         # navigation can block evaluate() forever.
                         async def _refill_all() -> None:
-                            await page.evaluate(_FILL_JS, fill_map)
+                            await _fill_human(page, fill_map)
                             await page.wait_for_timeout(700)
                             if choice_map:
                                 await _set_choices(page, choice_map, pk, url)
@@ -1383,7 +1383,7 @@ async def _fix_fields(page, fix_map: dict, pk: str, url: str) -> None:  # noqa: 
                 await loc.press("Tab")
         except Exception:  # radio groups / unlabeled controls — JS path
             try:
-                await page.evaluate(_FILL_JS, {k: v})
+                await _fill_human(page, {k: v})
                 await page.wait_for_timeout(600)
                 await page.evaluate(_PICK_OPTION_JS, [v])
             except Exception:
@@ -1556,7 +1556,15 @@ def _ui_fields(snapshot: list) -> list[dict]:
 
 
 _FILL_JS = """
-(map) => {
+(payload) => {
+  // payload is either a bare {label: value} map (legacy, fills from JS) or
+  // {map, opts:{tagOnly}}. In tagOnly mode this NEVER writes a value: it only
+  // MARKS the matched control with data-ai-fill and returns a plan, so Playwright
+  // can drive real clicks + keystrokes. JS-set values dispatch synthetic events
+  // (isTrusted:false, no keydown, 40 chars in 0ms) — the exact fingerprint ATS
+  // spam filters reject with "your submission was flagged as possible spam".
+  const map = (payload && payload.map) ? payload.map : payload;
+  const tagOnly = !!(payload && payload.opts && payload.opts.tagOnly);
   const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
   const ntrim = s => (s || '').replace(/\\s+/g, ' ').trim();
   const setVal = (el, v) => {
@@ -1617,6 +1625,24 @@ _FILL_JS = """
     'optional','required','field','answer','what','which','with','are','will','do','does']);
   const toks = s => norm(s).split(' ').filter(t => t.length > 2 && !STOP.has(t));
   const report = [];
+  const plan = [];
+  let tagN = 0;
+  // Perform the edit (legacy) or mark the control for Playwright (tagOnly).
+  const act = (el, key, kind, val, optValue) => {
+    if (tagOnly) {
+      const token = 'f' + (++tagN);
+      el.setAttribute('data-ai-fill', token);
+      plan.push({ key: key, token: token, kind: kind,
+                  value: String(val), option: optValue || '' });
+      return true;
+    }
+    if (kind === 'select') {
+      el.value = optValue;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (kind === 'check') { el.click(); }
+    else { setVal(el, val); }
+    return true;
+  };
   for (const [key, val] of Object.entries(map)) {
     const k = norm(key);
     if (!k || !val) { report.push('SKIPPED (empty): ' + key); continue; }
@@ -1627,9 +1653,8 @@ _FILL_JS = """
       if (l && (l.includes(k) || k.includes(l))) {
         if (el.tagName === 'SELECT') {
           const opt = [...el.options].find(o => norm(o.textContent).includes(norm(val)));
-          if (opt) { el.value = opt.value;
-                     el.dispatchEvent(new Event('change', { bubbles: true })); done = true; }
-        } else { setVal(el, val); done = true; }
+          if (opt) { done = act(el, key, 'select', val, opt.value); }
+        } else { done = act(el, key, 'text', val); }
         break;
       }
     }
@@ -1645,10 +1670,10 @@ _FILL_JS = """
               || (b.closest('label') || {}).textContent || '';
             return norm(lbl).startsWith(norm(val)) || norm(lbl).includes(norm(val));
           });
-          if (m) { m.click(); done = true; }
+          if (m) { done = act(m, key, 'check', val); }
           else if (boxes.length === 1 &&
                    /^(yes|true|checked|agree|accept)/.test(norm(val))) {
-            boxes[0].click(); done = true;  // lone consent checkbox
+            done = act(boxes[0], key, 'check', val);  // lone consent checkbox
           }
           break;
         }
@@ -1667,14 +1692,88 @@ _FILL_JS = """
           if (overlap > bestScore) { second = bestScore; bestScore = overlap; best = el; }
           else if (overlap > second) { second = overlap; }
         }
-        if (best && bestScore >= 0.5 && bestScore > second) { setVal(best, val); done = true; }
+        if (best && bestScore >= 0.5 && bestScore > second) {
+          done = act(best, key, best.tagName === 'SELECT' ? 'select' : 'text', val,
+                     best.tagName === 'SELECT' ? val : '');
+        }
       }
     }
     report.push((done ? 'FILLED: ' : 'NOT FOUND: ') + key);
   }
-  return report;
+  return tagOnly ? { plan: plan, report: report } : report;
 }
 """
+
+async def _fill_human(page, mapping: dict) -> list:  # noqa: ANN001
+    """Fill a form the way a PERSON does — real mouse clicks, real keystrokes.
+
+    Every edit here goes through Playwright's CDP input pipeline, so the page sees
+    TRUSTED events (isTrusted:true) in a genuine focus → keydown → input → keyup →
+    blur sequence, at human speed. Filling from JavaScript instead (assigning
+    .value and dispatching synthetic events) is what gets applications rejected
+    with "your submission was flagged as possible spam": no key events ever fire,
+    focus never moves, and forty characters appear in zero milliseconds.
+
+    JS is still used for MATCHING — the label resolvers are subtle and shared with
+    the form reader — but it only TAGS the controls; the typing happens here.
+    Returns the same FILLED:/NOT FOUND: report the old JS fill returned, so every
+    caller keeps working unchanged.
+    """
+    import random
+
+    try:
+        out = await page.evaluate(_FILL_JS, {"map": mapping, "opts": {"tagOnly": True}})
+    except Exception:  # noqa: BLE001 — never lose a fill to a resolver change
+        log.debug("tagging fill failed; falling back to JS fill", exc_info=True)
+        return await page.evaluate(_FILL_JS, mapping)
+
+    plan = (out or {}).get("plan") or []
+    report = list((out or {}).get("report") or [])
+    failed: set[str] = set()
+    try:
+        for step in plan:
+            key = step.get("key", "")
+            value = str(step.get("value") or "")
+            kind = step.get("kind")
+            loc = page.locator(f'[data-ai-fill="{step.get("token")}"]').first
+            try:
+                await loc.scroll_into_view_if_needed(timeout=2000)
+                if kind == "check":
+                    if not await loc.is_checked():
+                        await loc.click(timeout=3000)  # real click on the box/label
+                elif kind == "select":
+                    # <select> has no typing analogue; select_option still drives a
+                    # trusted change event through CDP.
+                    await loc.select_option(step.get("option") or value, timeout=3000)
+                else:
+                    await loc.click(timeout=3000)  # focus by clicking, like a person
+                    await loc.fill("", timeout=2000)  # trusted clear (CDP, not .value)
+                    if len(value) > 250:
+                        # Nobody hand-types a cover letter; a paste is honest input
+                        # and keeps a 2000-char answer from taking two minutes.
+                        await loc.fill(value, timeout=8000)
+                    else:
+                        await loc.type(value, delay=random.uniform(28, 55),
+                                       timeout=max(6000, len(value) * 120))
+                    await loc.blur()  # commit: fires the change/validation handlers
+                await page.wait_for_timeout(random.uniform(90, 260))  # human cadence
+            except Exception:  # noqa: BLE001
+                log.debug("human fill failed for %s", key, exc_info=True)
+                failed.add(key)
+    finally:
+        try:
+            await page.evaluate(
+                "() => document.querySelectorAll('[data-ai-fill]')"
+                ".forEach(e => e.removeAttribute('data-ai-fill'))")
+        except Exception:  # noqa: BLE001
+            log.debug("tag cleanup failed", exc_info=True)
+
+    # A tagged field we could not actually drive is NOT filled — say so, or the
+    # caller believes the form is complete and submits a half-empty application.
+    return [f"NOT FOUND: {line.split(': ', 1)[1]}"
+            if line.startswith("FILLED: ") and line.split(": ", 1)[1] in failed else line
+            for line in report]
+
 
 _LOCATE_CHOICE_JS = """
 ({q, v}) => {
@@ -1906,7 +2005,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
                 # whole apply lane — a timed-out restore just resubmits.
                 async def _restore() -> None:
                     if text_fix:
-                        await page.evaluate(_FILL_JS, text_fix)
+                        await _fill_human(page, text_fix)
                         await page.wait_for_timeout(700)
                     if choice_fix2:
                         await _set_choices(page, choice_fix2, pk, url)
@@ -1940,7 +2039,7 @@ async def _finalize_submit(page, facts: dict, drafted: dict, pk: str, url: str, 
         _emit(pk, "response", agent="browser", url=url,
               detail=f"🔧 self-heal rejected fields: {list(text_fix) + list(choice_fix)}")
         if text_fix:
-            await page.evaluate(_FILL_JS, text_fix)
+            await _fill_human(page, text_fix)
         if choice_fix:
             await _set_choices(page, choice_fix, pk, url)
         await page.wait_for_timeout(900)
@@ -2263,7 +2362,7 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
                 "each), then verify_form_filled, then click Submit."))
         try:
             page = await _page_of(browser_session)
-            report = await page.evaluate(_FILL_JS, mapping)  # type: ignore[union-attr]
+            report = await _fill_human(page, mapping)  # type: ignore[union-attr]
             # Autocomplete comboboxes (Location) open a list — commit the matching option,
             # but only while a popup is actually OPEN (never re-toggle already-set buttons).
             wanted = [v for v in mapping.values() if isinstance(v, str)]
@@ -2296,7 +2395,7 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
                     if ov > score:
                         best, score = lbl, ov
                 if best and score >= 0.5:
-                    r2 = await page.evaluate(_FILL_JS, {best: mapping[k]})  # type: ignore[union-attr]
+                    r2 = await _fill_human(page, {best: mapping[k]})  # type: ignore[union-attr]
                     report += r2
                     if ("FILLED: " + best) in r2:
                         ok.append(k)
