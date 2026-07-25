@@ -2790,22 +2790,47 @@ def _apply_controller(resume_path: str, pk: str = "", url: str = "",
 
 
 async def _set_resume_on_page(page: object, resume_path: str) -> int:
-    """Set the résumé on every document-accepting file input on the page (covers the
-    required résumé field; an optional autofill uploader parsing it is harmless).
+    """Set the résumé on the résumé field — and NOT on the cover-letter field.
+
+    Setting every document-accepting input used to look harmless, but a form with
+    a separate "Cover Letter" upload then received the résumé as the cover letter,
+    which is what the recruiter opens. Prefer inputs that identify themselves as
+    the résumé, always skip ones that identify as a cover letter, and fall back to
+    the first document input only when nothing identifies itself at all.
     Returns how many inputs were set."""
     if page is None:
         return 0
     inputs = await page.query_selector_all('input[type="file"]')  # type: ignore[attr-defined]
-    doc_inputs = []
+
+    async def _describe(inp) -> str:  # noqa: ANN001
+        """Everything the page says about this input, lowercased."""
+        try:
+            return (await inp.evaluate(
+                """el => {
+                     const wrap = el.closest('div,fieldset,section,label') || el;
+                     return [el.name, el.id, el.getAttribute('aria-label'),
+                             (el.labels && el.labels[0] && el.labels[0].textContent) || '',
+                             (wrap.textContent || '').slice(0, 120)].join(' ');
+                   }""") or "").lower()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    doc_inputs, resume_inputs = [], []
     for inp in inputs:
         try:
             accept = ((await inp.get_attribute("accept")) or "").lower()
         except Exception:
             accept = ""
-        if (not accept) or any(k in accept for k in ("pdf", "application", "word", ".doc")):
-            doc_inputs.append(inp)
+        if accept and not any(k in accept for k in ("pdf", "application", "word", ".doc")):
+            continue
+        desc = await _describe(inp)
+        if "cover letter" in desc or "coverletter" in desc:
+            continue  # never the résumé's slot
+        (resume_inputs if ("resume" in desc or "résumé" in desc or "cv" in desc)
+         else doc_inputs).append(inp)
+
     n = 0
-    for inp in (doc_inputs or inputs):
+    for inp in (resume_inputs or doc_inputs or inputs):
         try:
             await inp.set_input_files(resume_path)
             n += 1
