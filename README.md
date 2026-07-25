@@ -12,28 +12,13 @@ you only where a person is genuinely required.
 history stay on your disk. Nothing is uploaded anywhere except to the employer
 you are applying to.
 
+> Published for learning — applications go out under **your** name, so read them
+> before they are sent. See [the caveats](#️-for-learning-purposes-only).
+
 ![AppliedIn — the pipeline board: jobs flow found → tailored → applied, with a live feed of every agent step](docs/screenshots/01-pipeline.png)
 
 *Jobs move **found → tailored → applied**. Every step streams to the live feed,
 so you can always see what it did and why.*
-
----
-
-## ⚠️ For learning purposes only
-
-This is a personal project published to learn from and build on — not a product,
-a service, or advice.
-
-- **Applications go out under your name.** Read them before they are sent. An
-  application you didn't check is still one you signed.
-- **Employers' terms may prohibit automated applications.** Check them. Where you
-  point this, and whether you should, is your call and your responsibility.
-- **It never solves CAPTCHAs or bot checks.** When one appears the run stops and
-  hands you the page. That boundary is deliberate — please leave it in.
-- **No warranty.** It gets things wrong. The failure modes are documented rather
-  than hidden, which is the most useful thing about reading the code.
-
----
 
 ## What it actually does
 
@@ -198,6 +183,22 @@ scripts/        no-cost verification and survey tools
 ## Requirements
 
 Python 3.12, Redis, Chrome, and an OpenAI API key. `setup.sh` handles the rest.
+
+## ⚠️ For learning purposes only
+
+This is a personal project published to learn from and build on — not a product,
+a service, or advice.
+
+- **Applications go out under your name.** Read them before they are sent. An
+  application you didn't check is still one you signed.
+- **Employers' terms may prohibit automated applications.** Check them. Where you
+  point this, and whether you should, is your call and your responsibility.
+- **It never solves CAPTCHAs or bot checks.** When one appears the run stops and
+  hands you the page. That boundary is deliberate — please leave it in.
+- **No warranty.** It gets things wrong. The failure modes are documented rather
+  than hidden, which is the most useful thing about reading the code.
+
+---
 
 ## Licence
 
