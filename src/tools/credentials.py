@@ -15,16 +15,6 @@ def portal_secret(company: str) -> str:
     return f"portal/{company.strip().lower()}"
 
 
-def save_login(company: str, username: str, password: str, secrets: Any) -> None:
-    secrets.put_json(portal_secret(company), {"username": username, "password": password})
-
-
-# Un-filled placeholder markers in secrets.json — treated as "no credential" so the
-# applier hands off to the human to sign in rather than typing placeholder text.
-_PLACEHOLDER = ("replace_with", "replace-with", "placeholder", "your_apple", "your-apple",
-                "your_email", "your-email", "your_password", "your-password", "changeme",
-                "xxxx", "<", "example.com")
-
 
 def _unset(v: str | None) -> bool:
     v = (v or "").strip().lower()

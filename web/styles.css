@@ -1988,3 +1988,15 @@ a.rowlk, button.rowlk { display: inline-block; }
 .profpick-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 .pr-act.use { color: var(--scan); border: 1px solid transparent; border-radius: 5px; }
 .pr-act.use:hover { border-color: currentColor; }
+
+/* The posting, in the drawer. Collapsed by default: it is reference material,
+   not the thing the owner opened the drawer to see. */
+.jd-block > summary { cursor: pointer; list-style: none; }
+.jd-block > summary::-webkit-details-marker { display: none; }
+.jd-block > summary::before { content: "▸ "; color: var(--faint); }
+.jd-block[open] > summary::before { content: "▾ "; }
+.jd-text {
+  margin-top: 8px; max-height: 340px; overflow-y: auto;
+  white-space: pre-wrap; font-size: 13px; line-height: 1.55;
+  color: var(--ink-2, var(--ink)); padding-right: 6px;
+}

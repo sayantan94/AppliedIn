@@ -12,6 +12,7 @@ worker, discovery thread, and web server all see the change instantly).
 
 from __future__ import annotations
 
+from datetime import UTC
 from functools import lru_cache
 from typing import Any
 
@@ -79,11 +80,11 @@ def note_llm_error(where: str, msg: str) -> None:
     show a TOP-LEVEL banner — these errors otherwise degrade stages silently
     (e.g. the relevance screen passing whole feeds through)."""
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     set_flag("llm_error", json.dumps({
         "where": where, "msg": msg[:300],
-        "at": datetime.now(timezone.utc).isoformat()}))
+        "at": datetime.now(UTC).isoformat()}))
 
 
 def llm_error() -> dict | None:

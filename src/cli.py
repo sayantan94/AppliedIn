@@ -201,59 +201,6 @@ def resume(pk: str, answer: str) -> dict:
     return resume_job(pk, answer)
 
 
-def login(url: str = "") -> dict:
-    """Open the apply browser's PERSISTENT profile so you can sign in to a portal
-    ONCE. The session (cookies) is saved to that profile and every future apply
-    reuses it — no stored password, and it survives daemon restarts. Use for
-    login/2FA portals (Apple, Google, Workday). Run this while no apply is in
-    progress (the profile can only be open in one process at a time)."""
-    import asyncio
-
-    s = get_settings()
-    profile = (getattr(s, "browser_profile_dir", "") or ".local/chrome-profile").strip()
-    channel = (getattr(s, "browser_channel", "") or "chrome").strip() or None
-    Path(profile).mkdir(parents=True, exist_ok=True)
-    url = url or "https://jobs.apple.com/en-us/search"
-
-    async def _drive() -> dict:
-        from playwright.async_api import async_playwright
-
-        root = str(Path(profile).resolve())
-        # Strip the automation markers so the ONE-TIME sign-in isn't blocked:
-        # Google (and sometimes Apple/Okta) refuse to authenticate a browser that
-        # advertises navigator.webdriver / --enable-automation. Applies don't need
-        # this (browser-use already strips these), but the login flow does.
-        cargs = ["--no-first-run", "--no-default-browser-check",
-                 "--disable-blink-features=AutomationControlled"]
-        async with async_playwright() as pw:
-            ctx = last = None
-            for ch in ([channel, None] if channel else [None]):
-                try:
-                    ctx = await pw.chromium.launch_persistent_context(
-                        root, headless=False, channel=ch, args=cargs,
-                        ignore_default_args=["--enable-automation"])
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    last = exc
-            if ctx is None:
-                return {"ok": False, "error": f"couldn't open the profile ({last}). "
-                        "Is an apply running? Try `appliedin stop` first, or wait."}
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            except Exception:  # noqa: BLE001
-                pass
-            print(f"\n  ✓ A Chrome window is open at:\n    {url}\n")
-            print("  → Sign in fully (username, password, and any 2FA).")
-            print(f"    The session is saved to the apply profile ({profile})")
-            print("    and reused automatically on every future application.\n")
-            await asyncio.get_event_loop().run_in_executor(
-                None, input, "  When you're signed in, press Enter here to save & close… ")
-            await ctx.close()
-        return {"ok": True, "profile": profile, "note": "session saved — future applies reuse it"}
-
-    return asyncio.run(_drive())
-
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="appliedin", description=__doc__)

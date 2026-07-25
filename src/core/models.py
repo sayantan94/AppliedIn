@@ -72,6 +72,11 @@ class JobRecord(BaseModel):
     jd_text: str
     location: str = ""
     ats: str = ""
+    # Set when the posting was read by an agent that judged fit while it was
+    # already looking at it. Saves scoring the same text twice; None means the
+    # scorer still has to run.
+    crawl_score: int | None = None
+    crawl_why: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

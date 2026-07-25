@@ -1241,8 +1241,16 @@ function openDrawer(pk) {
     ["job id", `<span class="mono">${esc(r.pk)}</span>`],
   ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 
+  const jdText = (r.jd_text || "").trim();
+  const jdBlock = jdText
+    ? `<details class="section jd-block"><summary class="section-t">the posting${
+         r.jd_url ? ` · <a href="${esc(r.jd_url)}" target="_blank" rel="noopener">open ↗</a>` : ""
+       }</summary><div class="jd-text">${esc(jdText)}</div></details>`
+    : "";
+
   $("#drawer-body").innerHTML = `
     ${gate}
+    ${jdBlock}
     ${closed}
     <div class="section"><div class="section-t">status</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">

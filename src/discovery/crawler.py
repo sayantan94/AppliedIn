@@ -14,7 +14,6 @@ injected extractor also disables the browser escalation — tests stay offline).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -32,25 +31,6 @@ log = get_logger(__name__)
 
 _MAX_HTML = 200_000  # cap the page text we hand the model
 
-
-def _run_async(coro: Any) -> Any:
-    """Run an async coroutine from this sync crawler. If a loop is already
-    running on this thread (the finder agent calls the crawler inside ADK's
-    event loop), run it on a dedicated thread so we never nest ``asyncio.run``."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)  # no loop here — the common (cron/daemon) path
-
-    import threading
-
-    box: dict[str, Any] = {}
-    def _worker() -> None:
-        box["v"] = asyncio.run(coro)
-    t = threading.Thread(target=_worker)
-    t.start()
-    t.join()
-    return box.get("v")
 
 
 def _search_terms(prefs: Preferences) -> list[str]:
@@ -73,58 +53,46 @@ _CRAWL_CEILING_S = 600  # 10 min per company — enterprise portals (Google, Ora
 
 
 def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobRecord]:
-    """Tier-2 escalation: drive the page with a browser agent (browser-use) and
-    map the postings it uncovers to JobRecords."""
-    import asyncio
+    """Read the page in the owner's own Chrome and map what it finds to records.
+
+    This is the tier that matters for custom careers pages. A headless render
+    gets an empty shell from anything that builds itself for a real session, or
+    hides its listings behind a search box or a "Load more" button — so the
+    company looked like it had no openings when it had thirty.
+    """
     from urllib.parse import urljoin
 
     from core.config import get_settings
-    from tools.browser_crawl import crawl
 
-    async def _bounded():
-        return await asyncio.wait_for(
-            crawl(url, company, _search_terms(prefs), get_settings().browser_model),
-            timeout=_CRAWL_CEILING_S)
+    from .chrome_crawl import find_jobs_sync
 
-    try:
-        items = _run_async(_bounded())
-    except TimeoutError:
-        log.warning("%s: browser crawl hit the %ds ceiling — skipping until the next sweep",
-                    company, _CRAWL_CEILING_S)
-        return []
-    return [
-        JobRecord(company=company, job_id=str(it["job_id"]), title=it.get("title", ""),
-                  # normalize relative URLs (e.g. /en-us/details/…) to absolute so the
-                  # seen-list dedup and the clickable link are consistent
-                  jd_url=urljoin(url, it.get("url", "")), jd_text=it.get("title", ""), ats="custom")
-        for it in items if it.get("job_id")
-    ]
+    jobs, board, note = find_jobs_sync(
+        company, url,
+        titles=_search_terms(prefs),
+        locations=list(getattr(prefs, "locations", []) or []),
+        model=(getattr(get_settings(), "chrome_model", "") or ""))
+    if board:
+        # Worth saying loudly: a wrapper around a real board should be read from
+        # that board's feed, which is faster, free and complete.
+        log.info("%s: careers page is a %s wrapper — switch it to feed mode in "
+                 "watchlist.yaml", company, board)
+    if note:
+        log.info("%s: %s", company, note[:200])
+    # Relative links normalised so dedup and the clickable URL agree.
+    for j in jobs:
+        j.jd_url = urljoin(url, j.jd_url)
+    return jobs
 
 
 def _render_page(url: str) -> str | None:
-    """Render a JS-heavy career page with a headless browser and return its HTML.
+    """Deliberately no browser here.
 
-    Custom portals (Apple, etc.) load listings with JavaScript, so a plain fetch
-    sees an empty shell. Playwright renders it. Returns None if Playwright isn't
-    installed or the render fails (caller falls back to a plain fetch)."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        log.warning("playwright not installed — can't render JS pages (run ./setup.sh, "
-                    "or `uv sync --extra runtime && uv run playwright install chromium`)")
-        return None
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=30_000)
-            html = page.content()
-            browser.close()
-        log.info("rendered %s with browser (%d chars)", url, len(html))
-        return html
-    except Exception as exc:
-        log.error("browser render failed for %s: %s", url, exc)
-        return None
+    The cheap tier is a plain fetch: it handles server-rendered career pages, and
+    for the ones it cannot handle a headless render did not help either — those
+    pages build themselves for a real session, which is what the Chrome
+    escalation below is for.
+    """
+    return None
 
 
 def _default_extractor(html: str, company: str) -> list[JobRecord]:

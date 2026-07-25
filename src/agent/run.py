@@ -266,12 +266,6 @@ def _save_output(pk: str, row: dict, jd_text: str, stores: Any) -> None:
                      jd_text=jd_text, tex=tex, pdf=pdf)
 
 
-def apply_one(pk: str, stores: Any = None) -> dict:
-    """Sync entry for the apply worker: drive the browser apply for ONE queued job.
-    Runs in the apply thread so it never blocks the evaluate (score/tailor) worker."""
-    stores = stores or make_stores()
-    return _run(_apply_direct(pk, stores))
-
 
 def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
     """Human answered the gate: SAVE the answer as a reusable fact, then continue.

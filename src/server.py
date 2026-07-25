@@ -85,6 +85,9 @@ def _to_ui(row: dict, artifacts) -> dict:
         "resume_url": link("resume_s3_key"),
         "has_diff": bool(row.get("resume_tex_key")),
         "jd_url": row.get("jd_url"),
+        # The posting itself, so the owner can read what the résumé was tailored
+        # against without leaving the board and losing their place.
+        "jd_text": (row.get("jd_text") or "")[:20000],
         "location": row.get("location", ""),
         "profile_id": row.get("profile_id", ""),
         "screenshot_url": link("screenshot_s3_key"),
@@ -633,6 +636,7 @@ def create_app() -> FastAPI:
 
         def _run() -> None:
             import logging
+
             from core.events import emit
             from daemon import process_backlog_once
             from discovery.handler import run_discovery
@@ -710,6 +714,7 @@ def create_app() -> FastAPI:
 
         def _run() -> None:
             import logging
+
             from agent.run import run_job
             try:
                 run_job(pk, make_stores(settings))
@@ -756,6 +761,7 @@ def create_app() -> FastAPI:
 
         def _run() -> None:
             import logging
+
             from agent.run import run_job
             from core.events import emit
             from tools.jd import fetch_jd_meta
@@ -901,7 +907,6 @@ def create_app() -> FastAPI:
         optionally scoped to one company. They run 5 AT A TIME (parallel batches)
         for speed — each apply gets its own Chrome profile so the windows don't
         collide (Chrome locks a profile to one process)."""
-        from agent.run import resume_job
         company = (body.get("company") or "").strip().lower()
         stores = make_stores(settings)
         pks = []
@@ -937,7 +942,7 @@ def create_app() -> FastAPI:
             base = (getattr(settings, "browser_profile_dir", "") or "").strip()
 
             async def _driver() -> None:
-                lanes: "asyncio.Queue[str]" = asyncio.Queue()
+                lanes: asyncio.Queue[str] = asyncio.Queue()
                 for i in range(_LANES):
                     lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
 

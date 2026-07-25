@@ -9,6 +9,7 @@ Artifacts (PDFs) live on disk, not in Redis. Local mode is the real product.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +75,12 @@ class RedisTracking(AbstractTracking):
         # attribute_not_exists(pk).
         if not self.r.set(f"app:{job.pk}", "{}", nx=True):
             return False
-        from datetime import datetime, timezone
+        from datetime import datetime
         row = {
             "pk": job.pk, "jd_hash": job.jd_hash, "status": status.value,
             "company": job.company, "job_id": job.job_id, "title": job.title,
             "jd_url": job.jd_url, "location": job.location, "ats": job.ats, "attempts": 0,
-            "discovered_at": datetime.now(timezone.utc).isoformat(),
+            "discovered_at": datetime.now(UTC).isoformat(),
         }
         self._write(job.pk, row, prev_status=None)
         return True

@@ -168,7 +168,7 @@ def apply_to_latex(tex: str, profile: Profile | None) -> str:
     return out
 
 
-def retarget(pk: str, profile: "Profile | None", stores=None) -> bool:  # noqa: ANN001
+def retarget(pk: str, profile: Profile | None, stores=None) -> bool:  # noqa: ANN001
     """Point an already-tailored résumé at a different profile.
 
     The tailoring is the expensive part and it does not change: only the contact
@@ -223,7 +223,7 @@ def expand_dates(value: str, today=None) -> str:  # noqa: ANN001
         return value
     base = today or date.today()
 
-    def _sub(m: "re.Match") -> str:
+    def _sub(m: re.Match) -> str:
         n, unit = int(m.group(1)), m.group(2).lower()
         days = n * (7 if unit == "w" else 30 if unit == "m" else 1)
         return (base + timedelta(days=days)).isoformat()

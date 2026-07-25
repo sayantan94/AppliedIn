@@ -153,7 +153,7 @@ def _apply_loop() -> None:
     base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
 
     async def _apply_batch(pks: list) -> None:
-        lanes: "asyncio.Queue[str]" = asyncio.Queue()
+        lanes: asyncio.Queue[str] = asyncio.Queue()
         for i in range(_APPLY_LANES):
             lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
 
@@ -217,11 +217,10 @@ def process_backlog_once(companies: list | None = None) -> dict:
     import asyncio
 
     from agent.run import _apply_direct, run_job
+    from core import flags as _flags
     from core.config import get_settings
     from core.models import Status
     from tools.browser_apply import set_profile_override
-
-    from core import flags as _flags
 
     stores = make_stores()
     sel = {c.strip().lower() for c in (companies or []) if c and c.strip()}
@@ -256,7 +255,7 @@ def process_backlog_once(companies: list | None = None) -> dict:
     base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
 
     async def _apply_batch(pks: list) -> None:
-        lanes: "asyncio.Queue[str]" = asyncio.Queue()
+        lanes: asyncio.Queue[str] = asyncio.Queue()
         for i in range(_APPLY_LANES):
             lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
 

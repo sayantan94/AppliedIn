@@ -22,7 +22,7 @@ from core.logging import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_TIMEOUT_S = 600
+DEFAULT_TIMEOUT_S = 2700  # 45 minutes
 
 # What a session may say stopped it. Anything else is reported as a plain block
 # rather than quietly reinterpreted.
@@ -143,18 +143,37 @@ async def run_task(task: str, *, report_key: str, model: str = "",
                     "reporting. Check the tab it left open before retrying.")
 
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
-    if proc.returncode != 0 and not stdout.strip():
-        tail = stderr.strip().splitlines()[-1] if stderr.strip() else "no output"
-        return {}, f"claude --chrome failed: {tail[:200]}"
 
+    # The REPORT FILE decides, before anything else. A session can do the whole
+    # job and still exit oddly — killed while winding down, a broken pipe on a
+    # long reply — and treating that as failure throws away work that was already
+    # finished, which is how a completed application got reported as "no output".
+    report: dict = {}
     if out_file.exists():
         try:
-            report = json.loads(out_file.read_text())
-            if isinstance(report, dict) and report_key in report:
-                return report, ""
+            loaded = json.loads(out_file.read_text())
+            if isinstance(loaded, dict) and report_key in loaded:
+                report = loaded
         except Exception:  # noqa: BLE001 — fall through to reading the reply
             log.debug("report file was not valid JSON — parsing the reply instead")
-    report = _report(stdout, report_key)
+    if not report:
+        report = _report(stdout, report_key)
+
+    # Only now, with the answer in hand, tidy up a session that outlived it: one
+    # was found alive seven minutes after finishing, holding the owner's browser.
+    if proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except TimeoutError:
+            log.warning("chrome session ignored terminate — killing it")
+            proc.kill()
+            await proc.wait()
+
+    if not report and proc.returncode not in (0, None) and not stdout.strip():
+        tail = stderr.strip().splitlines()[-1] if stderr.strip() else \
+            "it produced nothing — check whether Chrome is running and the extension connected"
+        return {}, f"claude --chrome failed: {tail[:200]}"
     if not report:
         return {}, ("The Chrome session ended without a structured result, so what "
                     "it did is unknown. Check the browser.")
@@ -258,9 +277,6 @@ def _safe_sanctions_answer(question: str, values: list) -> list:
 # text, which is consistent, rather than the question's markup.
 
 
-def _norm_txt(v: object) -> str:
-    return re.sub(r"\s+", " ", str(v or "")).strip().lower()
-
 
 def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
     """(value_to_write, refusal_note) — every promise, applied to one answer.
@@ -283,7 +299,10 @@ def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
 
 # --- the apply engine ------------------------------------------------------
 
-TIMEOUT_S = 900  # a real form with an upload on a slow portal
+# A long form on a slow portal genuinely takes this long, and cutting off a
+# session that is filling correctly wastes the whole run — CoreWeave was
+# working when it was killed. Better to wait than to redo.
+TIMEOUT_S = 2700  # 45 minutes
 
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str) -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
