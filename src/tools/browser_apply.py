@@ -691,12 +691,18 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             # wrong document. `page` is the top level when the form is hosted
             # directly, so the common case is unchanged.
             page = await _form_frame(page)   # reads / fills / uploads
+            # The job URL is the EMPLOYER's page, but an embedded form is served
+            # by the ATS itself — detect from the FRAME so a Greenhouse embed is
+            # recognised as Greenhouse rather than an unknown custom form. This
+            # also keeps the known-ATS branch (which never escalates to the vision
+            # agent) from being bypassed on every embedded board.
+            form_url = (getattr(page, "url", "") or "") if page is not top_page else url
 
             # URL-type skill: a known ATS (Ashby/…) gets structure-aware
             # extraction — far more reliable than the generic scrape (Ashby's
             # Location combobox and field labels, etc.). Falls back to generic.
             from tools.ats import detect_ats, extract_fields
-            ats = detect_ats(url)
+            ats = detect_ats(form_url) or detect_ats(url)
             fields = (await extract_fields(page, ats)) if ats else None
             if fields:
                 _emit(pk, "response", agent="browser", url=url,
@@ -1006,9 +1012,10 @@ async def _scripted_apply(url: str, company: str, facts: dict, model: str, *,
             # submitted — hold the visible window for the human to eyeball the
             # confirmation (no wander), or report uncertain on the board.
             from tools.ats import detect_ats
-            if detect_ats(url):
+            known_ats = detect_ats(form_url) or detect_ats(url)
+            if known_ats:
                 _emit(pk, "response", agent="browser", url=url,
-                      detail=f"✅ {detect_ats(url)} form filled + submitted — couldn't "
+                      detail=f"✅ {known_ats} form filled + submitted — couldn't "
                              f"auto-read the confirmation; over to you to eyeball it")
                 return await _maybe_assist({
                     "status": "gate", "reason": "unknown_field", "screenshot_b64": shot,
@@ -1588,8 +1595,19 @@ async def _form_frame(page):  # noqa: ANN001, ANN201
 _READ_FORM_JS = """
 () => {
   const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+  // COOKIE/consent banners are not part of the application. They sit in every
+  // page, carry checkbox-shaped controls ("Performance Cookies", "Targeting
+  // Cookies"), and an agent that can see them will happily toggle them — which
+  // both corrupts the answers and changes the owner's privacy settings. Match
+  // the banner CONTAINER, never the word "consent" alone: real applications ask
+  // genuine consent questions that must still be answered.
+  const inCookieBanner = el => !!(el.closest && el.closest(
+    '#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk, .ot-sdk-container,'
+    + ' .optanon-alert-box-wrapper, #CybotCookiebotDialog, .cc-window, .cookie-banner,'
+    + ' [id*="cookie" i], [class*="cookie-banner" i], [class*="cookieBanner" i],'
+    + ' [aria-label*="cookie" i], [data-testid*="cookie" i]'));
   const els = [...document.querySelectorAll('input, textarea, select')]
-    .filter(el => el.type !== 'hidden');
+    .filter(el => el.type !== 'hidden' && !inCookieBanner(el));
   const _short = t => { t = norm(t); return t && t.length < 80 ? t : ''; };
   const optLabel = el => _short((el.labels && el.labels[0] && el.labels[0].textContent) || '')
     || _short((el.closest('label') || {}).textContent || '')
@@ -1722,8 +1740,19 @@ _FILL_JS = """
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
+  // COOKIE/consent banners are not part of the application. They sit in every
+  // page, carry checkbox-shaped controls ("Performance Cookies", "Targeting
+  // Cookies"), and an agent that can see them will happily toggle them — which
+  // both corrupts the answers and changes the owner's privacy settings. Match
+  // the banner CONTAINER, never the word "consent" alone: real applications ask
+  // genuine consent questions that must still be answered.
+  const inCookieBanner = el => !!(el.closest && el.closest(
+    '#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk, .ot-sdk-container,'
+    + ' .optanon-alert-box-wrapper, #CybotCookiebotDialog, .cc-window, .cookie-banner,'
+    + ' [id*="cookie" i], [class*="cookie-banner" i], [class*="cookieBanner" i],'
+    + ' [aria-label*="cookie" i], [data-testid*="cookie" i]'));
   const ctrls = [...document.querySelectorAll('input, textarea, select')]
-    .filter(e => e.type !== 'hidden');
+    .filter(e => e.type !== 'hidden' && !inCookieBanner(e));
   const isText = el => !['radio','checkbox','file','submit','button','hidden'].includes(el.type);
   // The SAME label resolver READ_FORM uses, so a label the agent read back
   // matches here — climb to the question text when there's no bound <label>
