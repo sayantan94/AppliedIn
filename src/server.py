@@ -1095,7 +1095,16 @@ def create_app() -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # Static dashboard (index.html, app.js, styles.css, …) at the root, last so
+    # The dashboard lives in dashboard.html because index.html is the public
+    # landing page (Vercel serves whatever is called index.html at the root).
+    # Locally, "/" should still open the dashboard.
+    @app.get("/", include_in_schema=False)
+    def _dashboard():
+        from fastapi.responses import FileResponse
+
+        return FileResponse(_WEB / "dashboard.html")
+
+    # Static assets (app.js, styles.css, …) at the root, last so
     # the explicit API routes above win.
     app.mount("/", StaticFiles(directory=str(_WEB), html=True), name="web")
     return app

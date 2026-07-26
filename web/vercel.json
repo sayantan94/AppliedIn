@@ -32,12 +32,8 @@
   ],
   "rewrites": [
     {
-      "source": "/",
-      "destination": "/landing.html"
-    },
-    {
       "source": "/demo",
-      "destination": "/index.html"
+      "destination": "/dashboard.html"
     }
   ]
 }

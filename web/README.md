@@ -19,7 +19,8 @@ Static single-page dashboard for the AppliedIn pipeline.
 ```bash
 cd web
 python3 -m http.server 8791
-# open http://localhost:8791/  (runs in demo mode with sample data)
+# http://localhost:8791/            the landing page
+# http://localhost:8791/dashboard.html   the dashboard, on sample data
 ```
 
 Demo mode is the committed default (`config.js` → `demo: true`), and the login
@@ -43,7 +44,9 @@ the API base URL, Cognito domain + client id, and the CloudFront/Vercel
 
 | File | Purpose |
 | --- | --- |
-| `index.html` | shell: sidebar nav, topbar, view container, detail drawer |
+| `index.html` | the public landing page (appliedin.dev) |
+| `dashboard.html` | the app shell: nav, topbar, views, detail drawer |
+| `landing.css`, `landing.js` | landing page styles and docs behaviour |
 | `styles.css` | wireframe design system (Inter, monochrome, light/dark) |
 | `app.js` | router, five views, detail drawer, live refresh |
 | `auth.js` | Cognito Hosted-UI PKCE (kept ready; bypassed for now) |

@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AppliedIn</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect x='2' y='2' width='44' height='44' rx='13' fill='%230c100e'/><g fill='none' stroke='%233fd68f' stroke-width='4.2' stroke-linecap='round' stroke-linejoin='round'><path d='M11.5 37 L24 11 L36.5 37'/><path d='M17 27 L21.5 31.5 L31.5 20'/></g></svg>"
+    />
+  </head>
+  <body>
+    <div class="shell">
+      <div id="llm-banner" class="llm-banner" hidden>
+        <span class="lb-ico">⚠</span>
+        <span id="llm-banner-msg" class="lb-msg"></span>
+        <button id="llm-banner-x" class="lb-x" title="Dismiss">Dismiss</button>
+      </div>
+      <!-- ─── Control deck: the two primary actions + live vitals ─────────── -->
+      <header class="deck">
+        <div class="deck-row">
+          <div class="deck-brand">
+            <svg class="brand-logo" viewBox="0 0 48 48" width="32" height="32" fill="none"
+              role="img" aria-label="AppliedIn">
+              <rect class="lg-badge" x="2" y="2" width="44" height="44" rx="13" />
+              <g class="lg-mark">
+                <path d="M11.5 37 L24 11 L36.5 37" />
+                <path d="M17 27 L21.5 31.5 L31.5 20" />
+              </g>
+            </svg>
+            <div class="brand-txt">
+              <span class="brand-name">AppliedIn</span>
+              <span class="brand-sub mono" id="env-pill">demo</span>
+            </div>
+            <span id="paused-pill" class="paused-pill mono" hidden>⏸ paused</span>
+          </div>
+
+          <div class="deck-actions">
+            <div class="disco" id="disco">
+              <button id="btn-discover" class="act act-discover"
+                title="Step 1 — scan the selected companies' job boards and queue new postings as “found”. Doesn't apply to anything.">
+                <span class="act-spin" aria-hidden="true"></span>
+                <svg class="act-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M15.8 15.8 L20.5 20.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+                <span class="act-label" id="discover-label">Discover · All</span>
+              </button>
+              <button id="btn-companies" class="act act-caret"
+                title="Choose which companies to scan"
+                aria-haspopup="true" aria-expanded="false" aria-label="Choose companies to scan">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                  <path d="M6 9.5 L12 15 L18 9.5" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+
+              <div id="copicker" class="copicker" hidden>
+                <div class="cp-head">
+                  <input id="cp-search" class="cp-search" type="search"
+                    placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="cp-tools">
+                  <button class="cp-lk" id="cp-all" type="button">Select all</button>
+                  <button class="cp-lk" id="cp-none" type="button">Clear</button>
+                  <span class="cp-state mono" id="cp-state">all</span>
+                </div>
+                <div class="cp-list" id="cp-list" aria-label="Companies"></div>
+                <div class="cp-prof">
+                  <label for="cp-profile">apply as</label>
+                  <select id="cp-profile" class="cp-profsel"><option value="">default profile</option></select>
+                </div>
+                <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
+                <div class="cp-add">
+                  <input id="cp-add-name" class="cp-search" type="text"
+                    placeholder="Add company — name" autocomplete="off" spellcheck="false" />
+                  <input id="cp-add-url" class="cp-search" type="text"
+                    placeholder="careers URL (optional)" autocomplete="off" spellcheck="false" />
+                  <button class="cp-lk cp-add-btn" id="cp-add-btn" type="button">Add</button>
+                  <button class="cp-lk cp-add-btn" id="cp-add-run" type="button"
+                    title="Add the company, discover its postings, and tailor résumés — stops before applying">Add&nbsp;&amp;&nbsp;run</button>
+                </div>
+              </div>
+            </div>
+
+            <span class="act-arrow" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 12h15M14 6.5 19.5 12 14 17.5"/>
+              </svg>
+            </span>
+
+            <button id="btn-process" class="act act-process"
+              title="Step 2 — score + tailor every “found” job, then apply the ones that qualify.">
+              <span class="act-spin" aria-hidden="true"></span>
+              <svg class="act-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M13.2 2.8 5.4 13h5.4l-1.2 8.2L18.6 11h-5.5l.1-8.2z"
+                  stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+              <span class="act-label" id="process-label">Process applications</span>
+              <span class="act-badge mono" id="proc-badge" title="found jobs waiting to be processed">0</span>
+            </button>
+          </div>
+
+          <div class="deck-right">
+            <div class="deck-vitals">
+              <div class="vital" title="discovered jobs waiting for a Process run">
+                <span class="vital-n mono" id="v-wait">—</span>
+                <span class="vital-l">waiting</span>
+              </div>
+              <div class="vital" title="applications submitted today">
+                <span class="vital-n mono" id="v-cap">—</span>
+                <span class="vital-l">applied today</span>
+              </div>
+              <div class="vital" id="vital-needs" title="gated jobs waiting on your answer">
+                <span class="vital-n mono" id="v-needs">—</span>
+                <span class="vital-l">need you</span>
+              </div>
+            </div>
+
+            <div class="menu-wrap">
+              <button id="menu-btn" class="iconbtn" title="Settings"
+                aria-haspopup="true" aria-expanded="false" aria-label="Settings">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                  stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                  <path d="M4 7h9M19 7h1M4 12h2M12 12h8M4 17h11M21 17h-1"/>
+                  <circle cx="15.5" cy="7" r="2.1"/>
+                  <circle cx="8.5" cy="12" r="2.1"/>
+                  <circle cx="17.5" cy="17" r="2.1"/>
+                </svg>
+              </button>
+              <div id="menu" class="menu" hidden>
+                <div class="menu-t">Settings</div>
+                <button class="menu-item" id="m-pause"
+                  title="Pause/resume the background automation loops">
+                  <span>Automation loops</span>
+                  <span class="menu-state mono" id="m-pause-state">running</span>
+                </button>
+                <button class="menu-item" id="m-mode"
+                  title="gated: you approve each application · auto: applies by itself while you sleep · assisted: you finish each one in your own browser with the extension">
+                  <span>Apply mode</span>
+                  <span class="menu-state mono" id="m-mode-state">gated</span>
+                </button>
+                <button class="menu-item" id="m-headless"
+                  title="Show the Chrome windows while applying, or run headless (no GUI). Headless is faster but can't show a CAPTCHA/handoff window.">
+                  <span>Browser windows</span>
+                  <span class="menu-state mono" id="m-headless-state">visible</span>
+                </button>
+                <button class="menu-item" id="m-theme">
+                  <span>Theme</span>
+                  <span class="menu-state mono" id="m-theme-state">dark</span>
+                </button>
+                <div class="menu-div"></div>
+                <button class="menu-item danger" id="m-reset"
+                  title="Clears tracked jobs, queue, logs and stored artifacts. Keeps facts & logins.">
+                  <span>Reset pipeline…</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p class="deck-help">
+          <b>Discover</b> finds new jobs from your company watchlist, then
+          <b>Process</b> scores them, tailors your résumé and applies.
+        </p>
+        <div class="deck-breakdown mono" id="breakdown"></div>
+        <div class="runbar" id="runbar" data-active="false" aria-hidden="true"></div>
+      </header>
+
+      <!-- ─── Board: work area + live activity ────────────────────────────── -->
+      <div class="board">
+        <main class="work">
+          <div class="workbar">
+            <nav class="tabs" id="tabs" aria-label="Views">
+              <button class="tab active" data-tab="pipeline">Pipeline</button>
+              <button class="tab" data-tab="apps">Applications
+                <span class="tab-n mono" id="tab-n-apps">0</span></button>
+              <button class="tab" data-tab="needs">Needs you
+                <span class="tab-n mono amber" id="tab-n-needs" hidden>0</span></button>
+              <button class="tab" data-tab="stuck">Unable to do it
+                <span class="tab-n mono red" id="tab-n-stuck" hidden>0</span></button>
+              <button class="tab" data-tab="logs">Logs
+                <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
+            </nav>
+            <div class="workbar-right">
+              <div class="rolemgr" id="rolemgr">
+                <button id="btn-role" class="skipbtn rolebtn" aria-haspopup="true" aria-expanded="false"
+                  title="Paste a job URL — tailor your résumé to that one role, no discovery needed">✎ Tailor a role</button>
+                <div id="rolepicker" class="copicker rolepicker" hidden>
+                  <div class="cp-role-h">Tailor your résumé to one role</div>
+                  <div class="cp-head">
+                    <input id="rp-url" class="cp-search" type="text"
+                      placeholder="paste a job URL (Greenhouse / Lever / Ashby / Workday…)"
+                      autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div class="cp-role-foot">
+                    <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>
+                    <button id="rp-go" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
+                  </div>
+                </div>
+              </div>
+              <div class="profmgr" id="profmgr">
+                <button id="btn-profiles" class="skipbtn profbtn" aria-haspopup="true" aria-expanded="false"
+                  title="Which email + phone an application goes out under">◐ Profiles<span
+                    id="prof-count" class="skip-count mono" hidden>0</span></button>
+                <div id="profpicker" class="copicker profpicker" hidden>
+                  <div class="cp-role-h">Who the application comes from</div>
+                  <div class="pr-list" id="pr-list"></div>
+                  <div class="pr-add">
+                    <input id="pr-label" class="cp-search" type="text" placeholder="label — e.g. Job hunt" autocomplete="off" />
+                    <input id="pr-email" class="cp-search" type="email" placeholder="email address" autocomplete="off" />
+                    <input id="pr-phone" class="cp-search" type="tel" placeholder="phone (optional)" autocomplete="off" />
+                    <button id="pr-add" class="cp-lk cp-add-btn" type="button">Add profile</button>
+                  </div>
+                  <div class="cp-foot">The résumé is re-rendered with the profile's
+                    address, so the form and the PDF never disagree. Marked
+                    <b>default</b> is used by anything you don't set.</div>
+                </div>
+              </div>
+              <div class="prefmgr" id="prefmgr">
+                <button id="btn-prefs" class="skipbtn prefbtn" aria-haspopup="true" aria-expanded="false"
+                  title="What counts as a match — titles, keywords, locations and the score bar">◎ Job preferences</button>
+                <div id="prefpicker" class="copicker prefpicker" hidden>
+                  <div class="cp-role-h">What counts as a match</div>
+                  <div class="pf-body">
+                    <label class="pf-f"><span class="pf-l">Target titles</span>
+                      <input id="pf-titles" class="cp-search" type="text" autocomplete="off"
+                        placeholder="Senior Software Engineer, Staff Software Engineer" /></label>
+                    <label class="pf-f"><span class="pf-l">Raises fit</span>
+                      <input id="pf-include" class="cp-search" type="text" autocomplete="off"
+                        placeholder="ai, agentic, llm, platform" /></label>
+                    <label class="pf-f"><span class="pf-l">Never a fit</span>
+                      <input id="pf-exclude" class="cp-search" type="text" autocomplete="off"
+                        placeholder="intern, manager, mobile" /></label>
+                    <div class="pf-row">
+                      <label class="pf-f"><span class="pf-l">Seniority</span>
+                        <input id="pf-seniority" class="cp-search" type="text" autocomplete="off"
+                          placeholder="senior, staff" /></label>
+                      <label class="pf-f pf-narrow"><span class="pf-l">Score bar</span>
+                        <input id="pf-score" class="cp-search" type="number" min="0" max="10" /></label>
+                      <label class="pf-f pf-narrow"><span class="pf-l">Top N / run</span>
+                        <input id="pf-topn" class="cp-search" type="number" min="0" max="50"
+                          title="How many new roles one company run tailors, best first. 0 = no cap." /></label>
+                    </div>
+                    <label class="pf-f"><span class="pf-l">Locations</span>
+                      <input id="pf-locations" class="cp-search" type="text" autocomplete="off"
+                        placeholder="Seattle, California, Remote (US)" /></label>
+                    <label class="pf-f"><span class="pf-l">Hard rules
+                        <em class="pf-hint">— one per line; the scorer rejects anything that breaks these</em></span>
+                      <textarea id="pf-notes" class="cp-search pf-notes" rows="5"
+                        placeholder="- No roles requiring a security clearance."></textarea></label>
+                    <label class="pf-check"><input id="pf-remote" type="checkbox" />
+                      <span>Remote roles only</span></label>
+                  </div>
+                  <div class="cp-role-foot">
+                    <span id="pf-state">Applies to the next job scored.</span>
+                    <button id="pf-save" class="cp-lk cp-add-btn" type="button">Save preferences</button>
+                  </div>
+                </div>
+              </div>
+              <div class="skipmgr" id="skipmgr">
+                <button id="btn-skips" class="skipbtn" aria-haspopup="true" aria-expanded="false"
+                  title="Choose companies Discover + Process should skip">⊘ Skip companies<span
+                    id="skip-count" class="skip-count mono" hidden>0</span></button>
+                <div id="skippicker" class="copicker skippicker" hidden>
+                  <div class="cp-head">
+                    <input id="sp-search" class="cp-search" type="search"
+                      placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div class="cp-list" id="sp-list" aria-label="Skip companies"></div>
+                  <div class="cp-foot">Checked = <b>skipped</b> — Discover + Process pass over
+                    them. Uncheck to bring a company back.</div>
+                </div>
+              </div>
+              <select id="co-filter" class="cofilter" title="Show one company only"
+                aria-label="Filter by company">
+                <option value="">All companies</option>
+              </select>
+              <input id="search" class="search" type="search"
+                placeholder="Search company or role…" autocomplete="off" spellcheck="false" />
+              <button id="refresh-btn" class="iconbtn" title="Refresh now" aria-label="Refresh">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <path d="M20 12a8 8 0 1 1-2.34-5.66"/>
+                  <path d="M20 4v4h-4"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <section id="pane" class="pane"></section>
+        </main>
+
+        <aside class="feedpanel" aria-label="Live activity">
+          <div class="feed-head">
+            <span class="feed-dot" id="feed-dot" data-state="off"></span>
+            <span class="feed-title">Live activity</span>
+            <span class="feed-hint mono" id="feed-hint">connecting…</span>
+          </div>
+          <div id="feed" class="feed"></div>
+        </aside>
+      </div>
+
+      <footer class="foot mono">
+        <span id="foot-count">—</span>
+        <span class="foot-sep">·</span>
+        <span id="foot-updated">syncing…</span>
+        <span class="foot-env" id="foot-env">demo</span>
+      </footer>
+    </div>
+
+    <!-- ─── Application detail drawer ───────────────────────────────────── -->
+    <div id="scrim" class="scrim" hidden></div>
+    <aside id="drawer" class="drawer" hidden aria-label="Application detail">
+      <div class="drawer-head">
+        <div>
+          <div id="drawer-title" class="drawer-title">—</div>
+          <div id="drawer-sub" class="drawer-sub">—</div>
+        </div>
+        <button id="drawer-close" class="drawer-close" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </aside>
+
+    <!-- ─── Résumé viewer ───────────────────────────────────────────────── -->
+    <div id="rmodal" class="rmodal" hidden>
+      <div class="rmodal-bar">
+        <span id="rmodal-title" class="rmodal-title mono">résumé</span>
+        <div class="rmodal-actions">
+          <a id="rmodal-download" class="btn" target="_blank" rel="noopener" href="#">Open PDF</a>
+          <button id="rmodal-close" class="drawer-close" title="Close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div id="rmodal-body" class="rmodal-body"></div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script src="config.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
