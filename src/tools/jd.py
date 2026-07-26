@@ -111,7 +111,10 @@ def _from_chrome(url: str) -> dict | None:
     ok, _ = available()
     if not ok:
         return None
+    from tools.claude_chrome import TAB_HYGIENE
+
     task = (f"Open {url}, wait for it to load, and read the job posting.\n\n"
+            f"{TAB_HYGIENE}\n"
             "Close the tab, then write this JSON to the file you are told about "
             "and repeat it in your reply:\n"
             '{"title": "<the role title>", "description": "<the full posting text, '

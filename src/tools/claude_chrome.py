@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 from core.logging import get_logger
@@ -40,6 +41,68 @@ ALLOWED_TOOLS = ("mcp__claude-in-chrome", "Write")
 # emptying the store while a session is still filling a form leaves the owner
 # watching a browser do work for a job that no longer exists.
 _LIVE: set[int] = set()
+
+# ONE real browser, so ONE session at a time. The evaluate lanes (2) each read a
+# posting in Chrome and the apply lane drives a form in the same Chrome, so three
+# sessions could run at once — nothing ever counted them against a shared budget.
+# Two sessions on one browser is not merely slow, it is broken in a way that reads
+# as a page problem: the second session's PAGE-READING tools keep working while
+# every INTERACTION tool fails with "Cannot access a chrome-extension:// URL of
+# different extension". The agent then reports a posting it could see but could
+# not click, and a real application is burned on an environment fault.
+#
+# A threading primitive rather than an asyncio one on purpose: the lanes run in
+# separate threads with their own event loops, so an asyncio.Lock would only
+# serialise within one lane and let the lanes collide exactly as before.
+_BROWSER = threading.Semaphore(1)
+_BROWSER_WAIT_S = 3000  # a little over the 45-minute session ceiling
+
+# Said by the browser tools when another session owns the page. Environment, not
+# job: the posting is fine and retrying later works, so it must never be recorded
+# as a failed application.
+_CONFLICT_MARKERS = (
+    "cannot access a chrome",          # …-extension:// URL of different extension
+    "url of different extension",
+    "cannot access contents of the page",
+    "different extension",
+    # Our OWN wording, below. This layer rewrites the raw browser error into
+    # something readable, and the apply layer then re-reads that text to decide
+    # whether to re-queue — so the friendly message has to stay recognisable too.
+    # Without this the detection worked and the job was still marked failed.
+    "would not accept clicks on the tab",
+)
+
+# The one phrase the message above must contain, kept next to the markers so the
+# two cannot drift apart.
+CONFLICT_MESSAGE = ("Chrome would not accept clicks on the tab the session was "
+                    "using, so the page could be read but not driven. Nothing was "
+                    "filled or submitted.")
+
+# Chrome refuses to let the extension act on a tab owned by a DIFFERENT extension,
+# and a tab that has just been created is exactly that until its navigation lands:
+# reads of the old page keep working while every click fails, which reads as a
+# broken page rather than a mis-targeted tab. So: never act on a tab before its
+# URL is the page you want, and treat that error as "wrong tab", not "bad page".
+TAB_HYGIENE = """BEFORE YOU CLICK ANYTHING, make sure you are on the right tab.
+A tab you just created is not yet the page you asked for. Navigate it, wait for
+the load, and confirm its URL is the site you intend before any click, keypress,
+screenshot or JavaScript. Never act on a tab whose URL starts with
+chrome-extension://, chrome://, or about: — those are browser and extension pages,
+not the application.
+
+If any action fails with "Cannot access a chrome-extension:// URL of different
+extension" (or a similar access error), you are pointed at the wrong tab; the page
+itself is fine. Do NOT give up and do NOT report the posting as unfillable. List
+the tabs, switch to the one whose URL is the application, and continue. If no such
+tab exists, navigate an existing ordinary tab to the application URL rather than
+opening a new one. Only report a browser problem if that recovery also fails.
+"""
+
+
+def _is_browser_conflict(text: str) -> bool:
+    """True when a session failed because another one held the browser."""
+    low = (text or "").lower()
+    return any(m in low for m in _CONFLICT_MARKERS)
 
 
 def kill_live_sessions() -> int:
@@ -133,6 +196,22 @@ async def run_task(task: str, *, report_key: str, model: str = "",
     if not ok:
         return {}, why
 
+    # Wait for the browser rather than racing another session for it. Acquired in
+    # a worker thread so this lane's event loop keeps running while it waits.
+    if not await asyncio.to_thread(_BROWSER.acquire, True, _BROWSER_WAIT_S):
+        return {}, ("Another browser session held the browser for the whole wait, "
+                    "so this one never started. Nothing was submitted.")
+    try:
+        return await _run_task_locked(task, report_key=report_key, model=model,
+                                      timeout_s=timeout_s, allow_dirs=allow_dirs)
+    finally:
+        _BROWSER.release()
+
+
+async def _run_task_locked(task: str, *, report_key: str, model: str = "",
+                           timeout_s: int = DEFAULT_TIMEOUT_S,
+                           allow_dirs: list[str] | None = None) -> tuple[dict, str]:
+    """run_task's body, with the single-browser lock already held."""
     # The report comes back as a FILE the task writes, so the happy path is a
     # json.load of exactly one object rather than a guess at which braces in a
     # page of prose were the result. Brace scanning stays as the fallback for a
@@ -220,6 +299,20 @@ async def run_task(task: str, *, report_key: str, model: str = "",
     if not report:
         return {}, ("The Chrome session ended without a structured result, so what "
                     "it did is unknown. Check the browser.")
+
+    # A session can produce a perfectly well-formed report whose CONTENT is "I
+    # could read the page but every click failed". That is the browser being held
+    # by something else, not the posting being unfillable, so say so plainly
+    # instead of letting it be recorded against the job.
+    if _is_browser_conflict(json.dumps(report)) or _is_browser_conflict(stdout):
+        # Log the session's OWN account, not just the verdict. "Browser conflict"
+        # names a symptom; which tab and which extension it tripped on is the only
+        # thing that identifies the cause, and without it this gets diagnosed by
+        # guesswork.
+        log.warning("browser conflict (report_key=%s)\n--- report ---\n%s\n"
+                    "--- session output ---\n%s",
+                    report_key, json.dumps(report)[:4000], stdout[-4000:] or "(empty)")
+        return {}, CONFLICT_MESSAGE
     # The session's own account of what it did, so the owner can read the whole
     # thing rather than the one-line outcome.
     report.setdefault("_transcript", _transcript(stdout))
@@ -399,6 +492,7 @@ def direct_board_url(url: str) -> str:
     six fields in and no résumé. The same form served from the board's own domain
     is same-origin and behaves normally, so go there instead of fighting it.
     """
+    import re as _re
     from urllib.parse import parse_qs, urlparse
 
     u = urlparse(url)
@@ -407,6 +501,18 @@ def direct_board_url(url: str) -> str:
     board = (q.get("board") or [""])[0].strip()
     if jid.isdigit() and board:
         return f"https://job-boards.greenhouse.io/{board}/jobs/{jid}"
+
+    # Oracle, for a different reason worth knowing. The posting page carries a
+    # "LinkedIn Embedded Content" frame; an ad blocker replaces that with a page
+    # of its OWN extension, and Chrome then refuses to let another extension act
+    # on the tab at all — "Cannot access a chrome-extension:// URL of different
+    # extension". The page still READS fine, so it looks like the posting is
+    # unfillable rather than the tab being poisoned. Oracle's own candidate site
+    # carries the identical application and no social embed, so go straight there.
+    if u.netloc.endswith("careers.oracle.com"):
+        if m := _re.search(r"/job/(\d+)", u.path):
+            return ("https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience"
+                    f"/en/sites/jobsearch/job/{m.group(1)}/apply/email")
     return ""
 
 
@@ -439,6 +545,7 @@ without a résumé is worse than one that stopped.
 APPLICATION: {url}
 COMPANY: {company}
 
+{TAB_HYGIENE}
 A job page is not an application: the fields may sit behind an "Application" tab
 or an Apply button. Open that first, then work through the form.
 

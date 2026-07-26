@@ -451,11 +451,19 @@ function laneCard(r) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Re-opens the filled application in Chrome — solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
   } else if (canApply(r)) {
+    // Two ways to send it: now, or in line. Queueing matters when several are
+    // ready — they share one real browser, so running them at once fights.
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
-       title="Approve — the browser applies with the tailored résumé">▶ Apply</button>`;
+       title="Approve — the browser applies with the tailored résumé now">▶ Apply</button>
+      <button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
+       title="Add to the apply queue — runs when a browser lane is free, one at a time">＋ Queue</button>`;
   } else if (r.status === "found") {
     retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
        title="Score + tailor this job now (stops at ready-to-apply)">▶ Run now</button>`;
+  } else if (isStuck(r)) {
+    // The recovery path that used to mean editing the store by hand.
+    retry = `<button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
+       title="Clear the failure and put this back on the apply queue">↻ Re-queue</button>`;
   }
   const act = state.activity[r.pk];
   const live = (["tailoring", "submitting"].includes(r.status) && act && act.detail)
@@ -1091,13 +1099,31 @@ async function runProcess() {
   pollStats();
 }
 
+// Optimistically flip a card to a working state so a click is acknowledged in the
+// same frame. The server's own status/event overwrites this as soon as it lands;
+// if the request fails, the next loadApps() puts the real status back.
+function markBusy(pk, detail) {
+  const row = state.apps.find((a) => a.pk === pk);
+  if (row) row.status = "submitting";
+  state.activity[pk] = { detail, at: Date.now() / 1000, kind: "running" };
+  renderPane();        // move the card into its working state
+  scheduleLive(pk);    // and show the live line, same path the SSE feed uses
+}
+
 function paneAction(act, pk) {
   if (demoGuard()) return;
   if (act === "answer") {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
     const answer = (t?.value || "").trim() || "approved";
+    // Show it immediately. The first real event is a browser subprocess away, and
+    // an approve that renders nothing for a minute reads as a dead button.
+    markBusy(pk, "starting…");
     post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
-    toast("Sent — pipeline resuming.");
+    toast("Approved — opening the application.");
+  } else if (act === "queue-apply") {
+    markBusy(pk, "queued…");
+    post(`/actions/queue-apply/${encodeURIComponent(pk)}`);
+    toast("Queued — it applies when a browser lane is free.");
   } else if (act === "skip") {
     if (!confirm("Skip this job? It moves to closed.")) return;
     post(`/actions/skip/${encodeURIComponent(pk)}`);
@@ -1118,6 +1144,8 @@ function approveAll() {
     (a) => a.status === "needs_human" && a.gate_reason === "approval").length;
   if (!confirm(`Approve and apply to ${n} job${n === 1 ? "" : "s"}? `
     + `They run a few at a time — finish any CAPTCHA windows as they open.`)) return;
+  state.apps.filter((a) => a.status === "needs_human" && a.gate_reason === "approval")
+    .forEach((a) => markBusy(a.pk, "queued…"));
   post("/actions/approve-all", { company: "__all__" });
   toast(`Approving ${n} — applications are running.`);
   scheduleReload();

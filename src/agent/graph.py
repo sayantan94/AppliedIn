@@ -118,8 +118,14 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     # Record on the TRACKING ROW too — that's what the dashboard reads, so this is
     # how the résumé PDF + the "what changed" diff show up in the UI.
     row = stores.tracking.get(pk) or {}
+    # Stamp WHICH base résumé this was tailored from, so editing base.tex later
+    # makes already-tailored rows detectably stale instead of silently shipping
+    # the old content.
+    from agent.run import seed_fingerprint
+
     stores.tracking.set_status(pk, row.get("status", "tailored"), resume_s3_key=key,
-                               resume_tex_key=tex_key, resume_version="tailored")
+                               resume_tex_key=tex_key, resume_version="tailored",
+                               resume_seed=seed_fingerprint())
     return {"ok": True, "resume_s3_key": key, "format": fmt}
 
 
@@ -385,7 +391,16 @@ critic = LlmAgent(
         "Call exit_loop if the résumé is truthful and reasonably aligned — it does NOT "
         "need to be perfect. Only if a bullet clearly misses obvious JD vocabulary, give "
         "ONE small emphasis-only tweak; never ask to add content, drop bullets, change "
-        "formatting, upgrade seniority, or restructure. When in doubt, exit_loop."
+        "formatting, upgrade seniority, or restructure. When in doubt, exit_loop.\n\n"
+        "ONE EXCEPTION overrides the approve bias. A bullet must say what was built and "
+        "what it achieved, never the private history of how the code got there. If any "
+        "bullet contains line/file counts or deltas ('cut 3.1K lines across 5 files to "
+        "636 across 2'), a refactor/rewrite narrative, a debugging or bug-hunt story "
+        "('diagnosed X rather than Y'), commit/PR counts, internal module or subprocess "
+        "names, or framing about fixing an earlier mistake — do NOT exit_loop. An outside "
+        "reader cannot verify repo history, and shrinking code is not an achievement, it "
+        "reads as churn. Return one tweak rewriting it to the OUTCOME: what the system "
+        "does, at what scale, for whom. That is a rewording, not new content."
     ),
     tools=[_skill("resume-review"), exit_loop],
 )

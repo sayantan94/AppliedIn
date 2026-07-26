@@ -892,6 +892,32 @@ def create_app() -> FastAPI:
         emit("applied", pk=pk, agent="applier", detail="Marked applied by you — no resubmit.")
         return {"ok": True}
 
+    @app.post("/actions/queue-apply/{pk}")
+    def queue_apply(pk: str):
+        """Put a job on the APPLY QUEUE instead of applying it right now.
+
+        ▶ Apply runs the browser immediately, so approving three jobs at once has
+        them racing over the one real Chrome. Queued jobs drain a lane at a time,
+        in order. This is also the recovery path for a row that died mid-apply:
+        it clears the failure and hands the job back to the queue, which
+        previously meant editing the store by hand.
+        """
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk) or {}
+        if not row:
+            return {"ok": False, "error": f"no job {pk!r}"}
+        # Never re-queue something already submitted — a duplicate under a real
+        # name is worse than a missed application.
+        if row.get("status") in ("applied", "applied_manual"):
+            return {"ok": False, "error": f"already {row.get('status')} — refusing to re-apply"}
+        stores.tracking.set_status(pk, Status.TAILORED, fail_reason="", skip_reason="",
+                                   gate_reason="approval")
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        from core.events import emit
+        emit("running", pk=pk, agent="applier", detail="queued for apply…",
+             url=row.get("jd_url", ""))
+        return {"ok": True, "status": "queued"}
+
     @app.post("/actions/skip/{pk}")
     def skip(pk: str):
         make_stores(settings).tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
@@ -1056,19 +1082,24 @@ def create_app() -> FastAPI:
         ctype = mimetypes.guess_type(key)[0] or "application/octet-stream"
         disp = "inline" if ctype in ("application/pdf",) or ctype.startswith("image/") \
             else "attachment"
+        # An artifact key is STABLE across re-runs (resumes/<pk>.pdf), but its bytes
+        # are not: re-tailoring rewrites the same key. Without this the browser
+        # keeps showing the résumé from the previous tailoring and the edit looks
+        # like it never happened — must-revalidate, so a re-tailor is always visible.
+        no_cache = {"Cache-Control": "no-cache, must-revalidate", "Pragma": "no-cache"}
         if settings.mode == "local":
             from fastapi.responses import FileResponse
             base = (Path(settings.local_dir) / "artifacts").resolve()
             p = (base / key).resolve()
             if p.is_file() and str(p).startswith(str(base) + "/"):  # no path traversal
                 return FileResponse(str(p), media_type=ctype, headers={
-                    "Content-Disposition": f'{disp}; filename="{p.name}"'})
+                    "Content-Disposition": f'{disp}; filename="{p.name}"', **no_cache})
         try:
             data = make_stores(settings).artifacts.get(key)
         except Exception:
             return Response(status_code=404)
         return Response(data, media_type=ctype,
-                        headers={"Content-Disposition": disp})
+                        headers={"Content-Disposition": disp, **no_cache})
 
     @app.get("/events")
     async def events():

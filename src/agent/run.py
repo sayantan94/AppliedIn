@@ -75,6 +75,16 @@ def _base_latex() -> str:
     return _sanitize(path.read_text()) if path.exists() else ""
 
 
+def seed_fingerprint() -> str:
+    """Short hash of the base résumé. Stored on a row when it is tailored, so an
+    edit to base.tex can be detected later: a tailored artifact is a snapshot, and
+    without this a row tailored before the edit would keep being submitted with
+    the old content forever — the change silently never reaches an employer."""
+    import hashlib
+
+    return hashlib.sha256(_base_latex().encode()).hexdigest()[:16]
+
+
 def _prefs_notes() -> str:
     """Hard-constraint brief from preferences.yaml (no clearance, WA/CA only, …) —
     fed to the scorer so JD-level dealbreakers are caught, not just title ones."""
@@ -330,7 +340,40 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.warning("duplicate apply refused for pk=%s (status=%s)", pk, row.get("status"))
         return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
 
-    jd_text = await _jd_text(row)
+    # STALE RÉSUMÉ GUARD — the tailored .tex is a snapshot of base.tex taken when
+    # the row was tailored. Editing base.tex does not touch it, so without this an
+    # approved-but-old row keeps going out with the content you just removed. Send
+    # it back through the tailor rather than submitting something you have edited
+    # away; re-tailoring is cheap next to an application you cannot take back.
+    if row.get("resume_tex_key") and row.get("resume_seed") != seed_fingerprint():
+        stores.tracking.set_status(pk, Status.FOUND, gate_reason="", fail_reason="")
+        stores.queue.enqueue(stores.tailor_queue, {"pk": pk})
+        emit("running", pk=pk, agent="tailor", url=jd_url,
+             detail="base résumé changed — re-tailoring before it goes out")
+        log.info("stale résumé for pk=%s (seed %s ≠ %s); re-queued for tailoring",
+                 pk, row.get("resume_seed") or "none", seed_fingerprint())
+        return {"result": "retailoring", "pk": pk, "reason": "stale_resume"}
+
+    # Claim the row and say so BEFORE the slow part. Reading the posting can take
+    # a full minute (its own browser subprocess), and until this moved up the card
+    # sat on its pre-approval status with no log line and no activity marker, so an
+    # approved apply looked like a click that did nothing.
+    prior_status = row.get("status") or Status.TAILORED
+    stores.tracking.set_status(pk, Status.SUBMITTING)
+    emit("running", pk=pk, agent="applier", detail="reading the posting…", url=jd_url)
+
+    try:
+        jd_text = await _jd_text(row)
+    except Exception as exc:  # noqa: BLE001
+        # The row was claimed as SUBMITTING a moment ago, and SUBMITTING has no
+        # Apply button — leaving it there would turn a transient read failure into
+        # a job the owner cannot retry. Hand the row back exactly as it was.
+        stores.tracking.set_status(pk, prior_status,
+                                   gate_reason=row.get("gate_reason", ""))
+        emit("error", pk=pk, agent="applier", url=jd_url,
+             detail=f"could not read the posting ({exc}) — not submitted, try again")
+        log.exception("JD fetch failed for pk=%s", pk)
+        return {"result": "error", "pk": pk, "reason": "jd_fetch_failed"}
 
     if _no_sponsorship(jd_text):  # don't submit an application that's a guaranteed no
         from core.events import emit
@@ -359,8 +402,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         except Exception:
             pass
 
-    stores.tracking.set_status(pk, Status.SUBMITTING)
-    emit("running", pk=pk, agent="applier", detail="submitting application…", url=jd_url)
+    emit("running", pk=pk, agent="applier", detail="filling the form…", url=jd_url)
 
     result = await browser_apply(
         jd_url, company, facts, get_settings().browser_model,
@@ -404,6 +446,21 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.info("gated pk=%s: %s", pk, q)
         return {"result": "gated", "pk": pk, "question": q}
     reason = _fail_reason(result)
+    # A browser held by something else is an ENVIRONMENT fault, not a verdict on
+    # this job: the form was never reached, nothing was filled, and the same job
+    # succeeds once the browser is free. Recording it as failed burns a good
+    # application and hides it in the Unable lane, so hand it back to the queue.
+    from tools.claude_chrome import _is_browser_conflict
+
+    if _is_browser_conflict(reason):
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                                   fail_reason="", fail_kind="")
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        emit("running", pk=pk, agent="applier", url=jd_url,
+             detail="browser was busy — re-queued, nothing was submitted")
+        log.info("browser conflict for pk=%s — re-queued rather than failed", pk)
+        return {"result": "requeued", "pk": pk, "reason": "browser_conflict"}
+
     stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason,
                                fail_kind=result.get("reason") or "")
     emit("error", pk=pk, agent="applier", detail=reason, url=jd_url)

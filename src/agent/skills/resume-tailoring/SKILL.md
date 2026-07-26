@@ -50,3 +50,11 @@ re-save.
 - NEVER add a skill or achievement the seed doesn't contain.
 - Keep the LaTeX valid — balanced braces, defined macros only. Every claim must
   survive an interview.
+- NEVER write internal engineering minutiae. A bullet states what was built and
+  what it achieved, never the private history of how the code got there. Banned:
+  line/file counts and deltas ("cut 3.1K lines across 5 files to 636 across 2"),
+  refactor and rewrite narratives, bug-hunt stories, commit or PR counts, names of
+  internal modules or subprocesses, and framing that describes fixing your own
+  earlier mistake. A reader outside the repo cannot verify any of it, and
+  reducing code is not an accomplishment on its own — it reads as churn.
+  Rewrite to the outcome: what the system now does, at what scale, for whom.

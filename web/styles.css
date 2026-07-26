@@ -1787,6 +1787,14 @@ a.rowlk, button.rowlk { display: inline-block; }
   color: var(--scan);
 }
 .kc-run:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
+/* Queue sits next to Apply as the quieter of the two: same action, in line
+   rather than right now, so it must not compete with the primary button. */
+.kc-queue {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted);
+}
+.kc-queue:hover { border-color: var(--scan); color: var(--fg); }
 .kl-runall {
   margin-left: auto;
   flex: none;
