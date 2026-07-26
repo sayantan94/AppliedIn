@@ -228,3 +228,27 @@ def workers_down(*, now: float | None = None,
         return ["daemon"]
     alive = set(hb.get("workers") or [])
     return [w for w in _REQUIRED_WORKERS if w not in alive]
+
+
+# --- reset epoch -------------------------------------------------------------
+#
+# Emptying the store does not stop the workers. A job that was already being
+# scored or tailored finishes, writes itself back, and reappears on a board the
+# owner just cleared. Each run carries the epoch it started in; a write from an
+# earlier epoch is dropped.
+
+
+def mark_reset() -> None:
+    """Start a new epoch. Everything in flight belongs to the previous one."""
+    import time
+
+    set_flag("reset_epoch", str(int(time.time())))
+
+
+def reset_epoch() -> str:
+    return get_flag("reset_epoch") or "0"
+
+
+def stale_run(started_epoch: str) -> bool:
+    """True when this run began before the last reset, so its result is void."""
+    return str(started_epoch or "0") != reset_epoch()

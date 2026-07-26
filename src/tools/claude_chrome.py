@@ -36,6 +36,32 @@ BLOCK_REASONS = frozenset({"application_limit", "already_applied", "captcha", "l
 ALLOWED_TOOLS = ("mcp__claude-in-chrome", "Write")
 
 
+# The browser sessions this process has started. Tracked so a reset can end them:
+# emptying the store while a session is still filling a form leaves the owner
+# watching a browser do work for a job that no longer exists.
+_LIVE: set[int] = set()
+
+
+def kill_live_sessions() -> int:
+    """End every browser session this process started. Returns how many."""
+    import os
+    import signal
+
+    killed = 0
+    for pid in list(_LIVE):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except ProcessLookupError:
+            pass
+        except OSError:
+            log.warning("could not stop chrome session %s", pid, exc_info=True)
+        _LIVE.discard(pid)
+    if killed:
+        log.info("stopped %d browser session(s)", killed)
+    return killed
+
+
 def available() -> tuple[bool, str]:
     """Whether Chrome control can run, and why not when it cannot."""
     if not shutil.which("claude"):
@@ -140,6 +166,7 @@ async def run_task(task: str, *, report_key: str, model: str = "",
         # CLI's own advice is to redirect it, so redirect it.
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _LIVE.add(proc.pid)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except TimeoutError:
@@ -151,6 +178,7 @@ async def run_task(task: str, *, report_key: str, model: str = "",
                     "left open — it may have submitted. Raise the ceiling if this "
                     "portal is simply slow.")
 
+    _LIVE.discard(proc.pid)
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
 
     # The REPORT FILE decides, before anything else. A session can do the whole

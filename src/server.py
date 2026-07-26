@@ -990,14 +990,27 @@ def create_app() -> FastAPI:
             return {"ok": False, "note": "reset is local-mode only"}
         import redis
 
+        # Work already in flight does not stop just because the store was
+        # emptied. A job the evaluate worker was midway through finishes, writes
+        # its result back, and reappears on a board the owner just cleared — a
+        # zombie they did not ask for and cannot explain. So the reset is marked
+        # first, and anything that started before it is discarded on write.
+        from core import flags
         from tools import seen
+        from tools.claude_chrome import kill_live_sessions
 
+        # End the browsers first. Clearing the store while a session is still
+        # filling a form leaves the owner watching it work on a job that no
+        # longer exists.
+        stopped = kill_live_sessions()
+        flags.mark_reset()
         redis.Redis.from_url(settings.redis_url).flushdb()  # tracking + queue + events
+        flags.mark_reset()  # flushdb cleared the marker — set it again
         art = Path(settings.local_dir) / "artifacts"
         if art.exists():
             shutil.rmtree(art, ignore_errors=True)
         seen.clear()  # so a fresh start re-discovers everything
-        return {"ok": True, "status": "reset"}
+        return {"ok": True, "status": "reset", "sessions_stopped": stopped}
 
     @app.get("/actions/diff/{pk}")
     def diff(pk: str):

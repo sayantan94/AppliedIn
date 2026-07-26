@@ -67,3 +67,20 @@ def test_only_one_discovery_runs_at_a_time():
     # and the lock is free again afterwards
     assert _RUNNING.acquire(blocking=False)
     _RUNNING.release()
+
+
+def test_a_reset_voids_work_that_was_already_running():
+    """Emptying the store does not stop the workers.
+
+    A job the evaluate worker was midway through finishes, writes itself back,
+    and reappears on a board the owner just cleared — a zombie they did not ask
+    for and cannot explain. Each run carries the epoch it began in.
+    """
+    from core import flags
+
+    started = flags.reset_epoch()
+    assert not flags.stale_run(started)
+
+    flags.mark_reset()
+    assert flags.stale_run(started), "work from before the reset must be void"
+    assert not flags.stale_run(flags.reset_epoch()), "work started after it is fine"
