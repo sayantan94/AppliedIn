@@ -27,7 +27,7 @@ from .logging import get_logger
 log = get_logger(__name__)
 
 _EMAIL_RX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-# Phone shapes a résumé actually uses: +1 (413) 275-8723, 413-275-8723, 4132758723
+# Phone shapes a résumé actually uses: +1 (555) 010-0123, 555-010-0123, 5550100123
 # Keys a form might use for the same two facts. Deliberately broad: a missed key
 # means one field keeps the old identity.
 _EMAIL_KEY_RX = re.compile(r"e-?mail", re.I)
