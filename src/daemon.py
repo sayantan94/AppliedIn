@@ -70,7 +70,10 @@ def _sweep_found(stores) -> None:  # noqa: ANN001
 # calls), not CPU, so serial evaluation was the pipeline's worst bottleneck: one
 # slow tailor blocked the entire backlog behind it, and a discovery cycle that
 # finds 150 relevant roles took hours to clear while the board sat on "tailoring 1".
-_EVAL_LANES = int(os.environ.get("APPLIEDIN_EVAL_LANES", "4"))
+# Four lanes scoring at once, while a relevance screen reads three hundred
+# postings, is what exhausted a 500k tokens-per-minute budget. Two keeps the
+# backlog moving without the pipeline spending its time backing off.
+_EVAL_LANES = int(os.environ.get("APPLIEDIN_EVAL_LANES", "2"))
 
 
 def _evaluate_one(pk: str) -> None:

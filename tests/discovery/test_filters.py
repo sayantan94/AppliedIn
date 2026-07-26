@@ -84,3 +84,28 @@ def test_a_reset_voids_work_that_was_already_running():
     flags.mark_reset()
     assert flags.stale_run(started), "work from before the reset must be void"
     assert not flags.stale_run(flags.reset_epoch()), "work started after it is fine"
+
+
+def test_the_rate_limit_brake_backs_off_and_recovers():
+    """A tokens-per-minute budget belongs to the whole process.
+
+    Retrying inside one call does not help: four lanes each retrying hit the same
+    ceiling four times over. So a limit anywhere holds everyone, the hold doubles
+    while limits keep arriving, and it decays once they stop rather than leaving
+    the pipeline crawling for the rest of the run.
+    """
+    from core import throttle
+
+    throttle._resume_at = throttle._cooldown = throttle._last_limit = 0.0
+    assert not throttle.state()["cooling_down"]
+
+    assert throttle.note_rate_limit() == 4.0
+    assert throttle.note_rate_limit() == 8.0
+    assert throttle.note_rate_limit() == 16.0
+    assert throttle.state()["cooling_down"]
+
+    # a burst that has passed starts over instead of compounding
+    throttle._last_limit -= throttle._DECAY_AFTER_S + 1
+    assert throttle.note_rate_limit() == 4.0
+
+    throttle._resume_at = throttle._cooldown = throttle._last_limit = 0.0

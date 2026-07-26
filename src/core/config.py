@@ -38,6 +38,15 @@ try:
     # a guess of ours. Set here because it covers every completion() call and the
     # ADK path alike, the same way drop_params does.
     litellm.num_retries = 4
+
+    # And a brake shared by every caller. Retrying inside one call does not help
+    # against a per-minute budget the whole process shares: four lanes each
+    # retrying independently hit the same ceiling four times over. A rate limit
+    # anywhere now pauses everyone, and the pause doubles while limits keep
+    # arriving and decays once they stop.
+    from .throttle import install as _install_throttle
+
+    _install_throttle()
 except Exception:  # litellm always present in practice; never block startup on it
     pass
 

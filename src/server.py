@@ -28,6 +28,17 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 _RUNNING = {"discover": False, "process": False}
 
 
+def _throttle_state() -> dict:
+    """Whether model calls are being held back, and for how long.
+
+    A pipeline that has gone quiet because it is waiting out a rate limit looks
+    identical to one that is stuck, so it says which.
+    """
+    from core.throttle import state
+
+    return state()
+
+
 def _closed_reason(row: dict) -> str | None:
     """A plain sentence for why a job is in a terminal state — so the UI can say
     WHY something closed instead of just showing a grey tag."""
@@ -253,6 +264,7 @@ def create_app() -> FastAPI:
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _RUNNING["discover"], "processing": _RUNNING["process"],
+                "throttle": _throttle_state(),
                 # Empty = healthy. ["daemon"] = NOTHING is running the pipeline
                 # (e.g. someone started `python -m server`, which serves this very
                 # response but has no workers). Named loops = that thread died.
