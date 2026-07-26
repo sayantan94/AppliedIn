@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AppliedIn · applies from your own browser</title>
+<meta name="description" content="A local job application agent. It finds roles worth your time, tailors your résumé to each one, and fills the employer's form in your own Chrome." />
+<meta property="og:title" content="AppliedIn · applies from your own browser" />
+<meta property="og:description" content="Applying to jobs is mostly retyping. AppliedIn does the retyping, and tells you the truth about what it did." />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://appliedin.dev" />
+<meta name="theme-color" content="#faf9f7" />
+<link rel="icon" href="/logo.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  rel="stylesheet" />
+<link rel="stylesheet" href="/landing.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/"><img src="/logo.svg" alt="" width="24" height="24" />AppliedIn</a>
+  <nav class="topnav">
+    <a href="#how">How it works</a>
+    <a href="#guarantees">Guarantees</a>
+    <a href="#start">Get started</a>
+    <a class="btn btn_quiet" href="/demo">Demo</a>
+    <a class="btn btn_primary" href="https://github.com/sayantanbhowmik/AppliedIn">GitHub</a>
+  </nav>
+</header>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <p class="side_h">Overview</p>
+    <a href="#top">What it is</a>
+    <a href="#how">How it works</a>
+    <a href="#browser">Why your own browser</a>
+    <p class="side_h">Behaviour</p>
+    <a href="#guarantees">Guarantees</a>
+    <a href="#gates">When it asks you</a>
+    <p class="side_h">Running it</p>
+    <a href="#start">Get started</a>
+    <a href="#requirements">Requirements</a>
+    <a href="#caveats">Caveats</a>
+  </aside>
+
+  <main class="doc">
+    <article id="top">
+
+      <p class="eyebrow">Local job application agent</p>
+      <h1>Applying to jobs is mostly retyping.</h1>
+      <p class="lede">
+        The same name, the same phone number, the same “why are you interested in
+        this role”, a hundred times over, until you stop applying to good roles
+        because the form is tedious.
+      </p>
+      <p class="lede">
+        AppliedIn does the retyping. It finds roles worth your time, tailors your
+        résumé to each one, fills the employer’s form <strong>in your own
+        browser</strong>, and stops for you only where a person is genuinely
+        required.
+      </p>
+
+      <div class="btnrow">
+        <a class="btn btn_primary lg" href="https://github.com/sayantanbhowmik/AppliedIn">Read the code</a>
+        <a class="btn btn_quiet lg" href="/demo">See the board</a>
+      </div>
+
+      <p class="demo_note">
+        The board below is the real dashboard, running on sample data so you can
+        click through it. <a href="/demo">Open the demo</a>.
+      </p>
+
+      <div class="callout callout_info">
+        <p>
+          <strong>It runs on your machine.</strong> Your résumé, your answers and
+          your history stay on your disk. Nothing is uploaded anywhere except to the
+          employer you are applying to.
+        </p>
+      </div>
+
+      <h3 class="mini_h">One run, unedited</h3>
+      <div class="term">
+<pre><code><span class="d">23:01:13</span> <span class="k">discovery</span>  scoped to 1 company: NVIDIA
+<span class="d">23:01:25</span> <span class="k">discovery</span>  nothing from the plain fetch, reading the page in the browser
+<span class="d">23:15:13</span> <span class="g">chrome</span>     60 posting(s), page is a workday wrapper
+<span class="d">23:16:12</span> <span class="d">pipeline</span>   skipped nvidia#8933826: score 6 &lt; 7
+<span class="d">23:22:04</span> <span class="k">tailor</span>     Senior Engineer, AI Agents and Systems, score 9
+<span class="d">23:41:55</span> <span class="a">browser</span>    ↪ the form is embedded, applying on the board directly
+<span class="d">23:44:02</span> <span class="a">browser</span>    ✎ set 25 fields, résumé attached
+<span class="d">23:44:18</span> <span class="g">applied</span>    “Thank you for your applying. Your application is under review.”</code></pre>
+      </div>
+
+      <hr />
+
+      <h2 id="how">How it works</h2>
+      <p>
+        Three stages, in order. Every step is visible on the board as it happens, and
+        says what it did and why.
+      </p>
+
+      <div class="cards cols_3">
+        <div class="card">
+          <p class="card_n">01</p>
+          <h3>Find</h3>
+          <p>
+            Reads the boards of companies you follow, screened against what you asked
+            for: titles, seniority, locations, the topics that raise fit and the ones
+            that never do.
+          </p>
+        </div>
+        <div class="card">
+          <p class="card_n">02</p>
+          <h3>Tailor</h3>
+          <p>
+            Rewrites your own LaTeX résumé toward each posting’s vocabulary, never
+            inventing an employer, a metric or a skill. You get a diff of exactly what
+            changed.
+          </p>
+        </div>
+        <div class="card">
+          <p class="card_n">03</p>
+          <h3>Apply</h3>
+          <p>
+            Fills contact details, work authorisation, dropdowns and free text
+            answers, then reads the page, and records an application only when the
+            employer confirmed one.
+          </p>
+        </div>
+      </div>
+
+      <hr />
+
+      <h2 id="browser">Why your own browser</h2>
+      <p>
+        A driven browser has never been anywhere. No history, no cookies the site has
+        seen before, and a fingerprint that reads as automation. So the pages that
+        matter push back: a security code on one posting, <em>“your submission was
+        flagged as possible spam”</em> on the next. A form filled perfectly still does
+        not go out.
+      </p>
+      <p>
+        That is a browser problem, and no amount of work on the form logic fixes it.
+        So AppliedIn does not open its own browser. It works in the one you already
+        use, with the sessions you are already signed into. You watch it happen in a
+        tab.
+      </p>
+
+      <div class="cards cols_3 tight">
+        <div class="card">
+          <h3>Finding and tailoring</h3>
+          <p class="mono_note">your OpenAI key</p>
+        </div>
+        <div class="card">
+          <h3>Filling the form</h3>
+          <p class="mono_note">your own Chrome</p>
+        </div>
+        <div class="card">
+          <h3>Résumé and answers</h3>
+          <p class="mono_note">your disk, nowhere else</p>
+        </div>
+      </div>
+
+      <hr />
+
+      <h2 id="guarantees">Guarantees</h2>
+      <p>
+        These are checked in code, not asked for in a prompt, because a rule that is
+        only a sentence in a prompt is a rule nobody is enforcing.
+      </p>
+
+      <div class="cards cols_2">
+        <div class="card">
+          <h3>It never declares something about you</h3>
+          <p>
+            Disability, veteran status, race and gender are voluntary and yours to
+            answer. Unless you have answered one yourself it stays blank, while your
+            own <em>negative</em> answers still go through, so a required field ends up
+            correctly declined rather than empty.
+          </p>
+        </div>
+        <div class="card">
+          <h3>It never applies twice</h3>
+          <p>
+            A duplicate under your real name is worse than a missed application. A job
+            already marked applied is refused before the browser even opens.
+          </p>
+        </div>
+        <div class="card">
+          <h3>It never claims what it cannot prove</h3>
+          <p>
+            Clicking Submit and hoping is not a submission. Without a confirmation the
+            page actually showed, the run is reported as unknown, never as done.
+          </p>
+        </div>
+        <div class="card">
+          <h3>It never answers a sanctions question wrongly</h3>
+          <p>
+            Export control questions always take the safe option, whatever anything
+            else decided. Getting one wrong is not a bad application, it is a false
+            statement.
+          </p>
+        </div>
+        <div class="card">
+          <h3>It never solves a CAPTCHA</h3>
+          <p>
+            When a bot check appears the run stops and hands you the page. That
+            boundary is deliberate.
+          </p>
+        </div>
+        <div class="card">
+          <h3>It never invents an answer</h3>
+          <p>
+            If a required field has no answer you approved, it asks rather than
+            guessing, and remembers what you say, so it never asks twice.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="gates">When it asks you</h2>
+      <div class="callout callout_quote">
+        <p class="q">“The form is filled apart from these. What should they say?”</p>
+        <p>
+          An unknown field does not abandon the application. Everything answerable is
+          filled first, then it asks, so you finish in ten seconds instead of doing
+          the whole form by hand. Your answer is remembered, so it is never asked
+          twice.
+        </p>
+      </div>
+
+      <hr />
+
+      <h2 id="start">Get started</h2>
+      <div class="code">
+<pre><code><span class="d"># one key to start, everything else has a default</span>
+cp .env.example .env
+./setup.sh
+./appliedin start        <span class="d">→ http://127.0.0.1:8787</span></code></pre>
+      </div>
+      <p>
+        Put your résumé’s LaTeX in <code>resume/base.tex</code>, list the employers
+        you care about in <code>config/watchlist.yaml</code>, and set your criteria in
+        the dashboard. Then press <strong>Discover</strong>.
+      </p>
+
+      <h3 id="requirements">Requirements</h3>
+      <table class="req">
+        <thead><tr><th>For</th><th>You need</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>The pipeline</td>
+            <td>Python 3.12, Redis, Chrome, an OpenAI API key</td>
+          </tr>
+          <tr>
+            <td>Filling forms in your browser</td>
+            <td>
+              <a href="https://code.claude.com">Claude Code</a> and a direct Anthropic
+              plan. The Chrome integration does not accept API keys.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="caveats">Caveats</h2>
+      <div class="callout callout_warn">
+        <p>
+          <strong>Published for learning.</strong> This is a personal project to read
+          and build on, not a product or a service.
+        </p>
+        <ul>
+          <li>
+            <strong>Applications go out under your name.</strong> Read them before
+            they are sent. An application you did not check is still one you signed.
+          </li>
+          <li>
+            <strong>Employers’ terms may prohibit automated applications.</strong>
+            Check them. Where you point this, and whether you should, is your call and
+            your responsibility.
+          </li>
+          <li>
+            <strong>It gets things wrong.</strong> The failure modes are documented
+            rather than hidden, which is the most useful thing about reading the code.
+            No warranty.
+          </li>
+        </ul>
+      </div>
+
+    </article>
+
+    <footer class="doc_foot">
+      <p class="foot_links">
+        <a href="https://github.com/sayantanbhowmik/AppliedIn">GitHub</a>
+        <a href="https://github.com/sayantanbhowmik/AppliedIn/blob/main/LICENSE">MIT licence</a>
+        <a href="/demo">Demo</a>
+      </p>
+      <p class="muted">appliedin.dev</p>
+    </footer>
+
+  </main>
+</div>
+
+<script src="/landing.js" defer></script>
+
+</body>
+</html>

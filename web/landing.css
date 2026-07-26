@@ -1,0 +1,284 @@
+/* appliedin.dev — documentation-style landing page.
+   Structure follows the Claude docs (sidebar, narrow prose column, card grids);
+   the palette is AppliedIn's own green so the site and the product agree. */
+
+:root {
+  --bg: #faf9f7;              /* warm paper, not clinical white */
+  --bg_sunk: #f2f0ec;
+  --ink: #191817;
+  --ink_2: #3d3a36;
+  --muted: #6d6862;
+  --faint: #9b958c;
+  --line: #e6e3dd;
+  --line_2: #d5d1c8;
+
+  --accent: #b8532f;          /* clay */
+  --accent_soft: #fbf1ec;
+  --accent_line: #eccbbb;
+  --warn: #8a6212;
+  --warn_soft: #fbf4e6;
+  --warn_line: #ecd9ae;
+
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --side_w: 232px;
+  --doc_w: 700px;   /* a comfortable measure, roughly 75 characters */
+  --r: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171614; --bg_sunk: #1e1c1a;
+    --ink: #eceae6; --ink_2: #cbc7c0; --muted: #a09a91; --faint: #6d675f;
+    --line: #2b2926; --line_2: #3b3833;
+    --accent: #e08a63; --accent_soft: #251a15; --accent_line: #59392a;
+    --warn: #dfae56; --warn_soft: #231d10; --warn_line: #574722;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code { font-family: var(--mono); font-size: 0.88em; }
+
+/* --- top bar ------------------------------------------------------------- */
+
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 24px; padding: 0 28px; height: 60px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-weight: 600; font-size: 15.5px; letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.brand:hover { text-decoration: none; }
+.brand img { border-radius: 6px; }
+
+.topnav { display: flex; align-items: center; gap: 22px; }
+/* Plain nav links only. `.topnav > a` outranks `.btn_primary` on specificity, so
+   scoping this to :not(.btn) stops it painting muted grey on the green button. */
+.topnav > a:not(.btn) { color: var(--muted); font-size: 14px; font-weight: 500; }
+.topnav > a:not(.btn):hover { color: var(--ink); text-decoration: none; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 7px; font-size: 13.5px; font-weight: 500;
+  padding: 7px 14px; border: 1px solid transparent; white-space: nowrap;
+}
+.btn:hover { text-decoration: none; }
+.btn_primary { background: var(--accent); color: var(--bg); }
+.btn_primary:hover { filter: brightness(1.07); }
+.btn_quiet { border-color: var(--line_2); color: var(--ink); }
+.btn_quiet:hover { background: var(--bg_sunk); }
+.btn.lg { font-size: 15px; padding: 10px 20px; }
+
+/* --- layout -------------------------------------------------------------- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--side_w) minmax(0, 1fr);
+  gap: 48px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 28px;
+}
+
+.sidebar {
+  position: sticky; top: 60px; align-self: start;
+  max-height: calc(100vh - 60px); overflow-y: auto;
+  padding: 34px 0 60px;
+}
+.side_h {
+  margin: 22px 0 8px; font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint);
+}
+.side_h:first-child { margin-top: 0; }
+.sidebar a {
+  display: block; padding: 5px 0 5px 12px; margin-left: -12px;
+  font-size: 14px; color: var(--muted); border-left: 2px solid transparent;
+}
+.sidebar a:hover { color: var(--ink); text-decoration: none; border-left-color: var(--line_2); }
+
+.doc { padding: 34px 0 96px; min-width: 0; }
+.doc article { max-width: var(--doc_w); }
+
+/* --- prose --------------------------------------------------------------- */
+
+.eyebrow {
+  margin: 0 0 10px; font-size: 12.5px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
+}
+
+h1 {
+  margin: 0 0 16px; font-size: 42px; line-height: 1.12;
+  letter-spacing: -0.028em; font-weight: 600;
+}
+h2 {
+  margin: 52px 0 14px; font-size: 25px; line-height: 1.25;
+  letter-spacing: -0.02em; font-weight: 600;
+  scroll-margin-top: 84px;
+}
+h3 {
+  margin: 30px 0 10px; font-size: 17px; line-height: 1.35;
+  letter-spacing: -0.011em; font-weight: 600;
+}
+
+p { margin: 0 0 16px; color: var(--ink_2); }
+.lede { font-size: 18.5px; line-height: 1.6; color: var(--ink); }
+strong { color: var(--ink); font-weight: 600; }
+em { font-style: italic; }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 52px 0; }
+
+.btnrow { display: flex; flex-wrap: wrap; gap: 12px; margin: 26px 0 8px; }
+
+/* --- callouts ------------------------------------------------------------ */
+
+.callout {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line_2);
+  background: var(--bg_sunk);
+  border-radius: var(--r);
+  padding: 16px 20px;
+  margin: 22px 0;
+}
+.callout p:last-child, .callout ul:last-child { margin-bottom: 0; }
+.callout_info { border-left-color: var(--accent); background: var(--accent_soft); border-color: var(--accent_line); }
+.callout_warn { border-left-color: var(--warn); background: var(--warn_soft); border-color: var(--warn_line); }
+.callout_warn ul { margin: 10px 0 0; padding-left: 20px; }
+.callout_warn li { margin-bottom: 8px; color: var(--ink_2); }
+.callout_quote .q {
+  font-size: 18px; color: var(--ink); font-weight: 500;
+  margin-bottom: 10px;
+}
+
+/* --- card grids ---------------------------------------------------------- */
+
+.cards { display: grid; gap: 14px; margin: 24px 0; }
+.cols_2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cols_3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 18px;
+  background: var(--bg);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.card:hover { border-color: var(--line_2); box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+.card h3 { margin: 0 0 7px; font-size: 15px; }
+.card p { margin: 0; font-size: 14.5px; line-height: 1.6; color: var(--muted); }
+.card_n {
+  font-family: var(--mono); font-size: 12px; color: var(--accent);
+  margin: 0 0 8px !important; letter-spacing: 0.04em;
+}
+.cards.tight .card { padding: 15px 18px; }
+.mono_note { font-family: var(--mono); font-size: 13px !important; color: var(--accent) !important; }
+
+/* --- code and terminal --------------------------------------------------- */
+
+.code, .term {
+  background: var(--bg_sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow-x: auto;
+  margin: 20px 0;
+}
+.code pre, .term pre { margin: 0; padding: 16px 18px; }
+.code code, .term code {
+  font-family: var(--mono); font-size: 12.8px; line-height: 1.75;
+  color: var(--ink_2); white-space: pre;
+}
+.term .d { color: var(--faint); }
+.term .k { color: var(--ink); font-weight: 500; }
+.term .g { color: var(--accent); font-weight: 500; }
+.term .a { color: var(--warn); font-weight: 500; }
+.code .d { color: var(--faint); }
+
+/* --- table --------------------------------------------------------------- */
+
+.req { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14.5px; }
+.req th, .req td {
+  text-align: left; padding: 11px 14px; border: 1px solid var(--line);
+  vertical-align: top;
+}
+.req th { background: var(--bg_sunk); font-weight: 600; font-size: 13px; }
+.req td { color: var(--ink_2); }
+
+/* --- footer -------------------------------------------------------------- */
+
+.doc_foot {
+  max-width: var(--doc_w);
+  margin-top: 60px; padding-top: 22px;
+  border-top: 1px solid var(--line);
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  font-size: 14px;
+}
+.doc_foot p { margin: 0; display: flex; gap: 18px; }
+.doc_foot .muted { color: var(--faint); font-family: var(--mono); font-size: 13px; }
+
+/* --- responsive ---------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .sidebar { display: none; }
+  .cols_2, .cols_3 { grid-template-columns: minmax(0, 1fr); }
+  h1 { font-size: 34px; }
+  .topnav > a:not(.btn) { display: none; }
+  .topbar { padding: 0 18px; }
+  .shell { padding: 0 18px; }
+}
+
+/* the small heading over the log sample, quieter than a real section heading */
+.mini_h {
+  margin: 30px 0 8px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--faint);
+}
+
+.foot_links { display: flex; gap: 18px; flex-wrap: wrap; }
+
+/* --- docs behaviour ------------------------------------------------------ */
+
+/* Where the reader is. Without this the sidebar is a list, not a map. */
+.sidebar a.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 500;
+}
+
+/* A section nobody can link to is a section nobody can point a colleague at. */
+h2, h3 { position: relative; }
+.anchor {
+  position: absolute; left: -0.85em; top: 0;
+  opacity: 0; color: var(--faint); font-weight: 400;
+  text-decoration: none; padding-right: 0.35em;
+  transition: opacity 0.12s ease;
+}
+h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
+.anchor:hover { color: var(--accent); text-decoration: none; }
+
+@media (max-width: 900px) { .anchor { display: none; } }
+
+.demo_note { font-size: 14.5px; color: var(--muted); margin: 18px 0 0; }
