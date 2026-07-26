@@ -28,4 +28,9 @@ success_phrases:
 - Greenhouse is frequently EMBEDDED in the company's own careers page (an iframe,
   or a `gh_jid=` parameter on their URL). The form lives inside that embed, so a
   page that appears to have no fields usually has them one frame down.
+- When the board is embedded in the company's own page (a `gh_jid=` parameter, or
+  a cross-origin iframe), **open the Greenhouse URL directly** —
+  `https://job-boards.greenhouse.io/<board>/jobs/<gh_jid>`. Typing into the embed
+  works, but a file upload cannot cross into another origin, so the résumé fails
+  to attach and the application goes out without it.
 

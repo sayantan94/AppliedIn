@@ -319,6 +319,69 @@ def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
 # working when it was killed. Better to wait than to redo.
 TIMEOUT_S = 2700  # 45 minutes
 
+def _certain(facts: dict) -> str:
+    """The handful of answers that are the same on every form, pre-mapped.
+
+    Making a model work out where the owner's own name goes, on every single
+    application, is time the owner spends watching. These are certain, so they
+    are handed over already decided and the deliberation is saved for the
+    questions that actually need it.
+    """
+    want = ("Full name", "First name", "Last name", "Email", "Phone",
+            "Phone number", "LinkedIn", "GitHub", "Website", "Current location",
+            "Where are you currently located?", "Are you authorized to work in "
+            "the country where the job is located?", "Will you now or in the "
+            "future require sponsorship for an employment visa?")
+    lines = [f"  {k} → {facts[k]}" for k in want if str(facts.get(k, "")).strip()]
+    return "\n".join(lines) or "  (nothing pre-mapped for this form)"
+
+
+def _stage_resume(src: str, owner: str) -> str:
+    """Put the tailored résumé alone in its own directory, named for the owner.
+
+    The upload is the step that fails most, so everything avoidable is removed
+    from it: the raw artifact is called "coreweave#4691973006.pdf" — a name no
+    recruiter should see, and one whose "#" breaks some upload widgets outright —
+    and the directory it lives in holds every other job's résumé too. Here there
+    is one file, with the name a person would have chosen, in a directory that
+    contains nothing else to pick by mistake.
+    """
+    import shutil
+    import tempfile
+
+    if not src or not Path(src).exists():
+        return ""
+    safe = "".join(c for c in owner if c.isalnum() or c in " _").strip() or "Resume"
+    try:
+        d = Path(tempfile.mkdtemp(prefix="appliedin_resume_"))
+        dst = d / f"{safe} Resume.pdf"
+        shutil.copyfile(src, dst)
+        return str(dst)
+    except OSError:
+        log.warning("could not stage the résumé — using it where it is", exc_info=True)
+        return src
+
+
+def direct_board_url(url: str) -> str:
+    """The board's OWN url when `url` is a company page wrapping one.
+
+    A company careers page often embeds Greenhouse or Lever in a CROSS-ORIGIN
+    iframe. Text can still be typed by coordinate, but a file upload cannot reach
+    an input inside that frame — which is exactly how a CoreWeave application got
+    six fields in and no résumé. The same form served from the board's own domain
+    is same-origin and behaves normally, so go there instead of fighting it.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    u = urlparse(url)
+    q = parse_qs(u.query)
+    jid = (q.get("gh_jid") or [""])[0].strip()
+    board = (q.get("board") or [""])[0].strip()
+    if jid.isdigit() and board:
+        return f"https://job-boards.greenhouse.io/{board}/jobs/{jid}"
+    return ""
+
+
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str) -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
     resume_line = (f"""
@@ -347,7 +410,18 @@ COMPANY: {company}
 A job page is not an application: the fields may sit behind an "Application" tab
 or an Apply button. Open that first, then work through the form.
 
-THE OWNER'S APPROVED ANSWERS — the only facts you may use:
+If the form turns out to be embedded from another domain (a Greenhouse, Ashby,
+Lever or Workday iframe inside the company's own page), open that board's URL
+DIRECTLY in a new tab and fill it there. You can usually type into an embedded
+form, but a file upload cannot reach inside a cross-origin frame, so the résumé
+will silently fail to attach and the application will go out without it. The
+board's own page has the identical form and behaves normally.
+
+START WITH THESE — they are the same on every application, so fill them without
+deliberating and spend your attention on the rest of the form:
+{_certain(facts)}
+
+EVERY APPROVED ANSWER — the only facts you may use:
 {json.dumps(facts, indent=1)[:9000]}
 {resume_line}{site_rules}
 
@@ -424,7 +498,6 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     from core.events import emit
 
     from .browser_apply import (
-        _clean_resume_copy,
         _duplicate_refusal,
         _site_rules,
     )
@@ -441,8 +514,14 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     # the employer would receive, and the '#' breaks some upload widgets outright,
     # so it is copied to "<Name> Resume.pdf" first — same file, a name a person
     # would have chosen.
-    resume_path = _clean_resume_copy(
+    resume_path = _stage_resume(
         resume_path, str(facts.get("Full name") or facts.get("Name") or "Resume"))
+
+    if (direct := direct_board_url(url)) and direct != url:
+        log.info("using the board's own URL instead of the embed: %s", direct)
+        emit("running", pk=pk, agent="browser", url=url,
+             detail=f"↪ the form is embedded — applying on the board directly: {direct}")
+        url = direct
 
     emit("running", pk=pk, agent="browser", url=url,
          detail="🌐 applying in your own Chrome")
