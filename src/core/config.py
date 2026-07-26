@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # Chrome. Orchestration — discovery, scoring, tailoring, the writer — stays on
     # OpenAI; this is only the hands, and the hands are the part that has to read a
     # form nobody wrote a rule for.
-    chrome_model: str = "claude-fable-5"
+    chrome_model: str = "claude-sonnet-5"
     # chrome  — the owner's own browser (default; needs Claude Code + a direct
     #           Anthropic plan). Falls back to scripted when that is missing.
     # scripted — pure Playwright, no model in the click loop, one OpenAI key.

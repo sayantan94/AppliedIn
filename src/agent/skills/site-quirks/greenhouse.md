@@ -18,4 +18,14 @@ success_phrases:
   challenge that only appears after the button is clicked. If that appears, the
   application is not in — stop and hand the window to the person. Filling was not
   the problem, so do not re-fill or re-submit.
+- The résumé control is a **button row** — "Attach", "Dropbox", "Google Drive",
+  "Enter manually" — not a visible file input. Click **Attach** first; the real
+  `input[type=file]` only becomes reachable after that. Uploading before clicking
+  it silently does nothing.
+- After the upload the filename appears next to the control with a small remove
+  (×) beside it. That is the confirmation the attachment took. If the button row
+  is still showing, it did not.
+- Greenhouse is frequently EMBEDDED in the company's own careers page (an iframe,
+  or a `gh_jid=` parameter on their URL). The form lives inside that embed, so a
+  page that appears to have no fields usually has them one frame down.
 

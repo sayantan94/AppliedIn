@@ -321,10 +321,24 @@ TIMEOUT_S = 2700  # 45 minutes
 
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str) -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
-    resume_line = (f"\nRÉSUMÉ: attach the file at {resume_path} to the résumé field "
-                   f"(NOT to a cover-letter field, and NOT to any 'Autofill from "
-                   f"resume' box, which is a parser that overwrites answers).\n"
-                   if resume_path else "")
+    resume_line = (f"""
+RÉSUMÉ — attach {resume_path}
+
+This is the tailored résumé and the application is not complete without it. Use
+the file-upload tool with that exact path; do not retype the path by hand and do
+not try to drag the file. Attach it to the field asking for a Resume or CV.
+
+NOT to a cover-letter field, and NOT to an "Autofill from resume" box — that one
+is a parser, and feeding it re-populates the form and overwrites answers already
+entered.
+
+Some forms hide the real input behind a button labelled Attach, Upload, or
+"Attach, Dropbox, Google Drive". Click that first so the file input exists, then
+upload. Afterwards CHECK that the filename is showing on the page. If it is not,
+the upload did not happen: try again rather than carrying on, because a submitted
+application with no résumé is worse than one that stopped.
+""" if resume_path else "")
+
     return f"""Fill in and submit this job application on the owner's behalf.
 
 APPLICATION: {url}
@@ -334,7 +348,7 @@ A job page is not an application: the fields may sit behind an "Application" tab
 or an Apply button. Open that first, then work through the form.
 
 THE OWNER'S APPROVED ANSWERS — the only facts you may use:
-{json.dumps(facts, indent=2)[:8000]}
+{json.dumps(facts, indent=1)[:9000]}
 {resume_line}{site_rules}
 
 RULES — these are not style preferences, they decide whether this application is
@@ -352,6 +366,13 @@ honest:
    written in plain sentences. Do not use dashes as connectors. Make it
    genuinely useful to a reader deciding whether to interview them.
 5. Remember to click each text box / radio button / checkbox after selecting
+
+WORK IN PASSES, NOT FIELD BY FIELD. Read the whole form once and note what every
+field needs. Then fill everything you can in as few actions as possible: all the
+text boxes, then all the dropdowns and radio groups, then the résumé. Check the
+result once at the end rather than after each field. Every extra look at the page
+costs the owner time they are sitting through, and a form is not twenty decisions
+— it is one decision about twenty fields.
 
 When the form is complete, submit it and then find out what happened. Submitting
 often navigates somewhere: wait for the page to settle, read the page you have
