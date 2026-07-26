@@ -9,6 +9,7 @@ storage comes from the mode factory, never constructed directly.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,13 @@ def add_watchlist_company(name: str, careers_url: str = "") -> dict:
     return {"ok": True, "companies": list_watchlist_companies()}
 
 
+# One discovery at a time, whoever asked for it. The scheduled sweep and the
+# dashboard's Discover button both land here, and they were able to run at once:
+# a single-company run the owner had just started would be interleaved with a
+# full watchlist sweep, so the log they were reading described neither.
+_RUNNING = threading.Lock()
+
+
 def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
 
@@ -200,6 +208,17 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
     a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
     Lambda (cloud).
     """
+    if not _RUNNING.acquire(blocking=False):
+        scope = ", ".join(only) if only else "the whole watchlist"
+        log.info("discovery already running — skipping this request (%s)", scope)
+        return {"enqueued": 0, "crawled": 0, "skipped": "another discovery is running"}
+    try:
+        return _run_discovery(only, profile_id)
+    finally:
+        _RUNNING.release()
+
+
+def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
     settings = get_settings()
     stores = make_stores(settings)
     config_dir = Path(settings.config_dir)

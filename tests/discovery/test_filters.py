@@ -45,3 +45,25 @@ def test_remote_only_passes_remote():
 def test_happy_path_matches():
     prefs = Preferences(include_keywords=["python"], titles=["Engineer"], locations=["US"])
     assert stage1_match(_job(), prefs) is True
+
+
+def test_only_one_discovery_runs_at_a_time():
+    """A scheduled sweep and a Discover click both call run_discovery().
+
+    They were able to run together, so a single-company run the owner had just
+    started got interleaved with a full watchlist sweep and the log they were
+    watching described neither.
+    """
+    from discovery.handler import _RUNNING, run_discovery
+
+    assert _RUNNING.acquire(blocking=False)
+    try:
+        result = run_discovery(only=["NVIDIA"])
+        assert result["enqueued"] == 0
+        assert "another discovery is running" in result["skipped"]
+    finally:
+        _RUNNING.release()
+
+    # and the lock is free again afterwards
+    assert _RUNNING.acquire(blocking=False)
+    _RUNNING.release()

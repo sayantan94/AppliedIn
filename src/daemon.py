@@ -34,7 +34,14 @@ def _discovery_loop() -> None:
     from core import flags
     from discovery.handler import run_discovery
 
-    last_discover = 0.0
+    # Start the clock now, not at zero. A zero here means the first tick is
+    # already overdue, so every restart swept the whole watchlist immediately —
+    # eight restarts in an afternoon meant eight full sweeps, racing whatever
+    # single-company run the owner had actually asked for and burying the board
+    # in jobs nobody requested. The schedule is a schedule, not a boot action.
+    last_discover = time.monotonic()
+    log.info("first scheduled discovery in %dh — use Discover to run one now",
+             DISCOVER_INTERVAL // 3600)
     while True:
         now = time.monotonic()
         if not flags.paused() and now - last_discover >= DISCOVER_INTERVAL:
