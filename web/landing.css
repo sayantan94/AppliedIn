@@ -2,53 +2,60 @@
    Structure follows the Claude docs (sidebar, narrow prose column, card grids);
    the palette is AppliedIn's own green so the site and the product agree. */
 
-/* Tokens follow ai.sayantan.sh: one neutral ramp, no brand hue, accent equal to
-   the foreground. The neutrals are warmed, which is the only place warmth can
-   live in a palette that has no colour in it. */
+/* The same tokens the dashboard uses (web/styles.css), so the site and the tool
+   are one surface rather than two products that happen to share a name. Values
+   are copied rather than imported: pulling in the dashboard stylesheet would
+   bring 60KB of application layout with it. */
 
 :root {
-  --bg: #fffdfa;              /* warm paper */
-  --bg_sunk: #f6f2ea;
-  --ink: #171310;
-  --ink_2: #423b34;
-  --muted: #6f665c;
-  --faint: #9c9288;
-  --line: #e6dfd4;
-  --line_2: #d2c9bb;
+  --bg: #101312;
+  --bg_sunk: #151917;
+  --ink: #e8ede9;
+  --ink_2: #c3cec7;
+  --muted: #9fada3;
+  --faint: #66716a;
+  --line: #262d28;
+  --line_2: #343d37;
 
-  /* Monochrome, as the reference is: emphasis comes from weight and contrast,
-     not from a colour that has to be defended on every surface. */
-  --accent: #171310;
-  --accent_soft: #f6f2ea;
-  --accent_line: #d2c9bb;
-  --warn: #6f665c;
-  --warn_soft: #f6f2ea;
-  --warn_line: #d2c9bb;
+  /* The product signals with green for good and amber for attention. On a page
+     that is prose rather than a board, they mark the same things: what worked,
+     and what needs a person. */
+  --accent: #3fd68f;
+  --accent_soft: #141b17;
+  --accent_line: #24352b;
+  --accent_ink: #08130d;
+  --warn: #f2b13e;
+  --warn_soft: #1b1710;
+  --warn_line: #3a301b;
 
-  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --side_w: 232px;
   --doc_w: 700px;
-  --r: 10px;
+  --r: 9px;
 }
 
-@media (prefers-color-scheme: dark) {
+/* The dashboard's light theme, matched. It flips on the reader's preference
+   here because a marketing page has no theme toggle to remember. */
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #17150f;
-    --bg_sunk: #1f1c16;
-    --ink: #f5f1e8;
-    --ink_2: #d6cfc2;
-    --muted: #a89f92;
-    --faint: #776e63;
-    --line: #332f28;
-    --line_2: #453f36;
-    --accent: #f5f1e8;
-    --accent_soft: #1f1c16;
-    --accent_line: #453f36;
-    --warn: #a89f92;
-    --warn_soft: #1f1c16;
-    --warn_line: #453f36;
+    --bg: #f6f7f6;
+    --bg_sunk: #f1f4f1;
+    --ink: #171d19;
+    --ink_2: #38443c;
+    --muted: #5a675e;
+    --faint: #8b968e;
+    --line: #e1e6e1;
+    --line_2: #c9d2c9;
+
+    --accent: #0e9c62;
+    --accent_soft: #eef7f2;
+    --accent_line: #c6e3d4;
+    --accent_ink: #ffffff;
+    --warn: #e29c17;
+    --warn_soft: #fdf6e8;
+    --warn_line: #eedcb4;
   }
 }
 
@@ -102,7 +109,7 @@ code { font-family: var(--mono); font-size: 0.88em; }
   padding: 7px 14px; border: 1px solid transparent; white-space: nowrap;
 }
 .btn:hover { text-decoration: none; }
-.btn_primary { background: var(--ink); color: var(--bg); }
+.btn_primary { background: var(--accent); color: var(--accent_ink); }
 .btn_primary:hover { filter: brightness(1.07); }
 .btn_quiet { border-color: var(--line_2); color: var(--ink); }
 .btn_quiet:hover { background: var(--bg_sunk); }
@@ -142,7 +149,7 @@ code { font-family: var(--mono); font-size: 0.88em; }
 
 .eyebrow {
   margin: 0 0 10px; font-size: 12px; font-weight: 600;
-  letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint);
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent);
 }
 
 h1 {
@@ -299,7 +306,7 @@ h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
 .demo_note { font-size: 14.5px; color: var(--muted); margin: 18px 0 0; }
 
 /* Selection inverts, as on the reference: the page has one ink and one paper. */
-::selection { background: var(--ink); color: var(--bg); }
+::selection { background: var(--accent); color: var(--accent_ink); }
 
 /* --- the architecture diagram -------------------------------------------- */
 
