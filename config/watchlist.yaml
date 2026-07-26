@@ -150,3 +150,7 @@ companies:
   - name: Reddit
     careers_url: https://redditinc.com/careers
     mode: gated
+
+  - name: waymo
+    careers_url: https://careers.withwaymo.com/
+    mode: gated

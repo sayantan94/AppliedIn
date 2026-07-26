@@ -1,26 +1,33 @@
-"""One real browser, one session at a time — and a collision is not a job failure.
+"""A tab that cannot be driven is not a job that cannot be filled.
 
-Two Chrome sessions on the same browser fail in a way that reads as a page
-problem: page-READING tools keep working while every INTERACTION tool fails with
-"Cannot access a chrome-extension:// URL of different extension". The agent then
-reports a posting it could see but could not click, and a perfectly good
-application gets recorded as failed for an environment fault.
+Some pages carry an embed that an ad blocker replaces with a page of its OWN
+extension. Chrome then refuses to let any other extension act on that tab, and
+the failure is deceptive: page-READING tools keep working and show the posting,
+while every INTERACTION tool fails with "Cannot access a chrome-extension:// URL
+of different extension". The agent reports a posting it could see but could not
+click, and a perfectly good application gets recorded as failed for something
+that was never about the job. See site-quirks/oracle.md.
 
-These pin both halves of the fix: sessions are serialised, and a collision that
-slips through anyway is told apart from a real failure.
+These pin that a fault is told apart from a real failure, that the two layers
+which pass the message between them still agree, and that sessions run
+concurrently rather than queueing behind each other.
 """
 
 import asyncio
 import threading
-import time
 
 from tools.claude_chrome import _is_browser_conflict
 
 
-def test_only_one_browser_session_runs_at_a_time():
-    """The evaluate lanes and the apply lane are separate THREADS with their own
-    event loops, so the guard has to be a threading primitive. An asyncio.Lock
-    would serialise within a lane and let the lanes collide exactly as before.
+def test_sessions_are_not_serialised():
+    """Concurrency is deliberate, and this pins the decision.
+
+    A semaphore briefly serialised every Chrome session, on the theory that two
+    sessions on one browser corrupt each other. The theory was wrong — the
+    failures that prompted it happened with a SINGLE session running, and two
+    launched together both complete. Serialising cost real throughput, because a
+    job read would queue behind an apply allowed to run for 45 minutes. If a lock
+    ever comes back here, it needs evidence first.
     """
     import tools.claude_chrome as cc
 
@@ -35,7 +42,7 @@ def test_only_one_browser_session_runs_at_a_time():
             live[0] -= 1
         return {}, ""
 
-    real, cc._run_task_locked = cc._run_task_locked, fake_session
+    real, cc._run_task_impl = cc._run_task_impl, fake_session
     try:
         threads = [threading.Thread(target=lambda: asyncio.run(
             cc.run_task("t", report_key="k"))) for _ in range(4)]
@@ -44,33 +51,10 @@ def test_only_one_browser_session_runs_at_a_time():
         for t in threads:
             t.join()
     finally:
-        cc._run_task_locked = real
+        cc._run_task_impl = real
 
     assert concurrent, "the fake session never ran"
-    assert max(concurrent) == 1, f"{max(concurrent)} sessions shared one browser"
-
-
-def test_the_lock_is_released_when_a_session_raises():
-    """A session that blows up must not keep the browser forever — the next apply
-    would wait out the full timeout and report that it never started."""
-    import tools.claude_chrome as cc
-
-    async def boom(*_a, **_kw):
-        raise RuntimeError("session died")
-
-    real, cc._run_task_locked = cc._run_task_locked, boom
-    try:
-        try:
-            asyncio.run(cc.run_task("t", report_key="k"))
-        except RuntimeError:
-            pass
-    finally:
-        cc._run_task_locked = real
-
-    got = cc._BROWSER.acquire(blocking=False)
-    if got:
-        cc._BROWSER.release()
-    assert got, "the browser lock was not released after a failed session"
+    assert max(concurrent) > 1, "sessions are being serialised again"
 
 
 def test_our_own_conflict_message_is_still_recognised_downstream():

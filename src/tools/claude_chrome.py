@@ -16,7 +16,6 @@ import json
 import re
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 
 from core.logging import get_logger
@@ -42,24 +41,18 @@ ALLOWED_TOOLS = ("mcp__claude-in-chrome", "Write")
 # watching a browser do work for a job that no longer exists.
 _LIVE: set[int] = set()
 
-# ONE real browser, so ONE session at a time. The evaluate lanes (2) each read a
-# posting in Chrome and the apply lane drives a form in the same Chrome, so three
-# sessions could run at once — nothing ever counted them against a shared budget.
-# Two sessions on one browser is not merely slow, it is broken in a way that reads
-# as a page problem: the second session's PAGE-READING tools keep working while
-# every INTERACTION tool fails with "Cannot access a chrome-extension:// URL of
-# different extension". The agent then reports a posting it could see but could
-# not click, and a real application is burned on an environment fault.
-#
-# A threading primitive rather than an asyncio one on purpose: the lanes run in
-# separate threads with their own event loops, so an asyncio.Lock would only
-# serialise within one lane and let the lanes collide exactly as before.
-_BROWSER = threading.Semaphore(1)
-_BROWSER_WAIT_S = 3000  # a little over the 45-minute session ceiling
+# Sessions run CONCURRENTLY. There was briefly a semaphore here serialising them,
+# on the theory that two sessions on one browser corrupt each other. That theory
+# was wrong: the failures that prompted it happened with a single session running,
+# and two sessions launched simultaneously both complete normally — each gets its
+# own tab group. Serialising cost real throughput, since a job read would queue
+# behind an apply that is allowed to run for 45 minutes. Concurrency is bounded by
+# the lane counts in daemon.py, which is the right place for it.
 
-# Said by the browser tools when another session owns the page. Environment, not
-# job: the posting is fine and retrying later works, so it must never be recorded
-# as a failed application.
+# Said by the browser tools when the tab cannot be driven. Environment, not job:
+# nothing was filled and the same posting works once the tab is clean, so it must
+# never be recorded as a failed application. The usual cause is an extension frame
+# injected into the page — see site-quirks/oracle.md.
 _CONFLICT_MARKERS = (
     "cannot access a chrome",          # …-extension:// URL of different extension
     "url of different extension",
@@ -196,22 +189,14 @@ async def run_task(task: str, *, report_key: str, model: str = "",
     if not ok:
         return {}, why
 
-    # Wait for the browser rather than racing another session for it. Acquired in
-    # a worker thread so this lane's event loop keeps running while it waits.
-    if not await asyncio.to_thread(_BROWSER.acquire, True, _BROWSER_WAIT_S):
-        return {}, ("Another browser session held the browser for the whole wait, "
-                    "so this one never started. Nothing was submitted.")
-    try:
-        return await _run_task_locked(task, report_key=report_key, model=model,
-                                      timeout_s=timeout_s, allow_dirs=allow_dirs)
-    finally:
-        _BROWSER.release()
+    return await _run_task_impl(task, report_key=report_key, model=model,
+                                timeout_s=timeout_s, allow_dirs=allow_dirs)
 
 
-async def _run_task_locked(task: str, *, report_key: str, model: str = "",
-                           timeout_s: int = DEFAULT_TIMEOUT_S,
-                           allow_dirs: list[str] | None = None) -> tuple[dict, str]:
-    """run_task's body, with the single-browser lock already held."""
+async def _run_task_impl(task: str, *, report_key: str, model: str = "",
+                         timeout_s: int = DEFAULT_TIMEOUT_S,
+                         allow_dirs: list[str] | None = None) -> tuple[dict, str]:
+    """run_task's body, split out so tests can stand in for the subprocess."""
     # The report comes back as a FILE the task writes, so the happy path is a
     # json.load of exactly one object rather than a guess at which braces in a
     # page of prose were the result. Brace scanning stays as the fallback for a
