@@ -17,10 +17,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # provider keys (read by LiteLLM) are available from one file.
 load_dotenv()
 
-# This product runs on the owner's machine and says so. browser-use ships
-# anonymised telemetry ON by default, which quietly contradicts that, so it is
-# turned off here — before browser_use is imported anywhere, since it reads this
-# at import time. Set ANONYMIZED_TELEMETRY=true in .env to opt back in.
+# This product runs on the owner's machine and says so. Any library that reads
+# this at import time gets the answer the product already gives: no phoning home.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 
 # Let LiteLLM silently drop sampling params a model rejects instead of 400ing.
@@ -79,37 +77,25 @@ class Settings(BaseSettings):
     # Cloud mode reaches the same class of model through Bedrock.
     bedrock_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-    # The browser stages (discovery crawl; the loop engine's resolver) need a
-    # model that reliably emits structured output. Only those calls use this;
-    # orchestration models are set by orchestrator_model / the per-agent overrides.
+    # Structured-output model for the stages that read a page and must return
+    # parseable JSON. Orchestration models are set by orchestrator_model / the
+    # per-agent overrides.
     browser_model: str = "gpt-5-mini"
-    # Apply engine — both wrap the ONE form-fill core (tools.form_fill):
-    #   "scripted" = purely deterministic, no LLM in the click loop (default);
-    #   "loop"     = adds a model-backed resolver for labels the deterministic
-    #                pass can't map, and drafts free text via the writer.
-    # (The old browser-use "agent" engine was removed; its value maps to scripted.)
-    # Which Claude model drives the browser when an apply is handed to your own
-    # Chrome. Orchestration — discovery, scoring, tailoring, the writer — stays on
-    # OpenAI; this is only the hands, and the hands are the part that has to read a
-    # form nobody wrote a rule for.
+    # Which Claude model drives the browser. Orchestration — discovery, scoring,
+    # tailoring, the writer — stays on OpenAI; this is only the hands, and the
+    # hands are the part that has to read a form nobody wrote a rule for.
     chrome_model: str = "claude-sonnet-5"
-    # chrome  — the owner's own browser (default; needs Claude Code + a direct
-    #           Anthropic plan). Falls back to scripted when that is missing.
-    # scripted — pure Playwright, no model in the click loop, one OpenAI key.
-    # loop     — the shared core plus a model-backed resolver.
+    # "chrome" is the only apply engine: the owner's own Chrome, driven by a
+    # `claude --chrome` subprocess (needs Claude Code + a direct Anthropic plan).
+    # The earlier headless engines were deleted — a driven browser has no history
+    # and no sessions, so portals challenge it and a perfectly filled form still
+    # does not go out. This setting stays because it caps apply concurrency: one
+    # lane, since every apply shares the single real browser.
     apply_engine: str = "chrome"
-    # Run the browser without a visible window (APPLIEDIN_BROWSER_HEADLESS=true).
-    # Headed is friendlier to bot-detection; headless suits overnight/Docker runs.
-    browser_headless: bool = False
-    # Use REAL Google Chrome (channel "chrome") + a persistent profile instead of
-    # bundled headless Chromium. A real browser with accumulated cookies triggers
-    # far fewer CAPTCHAs, and you can pre-log-in to portals in this profile once.
-    browser_channel: str = "chrome"
-    browser_profile_dir: str = ".local/chrome-profile"
     # ASSIST: when a CAPTCHA (or a human-only step) blocks an otherwise-filled
-    # form in a VISIBLE browser, keep the window open and wait for YOU to solve it
-    # and submit — the automation just detects the real confirmation. Never solves
-    # a CAPTCHA itself. Seconds to wait for the human before giving up.
+    # form, keep the window open and wait for YOU to solve it and submit — the
+    # automation just detects the real confirmation. Never solves a CAPTCHA
+    # itself. Seconds to wait for the human before giving up.
     assist_captcha: bool = True
     assist_wait_seconds: int = 21600  # hold the human-handoff window ~6h — closing it releases
 

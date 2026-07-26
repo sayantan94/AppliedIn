@@ -1,11 +1,12 @@
 """Career-site crawler for companies with no usable ATS feed.
 
 Two tiers, cheapest first:
-  1. render + extract — headless render (Playwright) + one-shot LLM extract.
-     Fast and cheap; good for static/simple pages.
-  2. browser-use — a real browser agent that types the search, applies filters
-     and pages/scrolls. Escalated to ONLY when tier 1 finds nothing, which is
-     what happens on client-rendered search UIs (e.g. jobs.apple.com/…/search).
+  1. fetch + extract — plain HTTP GET + one-shot LLM extract. Fast and cheap;
+     good for static/simple pages.
+  2. Chrome — the owner's real browser, driven by a `claude --chrome` subprocess
+     that types the search, applies filters and pages/scrolls. Escalated to ONLY
+     when tier 1 finds nothing, which is what happens on client-rendered search
+     UIs (e.g. jobs.apple.com/…/search).
 
 Then the same filter / dedup / enqueue path as feed discovery. Mode-agnostic:
 stores come from the factory. The extractor is injectable so it's testable (an
