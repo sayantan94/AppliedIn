@@ -31,6 +31,13 @@ try:
     import litellm
 
     litellm.drop_params = True
+    # A token-per-minute limit is a queue, not a verdict: OpenAI answers "try
+    # again in 59ms" and we were treating it as a failed screen, degrading to the
+    # keyword filter and telling the owner that scoring and applying would fail.
+    # litellm honours the retry-after it is given, so the wait is the API's, not
+    # a guess of ours. Set here because it covers every completion() call and the
+    # ADK path alike, the same way drop_params does.
+    litellm.num_retries = 4
 except Exception:  # litellm always present in practice; never block startup on it
     pass
 

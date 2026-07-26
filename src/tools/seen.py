@@ -69,11 +69,6 @@ def mark(jobs: list) -> None:
 
 def clear() -> None:
     _path().unlink(missing_ok=True)
-    _crawl_state_path().unlink(missing_ok=True)
 
 
-# --- crawl exhaustion ----------------------------------------------------------
-# The browser crawl is expensive and, without this, re-runs every cycle. Once a
-# crawl finds NO new jobs (we've seen everything recent), mark the company
-# "exhausted" and stop crawling it — until a new job turns up or Reset clears it.
 
