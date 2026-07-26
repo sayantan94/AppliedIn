@@ -36,3 +36,6 @@ resume/base.tex
 resume/*.pdf
 output/
 .gstack/
+
+# drafts and images for posting about the project — personal, and 15MB of PNGs
+docs/social-x/
