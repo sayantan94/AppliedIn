@@ -2,38 +2,53 @@
    Structure follows the Claude docs (sidebar, narrow prose column, card grids);
    the palette is AppliedIn's own green so the site and the product agree. */
 
-:root {
-  --bg: #faf9f7;              /* warm paper, not clinical white */
-  --bg_sunk: #f2f0ec;
-  --ink: #191817;
-  --ink_2: #3d3a36;
-  --muted: #6d6862;
-  --faint: #9b958c;
-  --line: #e6e3dd;
-  --line_2: #d5d1c8;
+/* Tokens follow ai.sayantan.sh: one neutral ramp, no brand hue, accent equal to
+   the foreground. The neutrals are warmed, which is the only place warmth can
+   live in a palette that has no colour in it. */
 
-  --accent: #b8532f;          /* clay */
-  --accent_soft: #fbf1ec;
-  --accent_line: #eccbbb;
-  --warn: #8a6212;
-  --warn_soft: #fbf4e6;
-  --warn_line: #ecd9ae;
+:root {
+  --bg: #fffdfa;              /* warm paper */
+  --bg_sunk: #f6f2ea;
+  --ink: #171310;
+  --ink_2: #423b34;
+  --muted: #6f665c;
+  --faint: #9c9288;
+  --line: #e6dfd4;
+  --line_2: #d2c9bb;
+
+  /* Monochrome, as the reference is: emphasis comes from weight and contrast,
+     not from a colour that has to be defended on every surface. */
+  --accent: #171310;
+  --accent_soft: #f6f2ea;
+  --accent_line: #d2c9bb;
+  --warn: #6f665c;
+  --warn_soft: #f6f2ea;
+  --warn_line: #d2c9bb;
 
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --side_w: 232px;
-  --doc_w: 700px;   /* a comfortable measure, roughly 75 characters */
+  --doc_w: 700px;
   --r: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #171614; --bg_sunk: #1e1c1a;
-    --ink: #eceae6; --ink_2: #cbc7c0; --muted: #a09a91; --faint: #6d675f;
-    --line: #2b2926; --line_2: #3b3833;
-    --accent: #e08a63; --accent_soft: #251a15; --accent_line: #59392a;
-    --warn: #dfae56; --warn_soft: #231d10; --warn_line: #574722;
+    --bg: #17150f;
+    --bg_sunk: #1f1c16;
+    --ink: #f5f1e8;
+    --ink_2: #d6cfc2;
+    --muted: #a89f92;
+    --faint: #776e63;
+    --line: #332f28;
+    --line_2: #453f36;
+    --accent: #f5f1e8;
+    --accent_soft: #1f1c16;
+    --accent_line: #453f36;
+    --warn: #a89f92;
+    --warn_soft: #1f1c16;
+    --warn_line: #453f36;
   }
 }
 
@@ -46,8 +61,8 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -87,7 +102,7 @@ code { font-family: var(--mono); font-size: 0.88em; }
   padding: 7px 14px; border: 1px solid transparent; white-space: nowrap;
 }
 .btn:hover { text-decoration: none; }
-.btn_primary { background: var(--accent); color: var(--bg); }
+.btn_primary { background: var(--ink); color: var(--bg); }
 .btn_primary:hover { filter: brightness(1.07); }
 .btn_quiet { border-color: var(--line_2); color: var(--ink); }
 .btn_quiet:hover { background: var(--bg_sunk); }
@@ -126,17 +141,17 @@ code { font-family: var(--mono); font-size: 0.88em; }
 /* --- prose --------------------------------------------------------------- */
 
 .eyebrow {
-  margin: 0 0 10px; font-size: 12.5px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
+  margin: 0 0 10px; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint);
 }
 
 h1 {
-  margin: 0 0 16px; font-size: 42px; line-height: 1.12;
-  letter-spacing: -0.028em; font-weight: 600;
+  margin: 0 0 16px; font-size: 40px; line-height: 1.14;
+  letter-spacing: -0.025em; font-weight: 700;
 }
 h2 {
   margin: 52px 0 14px; font-size: 25px; line-height: 1.25;
-  letter-spacing: -0.02em; font-weight: 600;
+  letter-spacing: -0.025em; font-weight: 700;
   scroll-margin-top: 84px;
 }
 h3 {
@@ -282,3 +297,6 @@ h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
 @media (max-width: 900px) { .anchor { display: none; } }
 
 .demo_note { font-size: 14.5px; color: var(--muted); margin: 18px 0 0; }
+
+/* Selection inverts, as on the reference: the page has one ink and one paper. */
+::selection { background: var(--ink); color: var(--bg); }

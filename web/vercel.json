@@ -33,7 +33,7 @@
   "rewrites": [
     {
       "source": "/demo",
-      "destination": "/dashboard.html"
+      "destination": "/dashboard"
     }
   ]
 }
