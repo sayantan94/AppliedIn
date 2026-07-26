@@ -1,219 +1,486 @@
 # AppliedIn
 
-Applying to jobs is mostly retyping. The same name, the same phone number, the
-same "why are you interested in this role" — a hundred times, until you stop
-applying to good roles because the form is tedious.
+**An agentic workflow that finds matching roles, tailors your resume, and automates job applications—with you in control.**
 
-AppliedIn does the retyping. It finds roles worth your time, tailors your résumé
-to each one, fills the employer's form from answers you approved, and stops for
-you only where a person is genuinely required.
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Google ADK](https://img.shields.io/badge/Agents-Google_ADK-4285F4)](https://google.github.io/adk-docs/)
+[![Local first](https://img.shields.io/badge/Runtime-local--first-139C6D)](#privacy-and-data)
+[![MIT License](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 
-**It runs entirely on your own machine, and applies in your own browser.** Your
-résumé, your answers and your history stay on your disk. Nothing is uploaded
-anywhere except to the employer you are applying to.
+AppliedIn turns a job search into a reviewable pipeline:
 
-> Published for learning — applications go out under **your** name, so read them
-> before they are sent. See [the caveats](#️-for-learning-purposes-only).
+**discover → score → tailor resume → review → approve → apply**
 
-![AppliedIn — the pipeline board: jobs flow found → tailored → applied, with a live feed of every agent step](docs/screenshots/01-pipeline.png)
+This is not one large prompt or a form-filling script. It is a deep agentic graph
+of specialized agents:
 
-*Jobs move **found → tailored → applied**. Every step streams to the live feed,
-so you can always see what it did and why.*
+1. a **discovery agent** finds and normalizes job postings;
+2. a **scorer agent** returns a structured match score;
+3. a **tailor agent** edits the resume for that specific role;
+4. a **critic agent** reviews the edit and loops it back when needed;
+5. deterministic tools validate truthfulness and compile the resume PDF;
+6. a **human gate** waits for approval or a missing answer;
+7. a **browser agent** fills the employer form and verifies confirmation.
 
-## What it actually does
+The graph combines multi-agent orchestration, review-and-critique loops, tool
+use, durable state, and human-in-the-loop control. The default mode stops before
+every submission.
 
-- **Finds roles** on your watchlist's job boards, screened against what you
-  said you want — titles, seniority, locations, hard rules like "no security
-  clearance". Ranked, so Seattle beats San Francisco if that's your preference.
-- **Tailors your résumé** per job: rewords bullets toward the posting's own
-  vocabulary, never inventing anything and never touching your job titles.
-  Compiles to PDF, and shows you a diff of exactly what changed.
-- **Fills the form** — name, contact, work authorisation, the awkward dropdowns,
-  and drafts the free-text answers from your résumé and GitHub.
-- **Stops when it should.** An unknown field, a login wall or a security check
-  becomes a question for you, and your answer is remembered so it is never asked
-  twice.
+![AppliedIn pipeline dashboard showing jobs moving from found to tailored and applied](docs/screenshots/readme-pipeline-light.png)
 
-## Getting started
+> Start with one job URL. You can see a tailored resume before configuring
+> discovery or browser automation.
 
-```bash
-cp .env.example .env          # paste your key: OPENAI_API_KEY=sk-...
-./setup.sh                    # venv, deps, Redis, Tectonic, Playwright
-./appliedin start             # → http://127.0.0.1:8787
-```
+> ⚠️ **Important:** the complete workflow needs an OpenAI API key for discovery,
+> scoring, and resume tailoring, plus an active direct Claude
+> subscription (Pro, Max, Team, or Enterprise) for the Chrome agent that fills
+> and submits applications.
 
-Two things to set up first:
+## Agentic workflow at a glance
 
-1. **Your résumé** — put its LaTeX in `resume/base.tex`. This file is
-   git-ignored, and the tailor only ever re-words it.
-2. **What you want** — employers in `config/watchlist.yaml`, and your criteria in
-   the dashboard's **Job preferences** panel (titles, keywords, locations, the
-   score bar, and free-text rules).
+![Agentic workflow for discovering jobs, scoring matches, tailoring resumes, human approval, and browser application](docs/screenshots/agentic-resume-workflow-light-v3.png)
 
-Then press **Discover**, and **Process** when jobs appear.
+## Why AppliedIn
 
-```bash
-./appliedin start | stop | status | logs   # daemon lifecycle
-./appliedin discover | work | run          # one-shot passes, no server
-./appliedin resume <pk> "<answer>"         # answer a gate from the CLI
-```
+Most application tools optimize for volume. AppliedIn optimizes for control and
+traceability:
 
-## How much it applies is up to you
+- **One resume per role.** It rewords and reorders existing experience toward
+  the job description without inventing experience.
+- **A visible agent workflow.** Scores, model actions, gates, failures, resume
+  diffs, and submission confirmations appear in the dashboard.
+- **Human approval by default.** A tailored application waits for you to press
+  **Apply**.
+- **Answers are reused.** Approved answers are stored locally and reused when a
+  future form asks the same question.
+- **Durable execution.** Redis-backed queues and tracked states let the workflow
+  continue across long-running model and browser steps.
+- **Browser handoff.** Login walls, CAPTCHAs, and uncertain submissions stop for
+  a person instead of being guessed around.
 
-| Mode | What happens |
+## Start in about five minutes
+
+The quickest path creates one tailored resume. Automatic form submission is
+optional and can be enabled later.
+
+### What you need
+
+| For | Required |
 | --- | --- |
-| **Gated** *(default)* | Tailors everything, applies to nothing until you press ▶ Apply. |
-| **Auto** | Applies by itself to jobs scoring above your bar, up to a daily cap. |
-| **Assisted** | Stops at tailored; the [browser extension](extension/) finishes each one in your own Chrome. |
+| Dashboard, scoring, and resume tailoring | macOS or Linux, an OpenAI API key, Redis, and a self-contained LaTeX resume |
+| Automatic application submission | Everything above, plus Chrome or Edge, Claude Code, the Claude browser extension, and an active direct Claude subscription: Pro, Max, Team, or Enterprise |
+| Development | Python 3.12; `uv` is installed by the setup script |
 
-**Assisted** is worth understanding. Employers increasingly challenge automated
-browsers — one posting will go through untouched while the next demands a
-security code. In your own browser, with your own session, that challenge usually
-never appears; when it does, you are already there to clear it. The extension
-opens each waiting application, fills it, and leaves you the check and Submit.
+macOS is the smoothest setup because `setup.sh` can install Redis, Tectonic, and
+Node through Homebrew. On Linux, install those three system packages with your
+package manager before continuing.
 
-## Under the hood
+In short:
 
-Google ADK agents over a durable queue.
+- **OpenAI API key:** required to discover, score, and tailor resumes.
+- **Claude subscription:** required to fill and submit applications in Chrome.
 
-```mermaid
-sequenceDiagram
-    participant Cron as Daemon
-    participant Disc as Discovery
-    participant Q as Queue
-    participant Pipe as Pipeline (ADK)
-    participant Web as Browser
-    participant You
+### 1. Clone and install
 
-    Cron->>Disc: discover (board feeds + crawl)
-    Disc->>Q: enqueue new postings (deduped)
-    Q->>Pipe: job
-    Pipe->>Pipe: score — skip below your bar
-    Pipe->>Pipe: tailor + critic → render PDF
-    Pipe->>You: "ready to apply?"
-    You->>Pipe: approve
-    Pipe->>Web: fill + submit (approved answers only)
-    alt security check, login wall, unknown field
-        Web-->>You: hand off — you finish it
-    end
-    Pipe->>You: confirmation captured
+```bash
+git clone https://github.com/sayantan94/AppliedIn.git
+cd AppliedIn
+
+cp .env.example .env
+./setup.sh
 ```
 
-### Models
+The setup script installs Python 3.12, the project dependencies, Chromium, and
+the local tooling it can detect.
 
-One key, one model, every stage — all defaulting to **`openai/gpt-5-mini`**.
-Each is a full LiteLLM string, so any stage can point at another provider without
-touching code.
+### 2. Add your OpenAI API key
 
-| Stage | What it does | Env var |
+Open `.env` and replace the placeholder:
+
+```dotenv
+OPENAI_API_KEY=sk-your-key-here
+APPLIEDIN_APPLY_MODE=gated
+```
+
+`gated` is the safe default: roles are scored and resumes are tailored, but
+nothing is submitted until you approve it.
+
+Only the OpenAI key is required for the tailoring-only first run. The full
+application workflow also requires Claude Code and an active direct Claude
+subscription.
+
+### 3. Add your resume
+
+AppliedIn currently uses LaTeX as the editable source of truth:
+
+```bash
+mkdir -p resume
+cp "/path/to/your-resume.tex" resume/base.tex
+tectonic resume/base.tex
+```
+
+`resume/base.tex` must compile and should be one self-contained file. Avoid
+external `\input`, image, font, or style-file dependencies because tailored
+copies are compiled in an isolated temporary directory.
+
+Your real resume is git-ignored.
+
+### 4. Start Redis and AppliedIn
+
+On macOS with Homebrew:
+
+```bash
+brew services start redis
+redis-cli ping
+./appliedin start --no-discover
+```
+
+`redis-cli ping` should print `PONG`.
+
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787), click **Tailor a role**,
+paste a public job URL, and click **Tailor resume**.
+
+The role will move through scoring and tailoring, then land in the **Tailored**
+lane. Open the card to inspect:
+
+- its match score and reasoning;
+- the generated resume PDF;
+- exactly what changed from `resume/base.tex`;
+- the approval gate before applying.
+
+That is the smallest useful end-to-end test. No watchlist scan and no browser
+submission are needed.
+
+## Configure your job search
+
+After the one-role flow works, configure discovery.
+
+### Set your preferences
+
+Use **Job preferences** in the dashboard or edit
+[`config/preferences.yaml`](config/preferences.yaml):
+
+- target titles and seniority;
+- skills or domains that raise the match;
+- excluded keywords;
+- preferred locations;
+- hard rules such as “no security clearance”;
+- minimum match score;
+- maximum new roles to tailor per company run.
+
+Preferences are used by both the early relevance filter and the deeper per-job
+scorer.
+
+### Choose companies
+
+Edit [`config/watchlist.yaml`](config/watchlist.yaml) or add a company from the
+dashboard. AppliedIn resolves common ATS providers such as Greenhouse, Lever,
+Ashby, and Workday, then falls back to a browser crawl for custom career sites.
+
+![Company discovery picker showing a selected watchlist and the live agent activity feed](docs/screenshots/readme-discovery-light.png)
+
+*Run discovery against one company, a selected group, or the full watchlist.*
+
+For the first discovery run, select one to three companies instead of scanning
+the full example watchlist. This gives you faster feedback and keeps model usage
+predictable.
+
+Then:
+
+1. Press **Discover** to fetch and queue matching roles.
+2. Press **Process applications** to score and tailor the discovered backlog.
+3. Review jobs in the **Tailored** lane.
+4. Press **Apply** only when the resume and job details look right.
+
+The daemon also schedules discovery every six hours by default. Change
+`APPLIEDIN_DISCOVER_INTERVAL_SEC` in `.env` if needed.
+
+## Add application facts
+
+AppliedIn keeps approved form answers in `.local/facts.md`. The file is created
+after the app starts and is git-ignored.
+
+You can let the workflow ask for missing answers, or seed common facts yourself:
+
+```markdown
+## global
+- **Full name**: Your Name
+- **Email**: you@example.com
+- **Phone**: +1 555 555 5555
+- **Work authorization**: Authorized to work in the United States
+- **Requires sponsorship**: No
+```
+
+Use the dashboard's **Profiles** menu for the email and phone that should appear
+on an application. AppliedIn re-renders the tailored resume with the selected
+profile so the form and PDF do not disagree.
+
+Do not prefill voluntary demographic answers unless you intentionally want them
+used. Unknown protected-characteristic fields are left unanswered.
+
+## Claude subscription required for application submission
+
+Tailoring works without Claude. Submitting through the default `chrome` engine
+requires:
+
+1. Google Chrome or Microsoft Edge.
+2. [Claude Code](https://code.claude.com/docs/en/overview).
+3. The
+   [Claude browser integration](https://code.claude.com/docs/en/chrome).
+4. An active direct Claude Pro, Max, Team, or Enterprise subscription.
+
+Check the connection before asking AppliedIn to submit:
+
+```bash
+claude --version
+claude --chrome
+```
+
+Inside Claude Code, run `/chrome` to inspect or reconnect the browser extension.
+The Chrome integration uses the browser's current login state. It requires the
+direct Claude subscription above.
+
+Keep this setting in `.env`:
+
+```dotenv
+APPLIEDIN_APPLY_ENGINE=chrome
+```
+
+Start in `gated` mode. Once you trust your preferences, resume output, saved
+answers, and browser behavior, the dashboard can switch to `auto`.
+
+| Apply mode | Behavior |
+| --- | --- |
+| `gated` | Tailors every qualifying resume and waits for your approval before submission. |
+| `auto` | Automatically submits roles at or above `APPLIEDIN_AUTO_MIN_SCORE`. |
+| `assisted` | Stops at tailored; the local [`extension/`](extension/) helps you finish in your browser. |
+
+AppliedIn does not solve CAPTCHAs. It hands login, CAPTCHA, and ambiguous form
+states back to you.
+
+## The agentic workflow, step by step
+
+AppliedIn uses Google ADK to coordinate specialized agents inside a durable,
+stateful pipeline. The graph is defined in
+[`src/agent/graph.py`](src/agent/graph.py).
+
+![Filterable agent activity log showing discovery, tailoring, gates, and confirmed submissions](docs/screenshots/readme-agent-logs.png)
+
+*Every model step, tool call, human gate, failure, and confirmed submission is
+visible and filterable.*
+
+### What each stage does
+
+1. **Discover.** Feed adapters and a browser-capable discovery path inspect the
+   selected company boards, normalize postings, deduplicate them, and place
+   matching jobs on a durable queue.
+2. **Score.** The scorer agent compares one job with the base resume and job
+   preferences. It returns a typed `0–10` result. Low matches stop with a reason.
+3. **Tailor.** The tailor agent conservatively rewords and reorders existing
+   resume content around the job description. It cannot add unsupported
+   experience.
+4. **Validate.** Deterministic tools check that bullets and anchored facts were
+   not dropped, then compile a PDF. A failed validation goes back for repair.
+5. **Critique.** The critic agent evaluates the tailored resume. It either exits
+   the loop or sends one focused revision back to the tailor.
+6. **Gate.** The completed resume waits in the **Tailored** lane. Gated mode
+   requires a person to approve it; missing facts always become human questions.
+7. **Apply.** After approval, the browser agent opens the posting in the user's
+   browser, fills fields from approved facts, uploads the tailored resume, and
+   submits.
+8. **Verify.** The workflow records `applied` only when it sees a real
+   confirmation. Login walls, CAPTCHAs, and uncertain outcomes stop in a visible
+   state instead of being retried blindly.
+
+![Human review queue showing approval and login gates alongside live workflow activity](docs/screenshots/readme-human-gates.png)
+
+*The graph pauses visibly when it needs approval, an answer, or a browser login.*
+
+### Agentic patterns used in the graph
+
+| Pattern | Where it appears |
+| --- | --- |
+| Sequential workflow | score → tailor → review → approval → apply |
+| Review and critique loop | the critic sends weak resume edits back to the tailor |
+| Structured output | the scorer returns a typed match result instead of free-form text parsing |
+| Tool use | agents fetch job descriptions, validate facts, compile PDFs, and control the browser |
+| Human in the loop | approval, missing answers, logins, and CAPTCHAs pause for the owner |
+| Durable state and idempotency | Redis queues, tracked statuses, deduplication, and duplicate-submit guards |
+| Bounded autonomy | score thresholds, gated mode, truthfulness checks, and confirmation-required completion |
+
+Each role moves through explicit states:
+
+```text
+found → tailoring → tailored → submitting → applied
+                     ↘ needs_human
+                     ↘ failed / uncertain
+```
+
+## Guardrails
+
+Important boundaries are enforced in code:
+
+- The tailor cannot silently drop resume bullets.
+- Key facts from the base resume are validated before a tailored copy is saved.
+- Job titles and employers are not upgraded or invented.
+- A tracked application marked as applied is refused before another submission.
+- An application is not marked applied unless the destination page shows a
+  confirmation.
+- Unknown protected-characteristic answers are left blank.
+- CAPTCHAs are never solved automatically.
+
+Generated text can still be wrong. Review the resume, answers, and employer terms
+before submitting an application under your name.
+
+## Everyday commands
+
+```bash
+./appliedin start                 # dashboard, workers, scheduled discovery
+./appliedin start --no-discover   # dashboard + workers, no scheduled crawling
+./appliedin status                # daemon health and pipeline counts
+./appliedin logs                  # follow .local/daemon.log
+./appliedin stop                  # stop the daemon
+
+./appliedin discover              # one discovery pass
+./appliedin work                  # process the queued roles
+./appliedin run                   # discover, then process
+./appliedin resume <pk> "<answer>" # answer a human gate from the CLI
+```
+
+## Configuration
+
+The most useful environment variables are:
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| Relevance | first-pass title screen | `APPLIEDIN_RELEVANCE_MODEL` |
-| Scorer | rate fit 0–10 against your résumé | `APPLIEDIN_SCORER_MODEL` |
-| Tailor | reword the résumé for the posting | `APPLIEDIN_TAILOR_MODEL` |
-| Critic | review the tailored résumé | `APPLIEDIN_CRITIC_MODEL` |
-| Writer | draft free-text answers | `APPLIEDIN_WRITER_MODEL` |
-| Field mapper | match form fields to your answers | `APPLIEDIN_ORCHESTRATOR_MODEL` |
-| Browser | fills the form in your own Chrome | `APPLIEDIN_CHROME_MODEL` |
+| `OPENAI_API_KEY` | required | scoring, tailoring, critique, and writing |
+| `APPLIEDIN_APPLY_MODE` | `gated` | `gated`, `auto`, or `assisted` |
+| `APPLIEDIN_AUTO_MIN_SCORE` | `8` | minimum score for automatic submission |
+| `APPLIEDIN_APPLY_ENGINE` | `chrome` | browser submission engine |
+| `APPLIEDIN_ORCHESTRATOR_MODEL` | `openai/gpt-5-mini` | fallback model for agent stages |
+| `APPLIEDIN_TAILOR_MODEL` | orchestrator model | optional tailor override |
+| `APPLIEDIN_CRITIC_MODEL` | orchestrator model | optional critic override |
+| `APPLIEDIN_WRITER_MODEL` | orchestrator model | optional free-text writer override |
+| `APPLIEDIN_REDIS_URL` | `redis://localhost:6379/0` | local tracking and queues |
+| `APPLIEDIN_WEB_PORT` | `8787` | dashboard port |
+| `APPLIEDIN_DISCOVER_INTERVAL_SEC` | `21600` | discovery interval in seconds |
+| `APPLIEDIN_EVAL_LANES` | `2` | concurrent scoring and tailoring workers |
 
-Unset stages fall back to `APPLIEDIN_ORCHESTRATOR_MODEL`, so one variable moves
-everything. A stronger model for the writer (essays) is the usual first upgrade.
+See [`.env.example`](.env.example) for the full list.
 
-### It applies in your own browser
+## Privacy and data
 
-A driven browser has never been anywhere. No history, no cookies the site has
-seen before, and a fingerprint that reads as automation, so the pages that matter
-push back: a security code on one posting, "your submission was flagged as
-possible spam" on the next. A form filled perfectly still does not go out. That is
-a browser problem, and no amount of work on the form logic fixes it.
+AppliedIn has no hosted application backend in local mode. Runtime state is kept
+under `.local/`:
 
-So the application runs in the browser you already use, through
-[Claude Code's Chrome integration](https://code.claude.com/docs/en/chrome), with
-the sessions you are already signed into. The session is limited to browser tools
-plus a scratch file for its report: filling a form cannot read your repo or run a
-shell.
+```text
+.local/facts.md       approved answers
+.local/profiles.yaml  application identities
+.local/secrets.json   saved portal credentials
+.local/artifacts/     tailored resumes and screenshots
+.local/daemon.log     local activity log
+```
 
-**This needs Claude Code and a direct Anthropic plan** (Pro, Max, Team or
-Enterprise). The Chrome integration does not accept API keys, so an API key alone
-will not enable it.
+`.local/`, `.env`, `resume/base.tex`, and generated resume PDFs are ignored by
+Git.
 
-Everything else stays on OpenAI. Discovery, scoring, tailoring, the critic and the
-writer all run on your `OPENAI_API_KEY`; the browser is the only part that
-changed hands.
+Local-first does not mean no data leaves your computer. Resume content, job
+descriptions, and relevant context are sent to the model providers you configure.
+When you approve an application, the browser sends the form and tailored resume
+to the employer. Review the providers' data policies before using real personal
+information.
 
-| Stage | Runs on |
-| --- | --- |
-| Discovery, scoring, tailoring, critic, writer | OpenAI (`APPLIEDIN_ORCHESTRATOR_MODEL`) |
-| Filling and submitting the application | Claude, in your Chrome (`APPLIEDIN_CHROME_MODEL`) |
+## Troubleshooting
 
-### What it refuses to do
-
-These are checked in code, not asked for in a prompt, because a rule that is only
-a sentence in a prompt is a rule nobody is enforcing:
-
-- **It never declares a protected characteristic.** Disability, veteran status,
-  race and gender questions are voluntary; unless you have answered one yourself,
-  it is left blank. Your own negative answers still go through.
-- **It never applies twice.** A job already marked applied is refused outright,
-  before the browser opens.
-- **It never records "applied" without a confirmation the page actually showed.**
-  Clicking Submit and hoping is not a submission.
-- **It never solves a CAPTCHA**, and never accepts an arbitration agreement or
-  waiver you have not explicitly answered.
-
-### Site quirks
-
-Some employers need rules the generic path can't infer — a form inside an iframe,
-a combobox that ignores typed text, a confirmation with unusual wording. Each is
-one markdown file in [`src/agent/skills/site-quirks/`](src/agent/skills/site-quirks/),
-injected into the apply for that site only. Adding a site is one file, no code.
-
-## Checking it without spending anything
-
-These drive the real code paths with Playwright and **no model calls**, so they
-cost nothing to run as often as you like:
+### The dashboard does not open
 
 ```bash
-.venv/bin/python scripts/verify_form_targeting.py   # finds the real form, ignores cookie banners
-.venv/bin/python scripts/verify_submit_path.py      # fill → submit → confirmation, local fixture
-.venv/bin/python scripts/fill_form_demo.py <url>    # fills a real posting, screenshots, never submits
-.venv/bin/python scripts/survey_company_forms.py    # what each employer's form will demand
+./appliedin status
+./appliedin logs
 ```
 
-## Layout
+If the log shows a Redis connection error:
 
-```
-src/core/       models, config, stores factory, storage backends
-src/discovery/  board feed adapters, ATS resolver, crawler, relevance filter
-src/tools/      résumé render/diff, JD fetch, the browser apply engine
-src/agent/      ADK graph (score→tailor→apply), skills/, site-quirks/
-src/daemon.py   the always-on process (discovery + workers + web)
-src/server.py   dashboard, API, extension endpoints
-web/            the dashboard          extension/  assisted-apply driver
-scripts/        no-cost verification and survey tools
+```bash
+redis-cli ping
+brew services restart redis  # macOS
 ```
 
-## Requirements
+### The resume does not compile
 
-Python 3.12, Redis, Chrome, and an OpenAI API key. Applying also needs
-[Claude Code](https://code.claude.com) and a direct Anthropic plan, since the
-Chrome integration does not accept API keys. `setup.sh` handles the rest.
+```bash
+tectonic resume/base.tex
+```
 
-## ⚠️ For learning purposes only
+Fix the first LaTeX error and make the file self-contained. AppliedIn can also
+use `pdflatex` when it is installed.
 
-This is a personal project published to learn from and build on — not a product,
-a service, or advice.
+### A role stays in `found`
 
-- **Applications go out under your name.** Read them before they are sent. An
-  application you didn't check is still one you signed.
-- **Employers' terms may prohibit automated applications.** Check them. Where you
-  point this, and whether you should, is your call and your responsibility.
-- **It never solves CAPTCHAs or bot checks.** When one appears the run stops and
-  hands you the page. That boundary is deliberate — please leave it in.
-- **No warranty.** It gets things wrong. The failure modes are documented rather
-  than hidden, which is the most useful thing about reading the code.
+The role has been discovered but not processed. Press **Process applications**
+or run:
 
----
+```bash
+./appliedin work
+```
 
-## Licence
+### Automatic apply says Claude or Chrome is unavailable
+
+```bash
+command -v claude
+claude --version
+claude --chrome
+```
+
+Confirm the browser extension is enabled, Chrome is running, and `/chrome`
+reports a connected integration.
+
+### Discovery returns no jobs
+
+- Start with one known public job URL using **Tailor a role**.
+- Select one company and inspect `./appliedin logs`.
+- Check the company's `careers_url` in `config/watchlist.yaml`.
+- Make sure your title and location filters are not too narrow.
+
+## Project layout
+
+```text
+src/agent/       Google ADK graph, prompts, skills, and human gates
+src/discovery/   ATS adapters, resolver, crawler, and relevance filter
+src/tools/       job fetch, resume validation/rendering, browser apply
+src/core/        configuration, models, queues, storage, and runtime flags
+src/daemon.py    dashboard server, discovery scheduler, and workers
+src/server.py    local API and dashboard endpoints
+web/             dashboard
+extension/       assisted-application browser extension
+config/          preferences and company watchlist
+tests/           unit tests for core, discovery, and safety behavior
+```
+
+## Development
+
+```bash
+uv sync --group dev
+uv run pytest
+uv run ruff check src tests
+```
+
+Contributions that improve ATS coverage, site-specific form handling,
+truthfulness checks, setup portability, tests, or documentation are welcome.
+Please keep the human handoff and duplicate-submission boundaries intact.
+
+## Responsible use
+
+This repository is published for learning and experimentation. It is not a
+hosted service, and it is not legal, employment, or career advice.
+
+Applications are submitted under your identity. Read what the system generated,
+check each employer's terms, and use automation only where you are comfortable
+accepting responsibility for the result.
+
+If this project helps you build a better job-search workflow, consider starring
+the repository so other agent builders can find it.
+
+## License
 
 MIT — see [LICENSE](LICENSE).
