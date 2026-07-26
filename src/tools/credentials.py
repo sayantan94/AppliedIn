@@ -16,6 +16,14 @@ def portal_secret(company: str) -> str:
 
 
 
+# Text that means "nobody has filled this in yet". A stored credential holding
+# one of these is not a credential: typing it into a portal fails the login and
+# looks like a bad password rather than a missing one.
+_PLACEHOLDER = ("replace_with", "replace-with", "placeholder", "your_apple",
+                "your-apple", "your_email", "your-email", "your_password",
+                "your-password", "changeme", "xxxx", "<", "example.com")
+
+
 def _unset(v: str | None) -> bool:
     v = (v or "").strip().lower()
     return not v or any(mark in v for mark in _PLACEHOLDER)

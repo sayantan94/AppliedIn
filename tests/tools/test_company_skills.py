@@ -265,3 +265,18 @@ def test_a_guardrail_breach_is_never_recorded_as_applied():
     res = classify({"outcome": "applied", "confirmation": "Thanks!",
                     "filled": {"Yes, I have a disability, or have had one in the past": "on"}})
     assert res["status"] == "failed" and res["reason"] == "guardrail"
+
+
+def test_a_placeholder_credential_is_not_a_credential():
+    """Stored logins often hold "changeme" until someone fills them in.
+
+    Typing that into a portal fails the sign-in and looks like a wrong password
+    rather than a missing one, so it counts as unset and the run hands over to
+    the owner instead. This also guards the constant itself: it was deleted by a
+    dead-code sweep once, and every apply raised NameError until it came back.
+    """
+    from tools.credentials import _unset
+
+    assert _unset("") and _unset("   ")
+    assert _unset("changeme") and _unset("your_password") and _unset("REPLACE_WITH_X")
+    assert not _unset("a-real-password")
