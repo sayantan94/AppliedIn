@@ -38,6 +38,7 @@
     <a href="#top">What it is</a>
     <a href="#how">How it works</a>
     <a href="#browser">Why your own browser</a>
+    <a href="#architecture">The graph</a>
     <p class="side_h">Behaviour</p>
     <a href="#guarantees">Guarantees</a>
     <a href="#gates">When it asks you</a>
@@ -161,6 +162,70 @@
         <div class="card">
           <h3>Résumé and answers</h3>
           <p class="mono_note">your disk, nowhere else</p>
+        </div>
+      </div>
+
+
+      <hr />
+
+      <h2 id="architecture">The graph</h2>
+      <p>
+        Five stages, each a different shape of agent, because they are different
+        kinds of problem. Discovery routes between a deterministic feed and a
+        browsing agent. Scoring is one model call. Tailoring is a writer and a
+        critic in a bounded loop. Applying is a ReAct loop over guarded tools. The
+        only stage that is not automated at all is the one where you approve.
+      </p>
+
+      <figure class="diagram">
+        <picture>
+          <source srcset="/img/workflow-dark.webp" type="image/webp"
+                  media="(prefers-color-scheme: dark)" />
+          <source srcset="/img/workflow-dark.png"
+                  media="(prefers-color-scheme: dark)" />
+          <source srcset="/img/workflow-light.webp" type="image/webp" />
+          <img src="/img/workflow-light.png" width="1672" height="941" decoding="async"
+               alt="The AppliedIn pipeline. Stage 0 Discover routes a watchlist and preferences through either a deterministic ATS feed or a Chrome crawling agent, then filters, scores and dedupes into a job queue. Stage 1 Match Scorer is a single model call producing a score from 0 to 10, stopping anything below the bar. Stage 2 Résumé Tailoring loops a tailor agent against a critic agent for at most two passes, validating facts and compiling a PDF. Stage 3 is human approval, where the run pauses. Stage 4 Application Agent is a ReAct loop of observe, act and verify running in the owner's own Chrome, with a duplicate guard and no blind retry, uploading to a hidden file input rather than an operating system chooser. The outcome is either a confirmation, a question for the owner, or a stop for human verification." />
+        </picture>
+        <figcaption>
+          Sequential orchestration with one human gate. Full size:
+          <a href="/img/workflow-light.png">light</a>,
+          <a href="/img/workflow-dark.png">dark</a>.
+        </figcaption>
+      </figure>
+
+      <div class="cards cols_2">
+        <div class="card">
+          <h3>Tool routing, not a single agent</h3>
+          <p>
+            A board with an API is read over HTTP: complete, fast, free. Only a
+            careers page that will not yield to that gets a browsing agent. Reaching
+            for the expensive tool first is how a pipeline becomes slow everywhere.
+          </p>
+        </div>
+        <div class="card">
+          <h3>A critic with a budget</h3>
+          <p>
+            The tailor writes, the critic reviews, and the loop is capped at two
+            passes. Every bullet is kept and every claim is checked against the
+            original, so the résumé that comes out is still yours.
+          </p>
+        </div>
+        <div class="card">
+          <h3>The tools carry the rules</h3>
+          <p>
+            The application agent cannot type a placeholder, declare a protected
+            characteristic, or affirm a sanctions question, because those are refused
+            at the tool boundary rather than discouraged in a prompt.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Three honest outcomes</h3>
+          <p>
+            Confirmed, needs you, or uncertain. There is no fourth branch where it
+            assumes the application went through, which is why a run that cannot
+            prove a submission reports that instead of claiming one.
+          </p>
         </div>
       </div>
 

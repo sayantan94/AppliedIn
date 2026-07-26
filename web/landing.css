@@ -300,3 +300,25 @@ h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
 
 /* Selection inverts, as on the reference: the page has one ink and one paper. */
 ::selection { background: var(--ink); color: var(--bg); }
+
+/* --- the architecture diagram -------------------------------------------- */
+
+/* Wider than the prose column: a graph squeezed to a text measure is unreadable,
+   and this one is the clearest statement of how the thing works. */
+.diagram {
+  margin: 26px 0 30px;
+  margin-left: calc(-1 * clamp(0px, (100% - var(--doc_w)) / 2 + 90px, 150px));
+  margin-right: calc(-1 * clamp(0px, (100% - var(--doc_w)) / 2 + 90px, 150px));
+}
+.diagram picture, .diagram img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg);
+}
+.diagram figcaption {
+  margin-top: 10px; font-size: 13px; color: var(--faint);
+}
+
+@media (max-width: 900px) {
+  .diagram { margin-left: 0; margin-right: 0; }
+}
