@@ -23,8 +23,11 @@ def stage1_match(job: JobRecord, prefs: Preferences) -> bool:
     if prefs.exclude_keywords and _contains_any(text, prefs.exclude_keywords):
         return False
 
-    if prefs.include_keywords and not _contains_any(text, prefs.include_keywords):
-        return False
+    # include_keywords RAISE fit; they are not a requirement. This filter only
+    # runs when the relevance screen fails, and rejecting everything without an
+    # AI/agentic keyword there would quietly discard the plain "Senior Software
+    # Engineer" roles the owner also asked for — a degraded screen should be
+    # blunter, not stricter.
 
     if prefs.titles and not _contains_any(job.title, prefs.titles):
         return False

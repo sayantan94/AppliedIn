@@ -15,9 +15,21 @@ def test_exclude_keyword_rejects():
     assert stage1_match(_job(jd="requires security clearance"), prefs) is False
 
 
-def test_missing_include_keyword_rejects():
+def test_a_missing_include_keyword_does_not_reject():
+    """include_keywords RAISE fit; they are not a requirement.
+
+    preferences.yaml calls them "soft signals that RAISE fit (not required)" and
+    this filter treated them as mandatory. It only runs when the relevance screen
+    fails, so the effect was that a degraded screen became a STRICTER one — and
+    the plain "Senior Software Engineer" roles the owner also asked for were
+    silently dropped for lacking an AI keyword.
+    """
     prefs = Preferences(include_keywords=["golang"])
-    assert stage1_match(_job(jd="python only"), prefs) is False
+    assert stage1_match(_job(jd="python only"), prefs) is True
+
+    # The exclude list is the one that still rejects outright.
+    assert stage1_match(_job(jd="python only"),
+                        Preferences(exclude_keywords=["python"])) is False
 
 
 def test_location_mismatch_rejects():
