@@ -76,35 +76,4 @@ def clear() -> None:
 # The browser crawl is expensive and, without this, re-runs every cycle. Once a
 # crawl finds NO new jobs (we've seen everything recent), mark the company
 # "exhausted" and stop crawling it — until a new job turns up or Reset clears it.
-def _crawl_state_path() -> Path:
-    return Path(get_settings().local_dir) / "crawl_state.json"
 
-
-def _crawl_state() -> dict:
-    p = _crawl_state_path()
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return {}
-
-
-def crawl_exhausted(company: str) -> bool:
-    return bool(_crawl_state().get(company.strip().lower(), {}).get("exhausted"))
-
-
-def record_crawl(company: str, found_new: int) -> None:
-    """After a crawl: 0 new jobs => exhausted (stop re-crawling); any new job
-    un-exhausts it (fresh postings appeared, keep going)."""
-    from datetime import UTC, datetime
-
-    st = _crawl_state()
-    st[company.strip().lower()] = {
-        "exhausted": found_new == 0,
-        "last_crawl": datetime.now(UTC).isoformat(timespec="seconds"),
-        "last_new": found_new,
-    }
-    p = _crawl_state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(st, indent=2))

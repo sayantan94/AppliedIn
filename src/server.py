@@ -659,10 +659,19 @@ def create_app() -> FastAPI:
             _RUNNING["process"] = True
             try:
                 process_backlog_once(companies=[name])
+                # Report the outcome, not the fact that the code reached the end.
+                # "Tailored jobs await your approval" when nothing was found sends
+                # the owner to look at an empty board and doubt the board.
+                stores = make_stores(settings)
+                waiting = sum(1 for r in stores.tracking.all()
+                              if (r.get("company") or "").strip().lower() == name.strip().lower()
+                              and r.get("status") == "tailored")
                 emit("applied", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
-                     detail=f"{name}: one-company run complete — tailored jobs "
-                            f"await your approval on the board")
+                     detail=(f"{name}: {waiting} tailored job(s) awaiting your approval"
+                             if waiting else
+                             f"{name}: run complete — no new roles matched your "
+                             f"preferences this time"))
             except Exception:
                 logging.getLogger("server").exception("run-company process failed")
             finally:
