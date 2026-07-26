@@ -387,19 +387,23 @@ def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str
     resume_line = (f"""
 RÉSUMÉ — attach {resume_path}
 
-This is the tailored résumé and the application is not complete without it. Use
-the file-upload tool with that exact path; do not retype the path by hand and do
-not try to drag the file. Attach it to the field asking for a Resume or CV.
+Use the file-upload tool and point it straight at the form's file input. That
+tool sets the file on the input directly; it does not need a dialog.
 
-NOT to a cover-letter field, and NOT to an "Autofill from resume" box — that one
-is a parser, and feeding it re-populates the form and overwrites answers already
-entered.
+Do NOT click "Attach", "Upload a file", "Choose file" or a drag-and-drop area to
+get there. Those open the operating system's own file chooser, which is not part
+of the page: you cannot see or control it, and while it is open the browser stops
+responding to everything else. If one does open, press Escape and go back to
+uploading against the input.
 
-Some forms hide the real input behind a button labelled Attach, Upload, or
-"Attach, Dropbox, Google Drive". Click that first so the file input exists, then
-upload. Afterwards CHECK that the filename is showing on the page. If it is not,
-the upload did not happen: try again rather than carrying on, because a submitted
-application with no résumé is worse than one that stopped.
+The input is often hidden behind that button rather than absent — target it even
+when it is not visible. Attach to the field for a Resume or CV, never to a cover
+letter, and never to an "Autofill from resume" box, which is a parser that
+re-populates the form and overwrites answers already entered.
+
+Then confirm the filename is showing on the page. If it is not, the upload did
+not happen: try again rather than carrying on, because an application submitted
+without a résumé is worse than one that stopped.
 """ if resume_path else "")
 
     return f"""Fill in and submit this job application on the owner's behalf.

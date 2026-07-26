@@ -84,3 +84,15 @@ Three things are worth recording, because each one silently ruins an application
 
 Delete a rule when it stops being true. These are read on every apply to the site,
 so a stale rule costs tokens and misleads the agent.
+
+## Uploading a file, on any board
+
+Point the upload tool at the form's `input[type=file]` directly. It sets the file
+on the input; no dialog is involved.
+
+Never click "Attach", "Upload a file", "Choose file", or a drop zone to reach it.
+Those open the operating system's file chooser, which is not part of the page —
+it cannot be seen or driven, and the browser stops responding to anything else
+until it is dismissed. The input is usually hidden behind that button rather than
+missing, so target it even when it is invisible.
+

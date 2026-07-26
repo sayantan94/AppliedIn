@@ -19,9 +19,10 @@ success_phrases:
   application is not in — stop and hand the window to the person. Filling was not
   the problem, so do not re-fill or re-submit.
 - The résumé control is a **button row** — "Attach", "Dropbox", "Google Drive",
-  "Enter manually" — not a visible file input. Click **Attach** first; the real
-  `input[type=file]` only becomes reachable after that. Uploading before clicking
-  it silently does nothing.
+  "Enter manually" — with the real `input[type=file]` hidden behind it. Upload
+  against that input directly. Do NOT click "Attach": it opens the operating
+  system's file chooser, which is outside the page and freezes the browser until
+  it is dismissed.
 - After the upload the filename appears next to the control with a small remove
   (×) beside it. That is the confirmation the attachment took. If the button row
   is still showing, it did not.
