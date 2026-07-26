@@ -13,6 +13,9 @@ node_modules/
 cdk.out/
 *.js.map
 
+# Social
+docs/social-x
+
 # Secrets / local config (user-provided, never committed)
 facts.seed.yaml
 *.local.yaml

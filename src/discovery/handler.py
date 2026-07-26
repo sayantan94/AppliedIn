@@ -236,7 +236,9 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
                 crawl_companies.append(company)  # custom career page -> crawler
                 continue
             try:
-                total += discover_company(company, prefs, stores.tracking, stores.queue, client, stores.tailor_queue, profile_id)
+                total += discover_company(company, prefs, stores.tracking,
+                                          stores.queue, client,
+                                          stores.tailor_queue, profile_id)
             except Exception:
                 log.exception("discovery failed for %s", company.name)
 

@@ -133,14 +133,23 @@ async def run_task(task: str, *, report_key: str, model: str = "",
         cmd += ["--add-dir", str(d)]
 
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        *cmd,
+        # `claude -p` waits on stdin before it starts. From a terminal that costs
+        # three seconds and a warning; from the daemon there is no terminal, and
+        # the session died two and a half minutes in having produced nothing. The
+        # CLI's own advice is to redirect it, so redirect it.
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        return {}, (f"The Chrome session ran past {timeout_s // 60} minutes without "
-                    "reporting. Check the tab it left open before retrying.")
+        log.warning("chrome session hit the %ds ceiling — killed", timeout_s)
+        return {}, (f"The browser session was still working after "
+                    f"{timeout_s // 60} minutes and was stopped. Check the tab it "
+                    "left open — it may have submitted. Raise the ceiling if this "
+                    "portal is simply slow.")
 
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
 
@@ -170,10 +179,16 @@ async def run_task(task: str, *, report_key: str, model: str = "",
             proc.kill()
             await proc.wait()
 
+    if not report:
+        # Log everything before deciding it failed. "It produced nothing" is not a
+        # diagnosis, and without the session's own words there is nothing to fix.
+        log.warning("chrome session gave no report (exit=%s)\n--- stdout ---\n%s\n"
+                    "--- stderr ---\n%s", proc.returncode,
+                    stdout[-3000:] or "(empty)", stderr[-3000:] or "(empty)")
     if not report and proc.returncode not in (0, None) and not stdout.strip():
         tail = stderr.strip().splitlines()[-1] if stderr.strip() else \
-            "it produced nothing — check whether Chrome is running and the extension connected"
-        return {}, f"claude --chrome failed: {tail[:200]}"
+            "it produced no output at all"
+        return {}, f"claude --chrome failed (exit {proc.returncode}): {tail[:200]}"
     if not report:
         return {}, ("The Chrome session ended without a structured result, so what "
                     "it did is unknown. Check the browser.")
@@ -420,6 +435,10 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
         allow_dirs=resume_dirs(resume_path),
     )
     if problem:
+        # Say it on the board. A run that failed for a reason the owner could fix
+        # — Chrome closed, the extension disconnected, a ceiling hit — is useless
+        # to them as a status word they have to go digging behind.
+        emit("error", pk=pk, agent="browser", url=url, detail=problem)
         return {"status": "unknown", "detail": problem}
 
     # The whole account, into the job's feed. The one-line outcome says whether it

@@ -1241,6 +1241,12 @@ function openDrawer(pk) {
     ["job id", `<span class="mono">${esc(r.pk)}</span>`],
   ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 
+  const failure = (r.fail_reason || "").trim();
+  const failBlock = failure && ["failed", "uncertain"].includes(r.status)
+    ? `<div class="section drawer-fail"><div class="section-t">what went wrong</div>
+         <div class="fail-text">${esc(failure)}</div></div>`
+    : "";
+
   const jdText = (r.jd_text || "").trim();
   const jdBlock = jdText
     ? `<details class="section jd-block"><summary class="section-t">the posting${
@@ -1250,6 +1256,7 @@ function openDrawer(pk) {
 
   $("#drawer-body").innerHTML = `
     ${gate}
+    ${failBlock}
     ${jdBlock}
     ${closed}
     <div class="section"><div class="section-t">status</div>

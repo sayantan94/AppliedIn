@@ -12,7 +12,7 @@ The important part is what it does **not** automate blindly. It pauses before su
 
 That boundary shaped the entire agent graph.
 
-![AppliedIn agent graph: match scoring, résumé tailoring, human approval, and application](./deep-agentic-resume-workflow-x-readable.png)
+![AppliedIn agent graph: match scoring, résumé tailoring, human approval, and application](deep-agentic-resume-workflow-x-readable.png)
 
 ## This is not one giant agent
 

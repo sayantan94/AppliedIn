@@ -67,9 +67,7 @@ def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobReco
     from .chrome_crawl import find_jobs_sync
 
     jobs, board, note = find_jobs_sync(
-        company, url,
-        titles=_search_terms(prefs),
-        locations=list(getattr(prefs, "locations", []) or []),
+        company, url, prefs=prefs,
         model=(getattr(get_settings(), "chrome_model", "") or ""))
     if board:
         # Worth saying loudly: a wrapper around a real board should be read from

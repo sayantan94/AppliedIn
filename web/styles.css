@@ -2000,3 +2000,10 @@ a.rowlk, button.rowlk { display: inline-block; }
   white-space: pre-wrap; font-size: 13px; line-height: 1.55;
   color: var(--ink-2, var(--ink)); padding-right: 6px;
 }
+
+/* Why a run failed, in the drawer. The owner can usually fix these (Chrome
+   closed, a portal cap, a slow form) so the reason belongs in front of them. */
+.drawer-fail .fail-text {
+  font-size: 13px; line-height: 1.55; white-space: pre-wrap;
+  color: var(--bad, #b3261e);
+}
