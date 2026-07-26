@@ -146,3 +146,7 @@ companies:
   - name: Rivian
     careers_url: https://jobs.ashbyhq.com/rivianvw.tech
     mode: gated
+
+  - name: Reddit
+    careers_url: https://redditinc.com/careers
+    mode: gated

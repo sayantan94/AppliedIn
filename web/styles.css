@@ -231,11 +231,20 @@ button:disabled { cursor: default; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* company picker (scopes the next discovery run) */
+/* A popover is anchored under its button, so a tall one runs off the bottom of
+   the window and its footer — where the save button lives — becomes
+   unreachable: scrolling over the popover scrolls its inner list instead of the
+   page. --pop-max is set from app.js on open to the space actually below the
+   button, and the column layout lets the scrollable middle shrink so the footer
+   is always in view. */
 .copicker {
   position: absolute;
   left: 0;
   top: calc(100% + 8px);
   width: min(272px, calc(100vw - 32px));
+  max-height: var(--pop-max, none);
+  display: flex;
+  flex-direction: column;
   background: var(--panel-solid);
   border: 1px solid var(--border-2);
   border-radius: var(--r-lg);
@@ -243,6 +252,13 @@ button:disabled { cursor: default; }
   z-index: 60;
   overflow: hidden;
 }
+/* Footers and headers hold their size; only the scrollable middle gives way. */
+.copicker > .cp-head,
+.copicker > .cp-tools,
+.copicker > .cp-role-h,
+.copicker > .cp-foot,
+.copicker > .cp-add,
+.copicker > .cp-role-foot { flex: none; }
 .cp-head { padding: 10px 10px 0; }
 .cp-search {
   width: 100%;
@@ -369,22 +385,48 @@ button:disabled { cursor: default; }
   background: var(--card);
 }
 .cp-foot b { color: var(--fg); font-weight: 600; }
+/* Adding a company was four controls crammed into one row, with nothing saying
+   what the URL was for or how the two buttons differed. Stacked and labelled:
+   the panel says what it does, the hint says when the optional field matters. */
 .cp-add {
   display: flex;
+  flex-direction: column;
   gap: 6px;
-  align-items: center;
   border-top: 1px solid var(--border);
-  padding: 8px;
+  padding: 10px 12px 12px;
   background: var(--card);
 }
-.cp-add .cp-search { flex: 1; min-width: 0; }
+.cp-add-hd {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 1px;
+}
+.cp-add .cp-search { width: 100%; min-width: 0; }
+.cp-add-hint {
+  margin: 1px 0 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+.cp-add-row { display: flex; gap: 6px; }
 .cp-add-btn {
   flex: none;
   border: 1px solid var(--border);
   border-radius: 7px;
   padding: 5px 10px;
 }
+.cp-add-row .cp-add-btn { flex: 1; text-align: center; }
 .cp-add-btn:hover { text-decoration: none; border-color: var(--scan); }
+/* The scanning button is the one people mean; the plain add is the quieter path. */
+.cp-add-go {
+  border-color: color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 12%, transparent);
+  color: var(--scan);
+}
+.cp-add-go:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }
 
 /* vitals cluster */
 .deck-right { display: flex; align-items: center; gap: 16px; }
@@ -1792,6 +1834,10 @@ a.rowlk, button.rowlk { display: inline-block; }
   display: flex;
   flex-direction: column;
   gap: 11px;
+  /* Shrinks when the popover is capped to the window (min-height:0 is what
+     lets a flex item scroll rather than push its footer off-screen). */
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: min(62vh, 520px);
   overflow-y: auto;
 }

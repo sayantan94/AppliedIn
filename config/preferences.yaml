@@ -79,7 +79,7 @@ min_match_score: 7
 
 # How many NEW postings one company run hands to the pipeline, best-first.
 # Tailoring is the expensive stage and a big board can match dozens. 0 = no cap.
-max_new_per_run: 9
+max_new_per_run: 15
 
 # Candidate's public GitHub — the tailor reads the repos (names, languages,
 # topics) as extra context to reword bullets toward each JD.

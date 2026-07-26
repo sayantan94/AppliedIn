@@ -1457,6 +1457,20 @@ function toast(msg) {
 }
 
 // --- wiring ----------------------------------------------------------------
+// Cap an open popover to the room actually below its button. Without this a
+// tall one (job preferences) hangs past the bottom of the window and its Save
+// button is unreachable — scrolling over the popover scrolls the list inside it,
+// not the page. Call on open, and again on resize while it is open.
+const fitPopover = (el) => {
+  if (!el || el.hidden) return;
+  el.style.removeProperty("--pop-max");           // measure unclamped
+  const top = el.getBoundingClientRect().top;
+  el.style.setProperty("--pop-max", `${Math.max(220, window.innerHeight - top - 12)}px`);
+};
+window.addEventListener("resize", () => {
+  document.querySelectorAll(".copicker:not([hidden])").forEach(fitPopover);
+});
+
 function wire() {
   $("#btn-discover").addEventListener("click", runDiscover);
   $("#btn-process").addEventListener("click", runProcess);
@@ -1475,7 +1489,7 @@ function wire() {
     picker.hidden = !show;
     coBtn.setAttribute("aria-expanded", String(show));
     coBtn.classList.toggle("open", show);
-    if (show) { renderPicker(); $("#cp-search").focus(); }
+    if (show) { fitPopover(picker); renderPicker(); $("#cp-search").focus(); }
   });
   picker.addEventListener("click", (e) => e.stopPropagation());
   $("#cp-search").addEventListener("input", (e) => {
@@ -1504,7 +1518,7 @@ function wire() {
       await loadCompanies();
       state.picked.add(name);
       renderPicker(); renderDiscoverLabel();
-      toast(`${name} added to the watchlist — and selected.`);
+      toast(`${name} added to the watchlist and selected. Hit Discover to scan it.`);
     } else if (d) toast(d.error || "Could not add the company.");
   };
   $("#cp-add-btn").addEventListener("click", addCompany);
@@ -1590,7 +1604,7 @@ function wire() {
     const show = rp.hidden;
     rp.hidden = !show;
     rpBtn.setAttribute("aria-expanded", String(show));
-    if (show) $("#rp-url").focus();
+    if (show) { fitPopover(rp); $("#rp-url").focus(); }
   });
   rp.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => { if (!rp.hidden && !e.target.closest(".rolemgr")) closeRp(); });
@@ -1655,7 +1669,7 @@ function wire() {
     const show = pm.hidden;
     pm.hidden = !show;
     pmBtn.setAttribute("aria-expanded", String(show));
-    if (show) loadProfiles();
+    if (show) { fitPopover(pm); loadProfiles(); }
   });
   pm.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -1757,7 +1771,7 @@ function wire() {
     const show = pf.hidden;
     pf.hidden = !show;
     pfBtn.setAttribute("aria-expanded", String(show));
-    if (show) { loadPrefs(); $("#pf-titles").focus(); }
+    if (show) { fitPopover(pf); loadPrefs(); $("#pf-titles").focus(); }
   });
   pf.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -1776,7 +1790,7 @@ function wire() {
     const show = sp.hidden;
     sp.hidden = !show;
     spBtn.setAttribute("aria-expanded", String(show));
-    if (show) { renderSkipPicker(); $("#sp-search").focus(); }
+    if (show) { fitPopover(sp); renderSkipPicker(); $("#sp-search").focus(); }
   });
   sp.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {

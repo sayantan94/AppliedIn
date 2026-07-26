@@ -200,17 +200,20 @@ def _apply_loop() -> None:
         time.sleep(POLL_INTERVAL)
 
 
-def run_discovery_once(only: list[str] | None = None) -> dict:
+def run_discovery_once(only: list[str] | None = None, profile_id: str = "") -> dict:
     """ONE discovery cycle on demand (the UI 'Start discovery' button). `only`
     scopes it to the companies the user picked (None/empty = the whole
-    watchlist). Finds + enqueues new jobs as `found`; does NOT score/tailor/apply
-    — that's what `process_backlog_once` (the 'Process applications' button) does.
-    Blocking — the web layer runs it in a background task so the click returns
-    instantly."""
+    watchlist). `profile_id` stamps every job this run finds with the identity it
+    should be sent under, so a batch can go out from one address without setting
+    it per job; the UI's "apply as" selector passes it. Finds + enqueues new jobs
+    as `found`; does NOT score/tailor/apply — that's what `process_backlog_once`
+    (the 'Process applications' button) does. Blocking — the web layer runs it in
+    a background task so the click returns instantly."""
     from discovery.handler import run_discovery
 
-    log.info("manual discovery requested (companies=%s)", only or "all")
-    result = run_discovery(only=only)
+    log.info("manual discovery requested (companies=%s, profile=%s)",
+             only or "all", profile_id or "default")
+    result = run_discovery(only=only, profile_id=profile_id)
     log.info("manual discovery: %s", result)
     return result
 

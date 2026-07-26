@@ -80,13 +80,21 @@
                 </div>
                 <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
                 <div class="cp-add">
+                  <div class="cp-add-hd">Track a new company</div>
                   <input id="cp-add-name" class="cp-search" type="text"
-                    placeholder="Add company — name" autocomplete="off" spellcheck="false" />
+                    placeholder="Company name, e.g. Anthropic" autocomplete="off" spellcheck="false" />
                   <input id="cp-add-url" class="cp-search" type="text"
-                    placeholder="careers URL (optional)" autocomplete="off" spellcheck="false" />
-                  <button class="cp-lk cp-add-btn" id="cp-add-btn" type="button">Add</button>
-                  <button class="cp-lk cp-add-btn" id="cp-add-run" type="button"
-                    title="Add the company, discover its postings, and tailor résumés — stops before applying">Add&nbsp;&amp;&nbsp;run</button>
+                    placeholder="Careers page URL (optional)" autocomplete="off" spellcheck="false" />
+                  <p class="cp-add-hint">
+                    Leave the URL blank and discovery finds the job board itself from the name.
+                    Paste one only if it picks the wrong board, or the company hosts its own.
+                  </p>
+                  <div class="cp-add-row">
+                    <button class="cp-lk cp-add-btn" id="cp-add-btn" type="button"
+                      title="Add to the watchlist only. It gets scanned on the next discovery run.">Add to watchlist</button>
+                    <button class="cp-lk cp-add-btn cp-add-go" id="cp-add-run" type="button"
+                      title="Add it, scan for postings, and tailor a résumé for each match. Stops before applying.">Add and scan now</button>
+                  </div>
                 </div>
               </div>
             </div>
