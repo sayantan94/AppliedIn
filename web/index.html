@@ -13,13 +13,22 @@
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://www.appliedin.dev/img/social-cover.jpg" />
 <meta name="theme-color" content="#faf9f7" />
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem("appliedin.theme");
+      var theme = saved || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+      document.documentElement.dataset.theme = theme;
+    } catch (_) {}
+  })();
+</script>
 <link rel="icon" href="/logo.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
   href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
   rel="stylesheet" />
-<link rel="stylesheet" href="/landing.css" />
+<link rel="stylesheet" href="/landing.css?v=5" />
 </head>
 <body>
 
@@ -30,7 +39,12 @@
     <a href="#product">Product</a>
     <a href="#guarantees">Guardrails</a>
     <a href="#start">Get started</a>
-    <a class="btn btn_quiet" href="/demo">Demo</a>
+    <button class="btn btn_quiet theme_toggle" id="theme-toggle" type="button"
+            aria-label="Switch theme">
+      <span class="theme_icon" aria-hidden="true">◐</span>
+      <span class="theme_label">Theme</span>
+    </button>
+    <a class="btn btn_quiet demo_link" href="/demo">Demo</a>
     <a class="btn btn_primary" href="https://github.com/sayantan94/AppliedIn">GitHub</a>
   </nav>
 </header>
@@ -40,15 +54,17 @@
   <aside class="sidebar">
     <p class="side_h">Graph engineering</p>
     <a href="#top">What it solves</a>
-    <a href="#architecture">The agent graph</a>
+    <a href="#architecture">Start with boundaries</a>
+    <a href="#workflow">The complete graph</a>
     <a href="#patterns">Patterns in use</a>
     <p class="side_h">The product</p>
     <a href="#product">See the workflow</a>
     <a href="#how">How it works</a>
-    <a href="#browser">Why your browser</a>
+    <a href="#tailoring">Resume tailoring</a>
+    <a href="#browser">What runs where</a>
     <p class="side_h">Boundaries</p>
     <a href="#guarantees">Guardrails</a>
-    <a href="#gates">Human gates</a>
+    <a href="#gates">Approval and browser</a>
     <p class="side_h">Run it</p>
     <a href="#start">Get started</a>
     <a href="#requirements">Requirements</a>
@@ -83,24 +99,37 @@
         </p>
       </div>
 
-      <h2 id="architecture">The agent graph</h2>
+      <h2 id="architecture">Start with boundaries</h2>
       <p>
-        The stable path is sequential. Each uncertain stage gets a focused agent.
-        Code protects facts and side effects. The human appears as an explicit
-        transition rather than an exception.
+        AppliedIn assigns each part of an application to the actor best suited
+        for it. Code handles repeatable rules. Focused agents handle judgment and
+        changing websites. You control identity, missing facts, and submission.
+      </p>
+
+      <figure class="diagram sketch">
+        <img src="/img/sketch-boundaries.png" width="1672" height="941"
+             loading="lazy" decoding="async"
+             alt="Whiteboard sketch showing code handling filtering and validation, agents handling scoring and navigation, and the human handling approval and verification" />
+        <figcaption>
+          Code handles the facts. Focused agents handle uncertainty. You stay in
+          control when the workflow acts in your name.
+        </figcaption>
+      </figure>
+
+      <h3 id="workflow">The complete workflow</h3>
+      <p>
+        Those boundaries compose into a stable path from discovery to verified
+        application. Every uncertain stage has a focused agent, a stopping
+        condition, and an explicit next state.
       </p>
 
       <figure class="diagram">
-        <picture>
-          <source srcset="/img/workflow-dark.webp" type="image/webp"
-                  media="(prefers-color-scheme: dark)" />
-          <source srcset="/img/workflow-dark.png"
-                  media="(prefers-color-scheme: dark)" />
-          <source srcset="/img/workflow-light.webp" type="image/webp" />
-          <img src="/img/workflow-light.png" width="1672" height="941"
-               decoding="async" fetchpriority="high"
-               alt="AppliedIn agent graph: discovery routes tools into a queue, a scorer returns a typed match result, a tailor and critic loop validates a resume, a human approves, and a browser agent applies and verifies the outcome." />
-        </picture>
+        <img id="workflow-image" src="/img/workflow-light.webp"
+             data-light-src="/img/workflow-light.webp"
+             data-dark-src="/img/workflow-dark.webp"
+             width="1672" height="941"
+             decoding="async" fetchpriority="high"
+             alt="AppliedIn agent graph: discovery routes tools into a queue, a scorer returns a typed match result, a tailor and critic loop validates a resume, a human approves, and a browser agent applies and verifies the outcome." />
         <figcaption>
           Discover → Score → Tailor ↔ Critique → Approve → Apply → Verify.
           Full size: <a href="/img/workflow-light.png">light</a> or
@@ -200,10 +229,42 @@
         </div>
       </div>
 
-      <h2 id="gates">The human is a first-class node</h2>
+      <h3 id="tailoring">Resume tailoring stays truthful</h3>
       <p>
-        A missing answer does not disappear into an agent trace. The run pauses
-        visibly with the exact question and resumes when the owner answers.
+        The tailor can adapt wording and emphasis for a role. Validation keeps
+        every source fact anchored, produces a real PDF, and limits the critic
+        to one focused revision across no more than two passes.
+      </p>
+
+      <figure class="diagram sketch">
+        <img src="/img/sketch-tailor-loop.png" width="1672" height="941"
+             loading="lazy" decoding="async"
+             alt="Whiteboard sketch showing a resume tailoring agent, deterministic fact validation, a critic, and a two pass limit" />
+        <figcaption>
+          The agent adapts the resume for relevance. Code protects the source
+          facts and produces the final PDF.
+        </figcaption>
+      </figure>
+
+      <h2 id="gates">Approval comes before browser action</h2>
+      <p>
+        You review the tailored resume before the application agent can act.
+        After approval, the browser observes, fills, and verifies. Missing
+        information returns to you instead of becoming an invented answer.
+      </p>
+
+      <figure class="diagram sketch">
+        <img src="/img/sketch-human-browser.png" width="1672" height="941"
+             loading="lazy" decoding="async"
+             alt="Whiteboard sketch showing a tailored resume moving through human approval, browser action, and verified outcomes" />
+        <figcaption>
+          Approval comes before browser action. Confirmation, human questions,
+          and uncertain outcomes remain separate paths.
+        </figcaption>
+      </figure>
+
+      <p>
+        The same boundaries stay visible on the product board.
       </p>
 
       <figure class="diagram">
@@ -216,11 +277,11 @@
         </figcaption>
       </figure>
 
-      <h2 id="browser">Why it uses your browser</h2>
+      <h2 id="browser">What runs where</h2>
       <p>
-        Application portals trust the session you already use more than a clean
-        automated profile with no history. AppliedIn therefore works in your own
-        Chrome or Edge session, where you can watch the agent and take over.
+        The workflow and application history stay on your machine. Core graph
+        reasoning uses your OpenAI key. Automatic form submission uses Claude
+        Code and its Chrome integration in the browser session you control.
       </p>
 
       <div class="cards cols_3 tight">
@@ -336,6 +397,6 @@ cp .env.example .env
   </main>
 </div>
 
-<script src="/landing.js" defer></script>
+<script src="/landing.js?v=3" defer></script>
 </body>
 </html>

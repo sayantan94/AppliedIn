@@ -7,7 +7,7 @@ One process that does what cloud splits across managed triggers:
 
 Same functions the cloud triggers call — only the scheduling differs. Run it:
 
-    APPLIEDIN_MODE=local  (ANTHROPIC_API_KEY in .env)  uv run python -m daemon
+    APPLIEDIN_MODE=local  (OPENAI_API_KEY in .env)  uv run python -m daemon
 
 then open http://127.0.0.1:8787
 """

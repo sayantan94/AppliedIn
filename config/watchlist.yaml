@@ -139,7 +139,11 @@ companies:
   - name: Apple
     careers_url: https://jobs.apple.com/en-us/search?location=united-states-USA
     ats: custom
-    discovery: crawl
+    # browser, not crawl: jobs.apple.com renders its results client-side, so a
+    # plain fetch sees roughly the first twenty of forty-plus postings. Because
+    # that short window still contains a match or two, the "escalate when nothing
+    # is relevant" rule never fired and every rescan returned the same handful.
+    discovery: browser
     login_secret: portal/apple
     mode: gated
 
@@ -153,4 +157,8 @@ companies:
 
   - name: waymo
     careers_url: https://careers.withwaymo.com/
+    mode: gated
+
+  - name: Thinking Machine
+    careers_url: https://job-boards.greenhouse.io/thinkingmachines
     mode: gated

@@ -4,9 +4,12 @@ Two tiers, cheapest first:
   1. fetch + extract — plain HTTP GET + one-shot LLM extract. Fast and cheap;
      good for static/simple pages.
   2. Chrome — the owner's real browser, driven by a `claude --chrome` subprocess
-     that types the search, applies filters and pages/scrolls. Escalated to ONLY
-     when tier 1 finds nothing, which is what happens on client-rendered search
-     UIs (e.g. jobs.apple.com/…/search).
+     that types the search, applies filters and pages/scrolls. Used when tier 1
+     finds nothing, and ALWAYS for a company marked `discovery: browser`, whose
+     careers page renders its listing client-side (jobs.apple.com/…/search and
+     friends). Those pages give the plain fetch a short window of the listing;
+     because that window usually contains a match or two, a "did we find
+     anything" test reads it as success and the rest of the board is never seen.
 
 Then the same filter / dedup / enqueue path as feed discovery. Mode-agnostic:
 stores come from the factory. The extractor is injectable so it's testable (an
@@ -22,7 +25,7 @@ from typing import Any
 import httpx
 
 from core.logging import get_logger
-from core.models import JobRecord
+from core.models import DiscoveryMode, JobRecord
 
 from .relevance import relevant
 from .resolver import detect_from_page
@@ -32,20 +35,6 @@ log = get_logger(__name__)
 
 _MAX_HTML = 200_000  # cap the page text we hand the model
 
-
-
-def _search_terms(prefs: Preferences) -> list[str]:
-    """The queries the crawler types into the site's search box — the target
-    TITLES plus the AI/agents include_keywords, so it surfaces what preferences
-    actually ask for (not just a generic first title)."""
-    seen: set[str] = set()
-    terms: list[str] = []
-    for t in [*prefs.titles, *prefs.include_keywords]:
-        t = (t or "").strip()
-        if t and t.lower() not in seen:
-            seen.add(t.lower())
-            terms.append(t)
-    return terms[:5] or ["software engineer"]
 
 
 _CRAWL_CEILING_S = 600  # 10 min per company — enterprise portals (Google, Oracle)
@@ -169,14 +158,28 @@ def crawl_company(
     from tools import seen
 
     jobs = relevant(extracted, prefs)
-    # The cheap render under-renders JS search UIs (Apple returns a handful) — if
-    # the agent judged nothing relevant, escalate to a real browser agent that
-    # loads the full listing, then re-screen. Skipped when an extractor is
-    # injected (tests stay offline) or the company is already exhausted.
-    if not jobs and extractor is None:
-        log.info("%s: nothing from the plain fetch — reading the page in the browser",
-                 company.name)
-        extracted = _browser_extract(company.careers_url, company.name, prefs)
+    # Escalate to a real browser agent that loads the FULL listing, then re-screen.
+    # Two ways in. Skipped when an extractor is injected (tests stay offline).
+    #
+    #   discovery: browser — the page is a client-rendered search UI and the plain
+    #     fetch is known to see only a fraction of it. Crucially the old rule
+    #     ("escalate when nothing was relevant") never fired for these: a short
+    #     window containing one match looks exactly like a complete page with one
+    #     match, so a rescan kept returning the same handful and new roles further
+    #     down the listing were never fetched at all.
+    #   nothing relevant — the page may simply not have rendered; worth one look.
+    force_browser = company.discovery is DiscoveryMode.BROWSER
+    if extractor is None and (force_browser or not jobs):
+        log.info("%s: %s — reading the full listing in the browser", company.name,
+                 "client-rendered careers page" if force_browser
+                 else "nothing from the plain fetch")
+        seen_by_browser = _browser_extract(company.careers_url, company.name, prefs)
+        # Union, not replacement: the plain fetch occasionally catches a posting
+        # the browser agent scrolls past, and losing one to gain thirty is still
+        # a loss for the job it dropped.
+        by_url = {j.jd_url: j for j in extracted}
+        by_url.update({j.jd_url: j for j in seen_by_browser})
+        extracted = list(by_url.values())
         jobs = relevant(extracted, prefs)
 
     log.info("%s: extracted %d postings, %d relevant", company.name, len(extracted), len(jobs))

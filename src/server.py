@@ -609,7 +609,40 @@ def create_app() -> FastAPI:
         from discovery.handler import list_watchlist_companies
         return {"companies": list_watchlist_companies(),
                 "skipped": sorted(flags.skipped_companies()),
-                "filters": flags.company_filters()}
+                "filters": flags.company_filters(),
+                # Per-company overrides plus the fields they may override, so the
+                # dashboard can show what a company actually screens on without a
+                # second round trip per row.
+                "prefs": flags.company_prefs(),
+                "pref_fields": list(flags.COMPANY_PREF_FIELDS)}
+
+    @app.post("/actions/company-prefs")
+    def company_prefs(body: dict):
+        """Override the job preferences for ONE company.
+
+        Send only the fields you are changing. A field sent as null, "" or []
+        is REMOVED, which is how a company goes back to inheriting the global
+        preference — that has to be explicit, because an empty list is also a
+        legitimate value and the two would otherwise be indistinguishable.
+        """
+        from core import flags
+        name = ((body or {}).get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name required"}
+        over = dict((body or {}).get("overrides") or {})
+        for k in ("titles", "include_keywords", "exclude_keywords", "seniority",
+                  "locations"):
+            if k in over and isinstance(over[k], str):
+                over[k] = [s.strip() for s in over[k].replace("\n", ",").split(",")
+                           if s.strip()]
+        for k in ("min_match_score", "max_new_per_run"):
+            if k in over and over[k] not in (None, ""):
+                try:
+                    over[k] = int(over[k])
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"{k} must be a number"}
+        flags.set_company_pref(name, over)
+        return {"ok": True, "prefs": flags.company_prefs()}
 
     @app.post("/actions/clear-llm-error")
     def clear_llm_error():

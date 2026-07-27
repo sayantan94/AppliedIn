@@ -7,6 +7,41 @@
 (function () {
   "use strict";
 
+  var root = document.documentElement;
+  var themeButton = document.getElementById("theme-toggle");
+  var themeIcon = themeButton && themeButton.querySelector(".theme_icon");
+  var themeLabel = themeButton && themeButton.querySelector(".theme_label");
+  var workflowImage = document.getElementById("workflow-image");
+  var themeColor = document.querySelector('meta[name="theme-color"]');
+
+  function syncTheme() {
+    var light = root.dataset.theme === "light";
+    var next = light ? "dark" : "light";
+
+    if (themeButton) {
+      themeButton.setAttribute("aria-label", "Switch to " + next + " theme");
+      themeButton.setAttribute("aria-pressed", String(!light));
+    }
+    if (themeIcon) themeIcon.textContent = light ? "☾" : "☀";
+    if (themeLabel) themeLabel.textContent = light ? "Dark" : "Light";
+    if (themeColor) themeColor.setAttribute("content", light ? "#f6f7f6" : "#101312");
+    if (workflowImage) {
+      workflowImage.src = light
+        ? workflowImage.dataset.lightSrc
+        : workflowImage.dataset.darkSrc;
+    }
+  }
+
+  if (themeButton) {
+    themeButton.addEventListener("click", function () {
+      root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+      localStorage.setItem("appliedin.theme", root.dataset.theme);
+      syncTheme();
+    });
+  }
+
+  syncTheme();
+
   var headings = Array.prototype.slice.call(
     document.querySelectorAll("article h2[id], article h3[id]")
   );

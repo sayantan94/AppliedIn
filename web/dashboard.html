@@ -63,17 +63,25 @@
                 </svg>
               </button>
 
-              <div id="copicker" class="copicker" hidden>
-                <div class="cp-head">
-                  <input id="cp-search" class="cp-search" type="search"
-                    placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+              <div id="copicker" class="copicker copicker-wide" hidden>
+                <div class="cp-cols">
+                  <div class="cp-col cp-col-list">
+                    <div class="cp-head">
+                      <input id="cp-search" class="cp-search" type="search"
+                        placeholder="Search companies…" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div class="cp-tools">
+                      <button class="cp-lk" id="cp-all" type="button">Select all</button>
+                      <button class="cp-lk" id="cp-none" type="button">Clear</button>
+                      <span class="cp-state mono" id="cp-state">all</span>
+                    </div>
+                    <div class="cp-list" id="cp-list" aria-label="Companies"></div>
+                  </div>
+                  <!-- Per-company preferences: the same fields as Job preferences,
+                       overridden for one company. Anything left blank inherits the
+                       default, and the placeholder shows what that default is. -->
+                  <div class="cp-col cp-col-detail" id="cp-detail"></div>
                 </div>
-                <div class="cp-tools">
-                  <button class="cp-lk" id="cp-all" type="button">Select all</button>
-                  <button class="cp-lk" id="cp-none" type="button">Clear</button>
-                  <span class="cp-state mono" id="cp-state">all</span>
-                </div>
-                <div class="cp-list" id="cp-list" aria-label="Companies"></div>
                 <div class="cp-prof">
                   <label for="cp-profile">apply as</label>
                   <select id="cp-profile" class="cp-profsel"><option value="">default profile</option></select>

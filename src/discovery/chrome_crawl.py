@@ -69,20 +69,64 @@ def _brief(prefs: object) -> str:
     return "\n\n".join(parts)
 
 
-def _task(company: str, url: str, brief: str) -> str:
+def _queries(prefs: object) -> str:
+    """The searches to actually run, as COMBINATIONS rather than single words.
+
+    One query per title returns that title and nothing else, so a role doing
+    exactly the wanted work under a plain name is missed. One query per topic
+    returns roles that never mention the title, which is how the interesting ones
+    are usually named. The PAIR is what finds the overlap, and no single query
+    covers all three cases — so the pairs are listed explicitly instead of left to
+    the session to invent, because "search the site" reliably becomes one search.
+    """
+    def _list(name: str) -> list[str]:
+        return [str(x).strip() for x in (getattr(prefs, name, None) or []) if str(x).strip()]
+
+    titles, topics = _list("titles")[:3], _list("include_keywords")[:5]
+    if not titles and not topics:
+        return ""
+    pairs = [f"{t} {k}" for t in titles[:2] for k in topics[:3]]
+    queries: list[str] = []
+    for q in [*pairs, *topics, *titles]:          # pairs first: they are the point
+        if q.lower() not in {x.lower() for x in queries}:
+            queries.append(q)
+    lines = "\n".join(f"  {q}" for q in queries[:12])
+    return ("\nSEARCHES TO RUN — work through these and MERGE what they return. Do not\n"
+            "stop after the first one: each is deliberately a different slice, and the\n"
+            "pairs at the top are the ones that find a plainly titled role doing the\n"
+            "right work. If the site lets filters stack (a keyword facet that turns\n"
+            "each term into a chip), apply several at once instead of searching one\n"
+            "term at a time.\n"
+            f"{lines}\n")
+
+
+def _task(company: str, url: str, brief: str, site_rules: str = "") -> str:
     return f"""Find the open jobs on this company's careers page that fit this owner.
 
 COMPANY: {company}
 CAREERS PAGE: {url}
 
 {brief}
+{site_rules}
 
 Open the page and actually look for postings. Many careers pages need work before
 they show anything: a "See all jobs" or "View openings" link, a department filter,
 a search box, or a "Load more" button that has to be clicked several times. Use
 the site's own search and filters with the roles and topics above — that is far
 faster than scrolling everything — and follow them until you are seeing the real
-list. If the page turns out to be a wrapper around a job board (Greenhouse, Ashby,
+list.
+
+SORT BY NEWEST FIRST if the site offers it (a "Sort" control, "Most recent", or a
+date column). This listing gets cut off at a fixed number of postings, so the
+order decides WHICH ones survive the cut: newest-first means the cut drops roles
+already seen on earlier runs, while a relevance or default sort means new postings
+further down are never returned at all.
+
+Search with COMBINATIONS, not just single terms. One query per role title returns
+that title only; pairing a title with a topic ("Senior Software Engineer" plus
+"agentic") surfaces roles whose title is generic but whose work is exactly the
+fit, and a topic on its own ("ai agents") catches the ones titled nothing like the
+target. Run several queries and merge what they return rather than trusting one. If the page turns out to be a wrapper around a job board (Greenhouse, Ashby,
 Lever, Workday), say so: it can then be read directly, which is faster and
 complete.
 
@@ -120,8 +164,17 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
     if not ok:
         return [], "", why
 
+    # Per-site discovery rules, if we have learned any for this careers page.
+    # Never raises: a bad note must not stop a crawl.
+    try:
+        from tools.company_skills import instructions_for
+        site_rules = instructions_for(careers_url, company)
+    except Exception:  # noqa: BLE001
+        log.debug("could not load company skills for %s", company, exc_info=True)
+        site_rules = ""
+
     report, problem = await run_task(
-        _task(company, careers_url, _brief(prefs)),
+        _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules),
         report_key="jobs", model=model, timeout_s=TIMEOUT_S)
     if problem:
         log.warning("chrome crawl of %s failed: %s", company, problem)

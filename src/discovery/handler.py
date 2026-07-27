@@ -72,9 +72,18 @@ def discover_company(
                   company.name, exc)
         return 0
 
-    matched = relevant(fetched, prefs)
-    # Per-company title filter (dashboard): e.g. Rivian → only "Staff" titles.
     from core import flags as _flags
+
+    # Per-company preference OVERRIDES first (dashboard): the same fields as the
+    # global preferences, but for one company — "Google, but Staff+ only, score
+    # bar 6". Anything left unset inherits the global value, so a company with no
+    # overrides screens exactly as before.
+    eff = _flags.effective_prefs(company.name, prefs)
+    if eff is not prefs:
+        log.info("%s: using company preference overrides %s",
+                 company.name, sorted(_flags.company_pref(company.name)))
+    matched = relevant(fetched, eff)
+    # Then the title filter, which NARROWS on top rather than replacing.
     kws = _flags.company_filter(company.name)
     if kws:
         before = len(matched)
@@ -97,19 +106,25 @@ def discover_company(
     # Take only the best few per run. Tailoring is the expensive stage, and a big
     # board can match dozens of roles that are merely acceptable; the relevance
     # screen already returns them best-first.
-    top_n = getattr(prefs, "max_new_per_run", 0) or 0
+    top_n = getattr(eff, "max_new_per_run", 0) or 0
     if top_n > 0 and len(matched) > top_n:
         log.info("%s: keeping the top %d of %d matches this run",
                  company.name, top_n, len(matched))
         matched = matched[:top_n]
 
+    # A company's own identity wins over the run's. Picking "personal 2" for this
+    # discovery run is a one-off; setting it on the company is a standing rule,
+    # and the standing rule is the more specific statement of intent.
+    co_profile = _flags.company_pref(company.name).get("profile_id") or ""
+    stamp_profile = co_profile or profile_id
+
     enqueued, new_jobs = 0, []
     for job in matched:
         if tracking.put_new(job):  # False => already seen, skip
-            if profile_id:
+            if stamp_profile:
                 # Stamped at discovery so the whole batch applies from one
                 # identity — the résumé is rendered to match when it's tailored.
-                tracking.set_status(job.pk, Status.FOUND, profile_id=profile_id)
+                tracking.set_status(job.pk, Status.FOUND, profile_id=stamp_profile)
             queue.enqueue(tailor_queue_url, {"pk": job.pk})
             emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
             new_jobs.append(job)

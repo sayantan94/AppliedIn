@@ -71,8 +71,8 @@ optional and can be enabled later.
 | Automatic application submission | Everything above, plus Chrome or Edge, Claude Code, the Claude browser extension, and an active direct Claude subscription: Pro, Max, Team, or Enterprise |
 | Development | Python 3.12; `uv` is installed by the setup script |
 
-macOS is the smoothest setup because `setup.sh` can install Redis, Tectonic, and
-Node through Homebrew. On Linux, install those three system packages with your
+macOS is the smoothest setup because `./appliedin setup` can install Redis and
+Tectonic through Homebrew. On Linux, install those two system packages with your
 package manager before continuing.
 
 In short:
@@ -87,11 +87,12 @@ git clone https://github.com/sayantan94/AppliedIn.git
 cd AppliedIn
 
 cp .env.example .env
-./setup.sh
+./appliedin setup
 ```
 
-The setup script installs Python 3.12, the project dependencies, Chromium, and
-the local tooling it can detect.
+Installs Python 3.12, the project dependencies, and the local tooling it can
+detect. `./appliedin` is the only script you need: `start` runs setup for you
+whenever the dependencies have moved.
 
 ### 2. Add your OpenAI API key
 
@@ -125,17 +126,19 @@ copies are compiled in an isolated temporary directory.
 
 Your real resume is git-ignored.
 
-### 4. Start Redis and AppliedIn
-
-On macOS with Homebrew:
+### 4. Start AppliedIn
 
 ```bash
-brew services start redis
-redis-cli ping
 ./appliedin start --no-discover
 ```
 
-`redis-cli ping` should print `PONG`.
+That is the whole command. `start` installs anything missing, brings up Redis,
+and checks your key and resume before launching, so it either starts properly or
+tells you exactly what is missing. `--no-discover` leaves the scheduled crawler
+off, which is what you want for a first run.
+
+It runs in the background and logs to `.local/daemon.log`. `./appliedin status`,
+`./appliedin logs` and `./appliedin stop` do what they say.
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787), click **Tailor a role**,
 paste a public job URL, and click **Tailor resume**.
@@ -480,6 +483,18 @@ accepting responsibility for the result.
 
 If this project helps you build a better job-search workflow, consider starring
 the repository so other agent builders can find it.
+
+## Contributing
+
+Using Claude Code, Codex or another coding agent? Point it at this repo and ask
+it to **"set this repo up and start the server"**. [AGENTS.md](AGENTS.md) scripts
+that end to end, so the agent installs what is missing, asks you for the three
+things only you have (your OpenAI key, your resume, a company or two), starts the
+daemon, and checks it is actually up.
+
+[AGENTS.md](AGENTS.md) is also the guide for changing the code: where things live,
+how to add a job preference or a per site playbook, how to debug the browser
+agent, and which guarantees are enforced in code and must stay there.
 
 ## License
 

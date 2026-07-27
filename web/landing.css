@@ -36,10 +36,9 @@
   --r: 9px;
 }
 
-/* The dashboard's light theme, matched. It flips on the reader's preference
-   here because a marketing page has no theme toggle to remember. */
-@media (prefers-color-scheme: light) {
-  :root {
+/* The dashboard's light theme, matched. The initial theme follows the system
+   preference and the header control stores an explicit reader choice. */
+:root[data-theme="light"] {
     --bg: #f6f7f6;
     --bg_sunk: #f1f4f1;
     --ink: #171d19;
@@ -56,7 +55,6 @@
     --warn: #e29c17;
     --warn_soft: #fdf6e8;
     --warn_line: #eedcb4;
-  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -114,6 +112,8 @@ code { font-family: var(--mono); font-size: 0.88em; }
 .btn_quiet { border-color: var(--line_2); color: var(--ink); }
 .btn_quiet:hover { background: var(--bg_sunk); }
 .btn.lg { font-size: 15px; padding: 10px 20px; }
+.theme_toggle { gap: 7px; background: transparent; }
+.theme_icon { font-size: 15px; line-height: 1; }
 
 /* --- layout -------------------------------------------------------------- */
 
@@ -263,12 +263,21 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 52px 0; }
 /* --- responsive ---------------------------------------------------------- */
 
 @media (max-width: 900px) {
-  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  html, body { width: 100%; max-width: 100%; overflow-x: clip; }
+  .shell {
+    width: 100%; max-width: 100%;
+    grid-template-columns: minmax(0, 1fr); gap: 0;
+  }
+  .doc, .doc article { width: 100%; max-width: 100%; min-width: 0; }
   .sidebar { display: none; }
   .cols_2, .cols_3 { grid-template-columns: minmax(0, 1fr); }
   h1 { font-size: 34px; }
   .topnav > a:not(.btn) { display: none; }
-  .topbar { padding: 0 18px; }
+  .topnav { gap: 8px; }
+  .demo_link, .topnav .btn_primary { display: none; }
+  .theme_label { display: none; }
+  .theme_toggle { width: 36px; padding-inline: 0; }
+  .topbar { gap: 12px; padding: 0 18px; }
   .shell { padding: 0 18px; }
 }
 
@@ -324,6 +333,18 @@ h2:hover .anchor, h3:hover .anchor, .anchor:focus { opacity: 1; }
 }
 .diagram figcaption {
   margin-top: 10px; font-size: 13px; color: var(--faint);
+}
+
+/* The generated sketches use a white canvas. Blending removes that canvas so
+   the marker work sits directly on the current page in either theme. */
+:root[data-theme="light"] .diagram.sketch img {
+  border-color: transparent;
+  mix-blend-mode: multiply;
+}
+:root[data-theme="dark"] .diagram.sketch img {
+  border-color: transparent;
+  filter: invert(1) hue-rotate(180deg);
+  mix-blend-mode: screen;
 }
 
 @media (max-width: 900px) {

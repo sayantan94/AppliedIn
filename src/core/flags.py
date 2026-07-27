@@ -146,6 +146,98 @@ def set_company_filter(name: str, keywords: list) -> dict:
     return cur
 
 
+# --- per-company preference overrides -------------------------------------
+# A company filter narrows titles on top of the global preferences. That is not
+# enough on its own: "Google, but only Staff+, and drop the score bar to 6" needs
+# the SAME fields as the global preferences, overridden for one company and
+# inherited everywhere they are left unset. These are stored separately from the
+# title filter so an existing filter keeps working untouched.
+_PREF_KEY = "company_prefs"
+
+# Every field the global preferences panel offers, except `github`, which is
+# about the candidate rather than the company.
+COMPANY_PREF_FIELDS = ("titles", "include_keywords", "exclude_keywords",
+                       "seniority", "locations", "min_match_score",
+                       "max_new_per_run", "remote_only", "notes",
+                       # Which identity this company's applications go out under.
+                       # Not part of the global Preferences object — it is a
+                       # per-run choice there — but per company it is exactly a
+                       # preference: "anything at Adobe uses my personal 2 address".
+                       "profile_id")
+
+
+def company_prefs() -> dict:
+    """{company_lower: {field: value}} — only the fields that were overridden."""
+    import json
+
+    try:
+        raw = json.loads(get_flag(_PREF_KEY, "{}") or "{}")
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for co, over in (raw or {}).items():
+        if not isinstance(over, dict):
+            continue
+        clean = {k: v for k, v in over.items() if k in COMPANY_PREF_FIELDS}
+        if clean:
+            out[str(co).lower()] = clean
+    return out
+
+
+def company_pref(company: str) -> dict:
+    return company_prefs().get((company or "").strip().lower(), {})
+
+
+def set_company_pref(name: str, overrides: dict) -> dict:
+    """Set a company's overrides. A field mapped to None/'' /[] is REMOVED, which
+    is how you go back to inheriting the global value; passing {} clears them all.
+    Removal has to be explicit because "" is a legitimate way to say "no titles"
+    and would otherwise be indistinguishable from "inherit"."""
+    import json  # noqa: F401 — used by the early return below too
+
+    cur = company_prefs()
+    key = (name or "").strip().lower()
+    # An empty mapping means "this company has no overrides at all". Merging it
+    # field-by-field would be a no-op and silently leave the old ones in place,
+    # so reset-to-global has to be handled before the merge, not by it.
+    if not overrides:
+        cur.pop(key, None)
+        set_flag(_PREF_KEY, json.dumps(cur))
+        return cur
+    over = dict(cur.get(key) or {})
+    for field, value in overrides.items():
+        if field not in COMPANY_PREF_FIELDS:
+            continue
+        if value is None or value == "" or value == []:
+            over.pop(field, None)
+        else:
+            over[field] = value
+    if over:
+        cur[key] = over
+    else:
+        cur.pop(key, None)
+    set_flag(_PREF_KEY, json.dumps(cur))
+    return cur
+
+
+def effective_prefs(company: str, base):
+    """`base` with this company's overrides applied. Returns a COPY, so the
+    caller's global preferences object is never mutated — one company's override
+    leaking into the next company's run would be silent and hard to spot."""
+    over = company_pref(company)
+    if not over:
+        return base
+    try:
+        merged = base.model_copy(update=over)      # pydantic v2
+    except AttributeError:
+        import copy
+
+        merged = copy.deepcopy(base)
+        for k, v in over.items():
+            setattr(merged, k, v)
+    return merged
+
+
 def title_matches_filter(title: str, keywords: list) -> bool:
     """True if no filter, or the title contains one of the keywords."""
     if not keywords:

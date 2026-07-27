@@ -256,6 +256,7 @@ button:disabled { cursor: default; }
 .copicker > .cp-head,
 .copicker > .cp-tools,
 .copicker > .cp-role-h,
+.copicker > .cp-prof,
 .copicker > .cp-foot,
 .copicker > .cp-add,
 .copicker > .cp-role-foot { flex: none; }
@@ -271,13 +272,20 @@ button:disabled { cursor: default; }
   color: var(--fg);
   outline: none;
 }
-.cp-search:focus { border-color: var(--scan); }
+/* Nine near-identical inputs in a dense pane: a border swap alone is easy to
+   lose mid tab, so focus also carries a soft ring. */
+.cp-search:focus {
+  border-color: var(--scan);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--scan) 14%, transparent);
+}
 .cp-search::placeholder { color: var(--faint); }
 .cp-tools {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px 6px;
+  padding: 8px 12px 7px;
+  /* the list below scrolls; rows should slide under a line, not into the toolbar */
+  border-bottom: 1px solid var(--border);
 }
 .cp-lk {
   border: none;
@@ -292,20 +300,171 @@ button:disabled { cursor: default; }
 .cp-list {
   max-height: 224px;
   overflow-y: auto;
-  padding: 2px 6px 6px;
+  padding: 4px 6px 6px;
   scrollbar-width: thin;
 }
 .cp-item {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-radius: var(--r-sm);
   font-size: 13px;
   cursor: pointer;
   user-select: none;
+  flex-wrap: wrap;              /* the roles editor drops to its own line */
+  transition: background 0.12s;
 }
 .cp-item:hover { background: var(--card-2); }
+/* Checked rows are the next run. Unchecked names step back to muted so the
+   picked set can be read straight down a forty row column; the checkbox itself
+   still carries the state, so colour is never the only signal. */
+.cp-item:not(.skipped):has(.cp-name input:not(:checked)) .cp-name span { color: var(--muted); }
+
+/* Discover is two panes: the watchlist, and the preferences for whichever
+   company is open. A single dropdown could not carry seven fields per company,
+   and stacking them made the list unreachable. */
+.copicker-wide { width: min(680px, calc(100vw - 32px)); }
+.cp-cols { display: flex; align-items: stretch; min-height: 0; }
+.cp-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.cp-col-list { flex: 0 0 46%; border-right: 1px solid var(--border); }
+.cp-col-detail { flex: 1 1 auto; background: var(--card); }
+.cp-col > .cp-head, .cp-col > .cp-tools { flex: none; }  /* only the list gives way */
+/* In the wide picker the list fills its column: the detail pane runs tall, and
+   dead space under a forty row list is scroll the list could have used. The cap
+   mirrors the detail body's, so the popover stays sane even on a code path that
+   never set --pop-max. */
+.copicker-wide .cp-list { flex: 1 1 auto; min-height: 0; max-height: min(52vh, 420px); }
+@media (max-width: 760px) {          /* one column: the list still comes first */
+  .copicker-wide { width: calc(100vw - 32px); }
+  .cp-cols { flex-direction: column; }
+  /* 0 1 auto, not none: a height capped popover must squeeze both panes,
+     not take everything out of the rules pane below. */
+  .cp-col-list { flex: 0 1 auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  /* stacked, a tall list shoves the rules pane below the fold: stay compact */
+  .copicker-wide .cp-list { max-height: 224px; }
+}
+
+/* Row chip: does this company screen on its own rules, or on the defaults?
+   Mono pill so the counts line up down the column. "default" stays a faint
+   ghost (forty of these are noise); "custom" wears the same scan tint as the
+   overridden fields in the pane, so chip and field read as one state. */
+.cp-roles {
+  margin-left: auto;
+  flex: none;
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  line-height: 1.6;
+  color: var(--faint);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.cp-roles:hover { border-color: var(--border-2); color: var(--fg); }
+.cp-roles.custom {
+  color: var(--scan);
+  border-color: color-mix(in srgb, var(--scan) 38%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+}
+.cp-roles.custom:hover { color: var(--scan); background: color-mix(in srgb, var(--scan) 18%, transparent); }
+/* The open row points at the pane it filled: a rail on the shared edge. */
+.cp-item.sel { background: var(--card-2); box-shadow: inset -2px 0 0 var(--scan); }
+/* A scan border now means "has its own rules", so the open row's chip may not
+   borrow it: neutral lift for "default", untouched tint for "custom". */
+.cp-item.sel .cp-roles { border-color: var(--border-2); color: var(--fg); }
+.cp-item.sel .cp-roles.custom {
+  border-color: color-mix(in srgb, var(--scan) 38%, transparent);
+  color: var(--scan);
+}
+
+/* The preference pane. Same fields as Job preferences, so the two read alike. */
+.cp-dt-h {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 8px; border-bottom: 1px solid var(--border);
+  flex: none;                  /* the body scrolls; header and foot hold */
+}
+.cp-dt-co { font-size: 13px; font-weight: 700; color: var(--fg); }
+/* Same species as the row chip: mono pill, scan tint only when it differs. */
+.cp-dt-badge {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.03em;
+  line-height: 1.6; padding: 1px 7px;
+  border-radius: 999px; border: 1px solid var(--border); color: var(--faint);
+}
+.cp-dt-badge.custom {
+  font-weight: 600;
+  color: var(--scan); border-color: color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+}
+/* Nine fields have to fit under the header without crowding: a two column
+   grid where sentences span both tracks and the short answers (two numbers,
+   one yes/no) pair up, the same way Job preferences rows them. */
+.cp-dt-body {
+  flex: 1 1 auto;              /* fill the column so the foot pins to its bottom */
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+  align-content: start;        /* spare column height stays after the fields */
+  padding: 10px 12px 12px 2px; /* slim left: each field brings its own lead-in */
+  overflow-y: auto; min-height: 0;
+  max-height: min(52vh, 420px);
+  scrollbar-width: thin;
+}
+/* THE distinction this pane exists for. A shared value stays quiet: faint
+   uppercase tag, plain field. An override is marked three ways so it cannot
+   be missed: a scan rail down the field's edge, a tinted input border, and
+   the tag set as a filled pill. Every field reserves rail width and lead-in,
+   so overriding one never shifts the grid. */
+.cp-dt-f {
+  grid-column: 1 / -1;
+  min-width: 0;                /* an input's own min width must not win a track */
+  border-left: 2px solid transparent;
+  padding-left: 8px;
+}
+.cp-dt-f:has(input[type="number"]),
+.cp-dt-f:has(select) { grid-column: auto; }
+.cp-dt-f:has(.cp-dt-inh.overridden) { border-left-color: var(--scan); }
+.cp-dt-f:has(.cp-dt-inh.overridden) > .pf-l { color: var(--fg); }
+.cp-dt-f:has(.cp-dt-inh.overridden) .cp-dt-in {
+  border-color: color-mix(in srgb, var(--scan) 40%, var(--border));
+}
+.cp-dt-f:has(.cp-dt-inh.overridden) .cp-dt-in:focus { border-color: var(--scan); }
+.cp-dt-in { padding: 5px 9px; font-size: 12.5px; }
+.cp-dt-f select.cp-dt-in { appearance: none; cursor: pointer; }
+.cp-dt-f textarea.cp-dt-in {
+  min-height: 54px; resize: vertical;
+  /* same voice as Hard rules in Job preferences: the two panes read alike */
+  font-family: var(--mono); font-size: 11px; line-height: 1.55;
+}
+.cp-dt-f .pf-l { display: flex; align-items: baseline; gap: 6px; }
+.cp-dt-inh {
+  margin-left: auto; font-style: normal; font-weight: 500;
+  font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase;
+  line-height: 1.7; padding: 0 6px;
+  border: 1px solid transparent; border-radius: 999px;
+  color: var(--faint);
+}
+.cp-dt-inh.overridden {
+  font-weight: 600;
+  color: var(--scan);
+  border-color: color-mix(in srgb, var(--scan) 38%, transparent);
+  background: color-mix(in srgb, var(--scan) 12%, transparent);
+}
+.cp-dt-in::placeholder { color: var(--faint); font-style: italic; }
+.cp-dt-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  flex: none;
+}
+.cp-dt-hint { flex: 1; font-size: 10.5px; color: var(--faint); }
+.cp-dt-pick { padding: 18px 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.cp-dt-foot .cp-add-btn:disabled { opacity: 0.4; cursor: default; }
+.cp-dt-foot .cp-add-btn:disabled:hover { border-color: var(--border); }
 .cp-item input[type="checkbox"] {
   accent-color: var(--scan);
   width: 14px;
@@ -337,7 +496,11 @@ button:disabled { cursor: default; }
 }
 .cp-item:hover .cp-skip, .cp-item.skipped .cp-skip { opacity: 1; }
 .cp-skip:hover { color: var(--fg); background: var(--card); }
+/* A skipped row recedes whole: struck name, dimmed checkbox and chip. The
+   strike, not the dimming, is what says skipped. */
 .cp-item.skipped .cp-name span { text-decoration: line-through; color: var(--faint); }
+.cp-item.skipped .cp-name input { opacity: 0.5; }
+.cp-item.skipped .cp-roles { opacity: 0.55; }
 .cp-skipnote { color: var(--faint); }
 
 /* Dedicated toolbar control: the first-class "Skip companies" manager. */
@@ -2025,7 +2188,17 @@ a.rowlk, button.rowlk { display: inline-block; }
 .pr-act:hover { color: var(--fg); }
 .pr-act.del:hover { color: var(--bad); }
 .pr-add { display: flex; flex-direction: column; gap: 6px; padding: 10px; }
-.cp-prof { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0; font-size: 11.5px; color: var(--muted); }
+/* Profile row + summary line are one footer block: card backed and seamed off
+   from the columns above, with no stray hairline between the two of them. */
+.cp-prof {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px 0;
+  font-size: 11.5px; color: var(--muted);
+  border-top: 1px solid var(--border);
+  background: var(--card);
+}
+.cp-prof label { font-size: 11px; font-weight: 600; color: var(--muted); }
+.cp-prof + .cp-foot { border-top: 0; }
 .cp-profsel {
   flex: 1; background: var(--card); color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; font-family: var(--sans); font-size: 11.5px; padding: 3px 5px; cursor: pointer;

@@ -32,6 +32,9 @@ const state = {
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
   filters: {},        // {company_lower: [title keyword, ...]} per-company title filters
+  cprefs: {},         // {company_lower: {field: value}} per-company preference OVERRIDES
+  prefs: {},          // the global job preferences, so overrides can show what they inherit
+  detailCo: null,     // company open in the picker's preference pane
   activity: {},       // pk -> {detail, at} — the live step, shown on active cards
   coQuery: "",        // search inside the company picker
   mode: "gated",
@@ -213,10 +216,20 @@ function renderPicker() {
       .filter((c) => !q || c.toLowerCase().includes(q))
       .map((c) => {
         const sk = state.skipped.has(c.toLowerCase());
-        return `<div class="cp-item ${sk ? "skipped" : ""}">
+        // A row says only whether this company screens on its own rules or the
+        // defaults. The rules themselves live in the detail pane, because they
+        // are the same seven fields as Job preferences and will not fit here.
+        const over = state.cprefs[c.toLowerCase()] || {};
+        const nOver = Object.keys(over).length;
+        const sel = state.detailCo === c;
+        return `<div class="cp-item ${sk ? "skipped" : ""} ${sel ? "sel" : ""}">
           <label class="cp-name">
             <input type="checkbox" value="${esc(c)}" ${state.picked.has(c) ? "checked" : ""}>
             <span>${esc(c)}</span></label>
+          <button class="cp-roles ${nOver ? "custom" : ""}" type="button" data-detail="${esc(c)}"
+            title="${nOver ? `${nOver} preference${nOver === 1 ? "" : "s"} set for ${esc(c)}; the rest use your defaults`
+                           : `${esc(c)} uses your default job preferences`}"
+            >${nOver ? `${nOver} custom` : "default"}</button>
           <button class="cp-skip" type="button" data-name="${esc(c)}" data-skip="${sk ? 0 : 1}"
             title="${sk ? "Bring this company back into Discover + Process"
                         : "Skip this company — Discover + Process pass over it"}">${sk ? "↺" : "⊘"}</button>
@@ -227,7 +240,105 @@ function renderPicker() {
   }
   list.scrollTop = keepScroll;
   renderPickerState();
+  renderDetail();
 }
+// The per-company preference pane. Deliberately the SAME seven fields as the Job
+// preferences panel: a company either screens the way you screen everywhere, or
+// it differs on a field you can point at. Every input left blank INHERITS, and
+// its placeholder shows the default it is inheriting — so "what does Google
+// actually screen on" is answerable without opening two panels and comparing.
+const CPREF_FIELDS = [
+  { k: "titles",           label: "Target titles",  list: true },
+  { k: "include_keywords", label: "Raises fit",     list: true },
+  { k: "exclude_keywords", label: "Never a fit",    list: true },
+  { k: "seniority",        label: "Seniority",      list: true },
+  { k: "locations",        label: "Locations",      list: true },
+  { k: "min_match_score",  label: "Score bar",      num: true },
+  { k: "max_new_per_run",  label: "Top N / run",    num: true },
+  { k: "remote_only",      label: "Remote only",    bool: true },
+  { k: "notes",            label: "Hard rules",     area: true },
+  { k: "profile_id",       label: "Apply as",       prof: true },
+];
+
+const cpAsText = (v, f) => {
+  if (v === undefined || v === null) return "";
+  if (f.list) return Array.isArray(v) ? v.join(", ") : String(v);
+  if (f.bool) return v ? "yes" : "no";
+  return String(v);
+};
+
+// The pane always shows ONE company, pre-filled with what it actually screens
+// on: its own override where it has one, your default everywhere else. So every
+// field is populated and editable, and changing any of them overrides just that
+// field for just this company.
+//
+// The inheritance is kept by COMPARING on save rather than by leaving fields
+// blank: a value equal to the default stores no override, so raising your global
+// score bar later still moves every company that never disagreed with it.
+function renderDetail() {
+  const box = $("#cp-detail");
+  if (!box) return;
+  const co = state.detailCo;
+  const dflt = state.prefs || {};
+  if (!co) {
+    box.innerHTML = `<div class="cp-dt-h"><div class="cp-dt-co">Company rules</div></div>
+      <div class="cp-dt-pick">Pick a company to see and change what it screens on.</div>`;
+    return;
+  }
+  const over = state.cprefs[co.toLowerCase()] || {};
+  const n = Object.keys(over).length;
+
+  const field = (f) => {
+    const isOver = over[f.k] !== undefined;
+    const value = cpAsText(isOver ? over[f.k] : dflt[f.k], f);   // pre-filled either way
+    const tag = isOver
+      ? `<em class="cp-dt-inh overridden">only here</em>`
+      : `<em class="cp-dt-inh">shared</em>`;
+    const attrs = `class="cp-search cp-dt-in" data-cpref="${f.k}" data-co="${esc(co)}"`;
+    if (f.bool) {
+      return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
+        <select ${attrs}>
+          <option value="yes"${value === "yes" ? " selected" : ""}>yes</option>
+          <option value="no"${value === "no" ? " selected" : ""}>no</option>
+        </select></label>`;
+    }
+    if (f.prof) {
+      // Which identity this company's applications go out under. "" is the
+      // default profile, and is a real choice rather than an empty one, so it
+      // gets a named option instead of a blank row.
+      const dn = (state.profiles.find((x) => x.id === state.profileDefault) || {}).label
+                 || "default profile";
+      const opts = [`<option value=""${value === "" ? " selected" : ""}>${esc(dn)}</option>`]
+        .concat(state.profiles
+          .filter((x) => x.id !== state.profileDefault)
+          .map((x) => `<option value="${esc(x.id)}"${value === x.id ? " selected" : ""}
+            >${esc(x.label || x.id)}${x.email ? ` · ${esc(x.email)}` : ""}</option>`));
+      return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
+        <select ${attrs}>${opts.join("")}</select></label>`;
+    }
+    if (f.area) {
+      return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
+        <textarea ${attrs} rows="3">${esc(value)}</textarea></label>`;
+    }
+    return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
+      <input ${attrs} ${f.num ? 'type="number" min="0"' : 'type="text"'}
+        value="${esc(value)}" autocomplete="off" spellcheck="false" /></label>`;
+  };
+
+  box.innerHTML = `
+    <div class="cp-dt-h">
+      <div class="cp-dt-co">${esc(co)}</div>
+      <span class="cp-dt-badge ${n ? "custom" : ""}">${
+        n ? `${n} only here` : "all shared"}</span>
+    </div>
+    <div class="cp-dt-body">${CPREF_FIELDS.map(field).join("")}</div>
+    <div class="cp-dt-foot">
+      <span class="cp-dt-hint">Edits apply to ${esc(co)} only.</span>
+      ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
+        title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
+    </div>`;
+}
+
 // State line + footer only — checkbox toggles call this so the list DOM (and
 // its scroll position) stays put while you tick companies.
 function renderPickerState() {
@@ -984,6 +1095,17 @@ async function load() {
 
 // The watchlist for the discovery picker. Demo has no /companies — fall back
 // to the demo watchlist + the companies present in the sample rows.
+// The per-company pane shows the DEFAULT for every field the company has not
+// overridden. Those defaults live behind the preferences endpoint, so fetch them
+// once rather than making the pane say "not set" until the other panel is opened.
+async function loadGlobalPrefs() {
+  if (DEMO) return;
+  try {
+    const r = await fetch(api("/preferences"), { headers: auth.header() });
+    state.prefs = (await r.json()) || {};
+  } catch { /* the pane just shows "not set" until the panel is opened */ }
+}
+
 async function loadCompanies() {
   if (DEMO) {
     const d = await import("./demo-data.js");
@@ -997,11 +1119,18 @@ async function loadCompanies() {
       state.companies = Array.isArray(r.companies) ? r.companies : [];
       state.skipped = new Set((r.skipped || []).map((s) => String(s).toLowerCase()));
       state.filters = r.filters || {};
+      state.cprefs = r.prefs || {};
     } catch { /* backend away — fall back below */ }
     if (!state.companies.length) {
       state.companies = [...new Set(state.apps.map((a) => a.company).filter(Boolean))];
     }
   }
+  // Alphabetical, case-insensitively. The watchlist arrives in the order it was
+  // written to, which is the order companies were ADDED — fine at five, useless
+  // at forty when you are hunting for one name.
+  if (!Object.keys(state.prefs || {}).length) await loadGlobalPrefs();
+  state.companies.sort((a, b) => String(a).localeCompare(String(b), undefined,
+                                                        { sensitivity: "base" }));
   state.picked = new Set([...state.picked].filter((c) => state.companies.includes(c)));
   renderPicker();
   renderSkipPicker();
@@ -1057,8 +1186,20 @@ function demoGuard() {
 }
 
 // --- primary actions -------------------------------------------------------
+// Starting a run is the end of the task a picker exists for, so close every open
+// popover. Leaving one up covers the board you just told it to fill, and the run
+// buttons live at module scope where the per-picker close helpers cannot reach.
+function closeAllPickers() {
+  document.querySelectorAll(".copicker:not([hidden])").forEach((el) => { el.hidden = true; });
+  document.querySelectorAll("[aria-haspopup][aria-expanded='true']")
+    .forEach((b) => b.setAttribute("aria-expanded", "false"));
+  const co = document.getElementById("btn-companies");
+  if (co) { co.setAttribute("aria-expanded", "false"); co.classList.remove("open"); }
+}
+
 async function runDiscover() {
   if (demoGuard() || state.stats.discovering) return;
+  closeAllPickers();
   const scope = discoverScope();
   state.stats.discovering = true;   // optimistic; poll confirms
   renderDeck();
@@ -1076,6 +1217,7 @@ async function runDiscover() {
 }
 async function runCompany(name, careersUrl) {
   if (demoGuard()) return;
+  closeAllPickers();
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
   if (d && d.status === "already_running") toast("A run is already going — wait for it to finish.");
   else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
@@ -1085,6 +1227,7 @@ async function runCompany(name, careersUrl) {
 
 async function runProcess() {
   if (demoGuard() || state.stats.processing) return;
+  closeAllPickers();
   const n = state.stats.found_waiting ?? 0;
   const scope = discoverScope();  // same picked companies as Discover
   state.stats.processing = true;    // optimistic; poll confirms
@@ -1517,7 +1660,15 @@ function wire() {
     picker.hidden = !show;
     coBtn.setAttribute("aria-expanded", String(show));
     coBtn.classList.toggle("open", show);
-    if (show) { fitPopover(picker); renderPicker(); $("#cp-search").focus(); }
+    if (show) {
+      fitPopover(picker);
+      // The per-company pane offers an identity dropdown, and profiles are only
+      // fetched when the Profiles panel is opened — so without this the dropdown
+      // is empty until you happen to have visited that panel first.
+      if (!state.profiles.length) loadProfiles().then(renderPicker);
+      renderPicker();
+      $("#cp-search").focus();
+    }
   });
   picker.addEventListener("click", (e) => e.stopPropagation());
   $("#cp-search").addEventListener("input", (e) => {
@@ -1546,6 +1697,7 @@ function wire() {
       await loadCompanies();
       state.picked.add(name);
       renderPicker(); renderDiscoverLabel();
+      closePicker();          // the company is added and selected — nothing left here
       toast(`${name} added to the watchlist and selected. Hit Discover to scan it.`);
     } else if (d) toast(d.error || "Could not add the company.");
   };
@@ -1561,12 +1713,14 @@ function wire() {
   });
   const commitOneFilter = async (inp) => {
     const name = inp.dataset.filterCo, titles = inp.value.trim();
+    const was = (state.filters[name.toLowerCase()] || []).join(", ");
+    if (titles === was) return;              // nothing typed — don't toast at them
     const d = await post("/actions/company-filter", { name, titles });
     if (d && d.ok) {
       state.filters = d.filters || {};
       toast(titles
         ? `${name}: only titles with "${titles}"${d.reconciled ? ` — ${d.reconciled} re-sorted` : ""}.`
-        : `${name}: title filter cleared.`);
+        : `${name}: every title counts again.`);
       loadApps();
     }
   };
@@ -1586,6 +1740,68 @@ function wire() {
   });
   $("#cp-add-url").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
   $("#cp-add-name").addEventListener("keydown", (e) => { if (e.key === "Enter") addCompany(); });
+
+  // Open a company's preference pane. One click, no mode to remember.
+  $("#cp-list").addEventListener("click", (e) => {
+    if (e.target.closest(".cp-skip") || e.target.tagName === "INPUT") return;
+    // The row is the target, not the little chip on it. Clicking a company name
+    // and getting nothing but a ticked checkbox was the whole confusion.
+    const row = e.target.closest(".cp-item");
+    const chip = row && row.querySelector("[data-detail]");
+    if (!chip) return;
+    e.preventDefault();
+    const co = chip.dataset.detail;
+    state.detailCo = state.detailCo === co ? null : co;
+    renderPicker();
+  });
+
+  // Save on blur or Enter. The field was pre-filled with the DEFAULT when this
+  // company had no opinion, so "unchanged" must mean "still shares the default"
+  // and store nothing. Writing an override that merely copies today's default
+  // would quietly detach the company: a later change to your defaults would move
+  // every other company and leave this one behind, with nothing on screen saying
+  // why. Typing the default back in is therefore also how you re-share it.
+  const commitCpref = async (el) => {
+    const co = el.dataset.co, f = CPREF_FIELDS.find((x) => x.k === el.dataset.cpref);
+    if (!co || !f) return;
+    const raw = el.value.trim();
+    const over = state.cprefs[co.toLowerCase()] || {};
+    const shown = cpAsText(over[f.k] !== undefined ? over[f.k] : (state.prefs || {})[f.k], f);
+    if (raw === shown) return;                                  // untouched
+    const matchesDefault = raw === cpAsText((state.prefs || {})[f.k], f);
+    const val = matchesDefault ? null : (f.bool ? raw === "yes" : raw);
+    const d = await post("/actions/company-prefs",
+                         { name: co, overrides: { [f.k]: val } });
+    if (d && d.ok) {
+      state.cprefs = d.prefs || {};
+      toast(matchesDefault
+        ? `${co}: ${f.label.toLowerCase()} shared with everything else again.`
+        : `${co}: ${f.label.toLowerCase()} now applies to ${co} only.`);
+      renderPicker();
+    }
+  };
+  $("#cp-detail").addEventListener("keydown", (e) => {
+    if (!e.target.classList.contains("cp-dt-in")) return;
+    if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); e.target.blur(); }
+    if (e.key === "Escape") { state.detailCo = null; renderPicker(); }
+  });
+  $("#cp-detail").addEventListener("focusout", (e) => {
+    if (e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
+  });
+  $("#cp-detail").addEventListener("change", (e) => {
+    if (e.target.tagName === "SELECT" && e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
+  });
+  $("#cp-detail").addEventListener("click", async (e) => {
+    if (!e.target.closest("#cp-dt-reset")) return;
+    const co = state.detailCo;
+    if (!co) return;
+    const d = await post("/actions/company-prefs", { name: co, overrides: {} });
+    if (d && d.ok) {
+      state.cprefs = d.prefs || {};
+      toast(`${co}: shares your preferences again.`);
+      renderPicker();
+    }
+  });
 
   $("#cp-list").addEventListener("click", async (e) => {
     const b = e.target.closest(".cp-skip");
@@ -1767,6 +1983,8 @@ function wire() {
       $("#pf-notes").value = p.notes || "";
       $("#pf-remote").checked = !!p.remote_only;
       state.prefsGithub = p.github || "";
+      state.prefs = p;                 // the per-company pane shows these as its
+      renderDetail();                  // placeholders, i.e. what a blank inherits
     } catch { toast("Couldn't load preferences."); }
   };
   const savePrefs = async () => {
@@ -1789,6 +2007,9 @@ function wire() {
       st.className = "saved";
       toast("◎ Preferences saved.");
       setTimeout(() => { st.className = ""; st.textContent = "Applies to the next job scored."; }, 4000);
+      // Saving is the end of the task, so get out of the way. Leaving the panel
+      // open over the board invites a second save of the same values.
+      closePf();
     } else {
       st.textContent = (d && d.error) || "Couldn't save.";
       st.className = "failed";

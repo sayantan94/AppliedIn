@@ -49,6 +49,13 @@ class GateReason(str, Enum):
 class DiscoveryMode(str, Enum):
     FEED = "feed"
     CRAWL = "crawl"
+    # Always read this careers page in a real browser, skipping the plain fetch.
+    # For a client-rendered search UI (jobs.apple.com/search and friends) the
+    # cheap tier returns a fraction of the listing and, because it returns SOME
+    # matches, never escalates — so a rescan keeps finding the same short window
+    # and genuinely new roles below it stay invisible. Naming the site is honest;
+    # guessing from the result count is not.
+    BROWSER = "browser"
 
 
 class ApplyMode(str, Enum):

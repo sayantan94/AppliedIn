@@ -1,6 +1,6 @@
 """AppliedIn CLI — the one entrypoint, both modes.
 
-    APPLIEDIN_MODE=local  ANTHROPIC_API_KEY=...  appliedin start   # Mac
+    APPLIEDIN_MODE=local  OPENAI_API_KEY=...  appliedin start   # Mac
     APPLIEDIN_MODE=cloud                          (EventBridge + SQS drive it)
 
 Daemon lifecycle (local):
@@ -86,7 +86,7 @@ def _running_pid() -> int | None:
 
 def _port_pid() -> int | None:
     """PID of whatever is serving the web port — catches a daemon that isn't in
-    the pid file (e.g. one launched by start.sh or orphaned from a past session)."""
+    the pid file (e.g. one launched by hand or orphaned from a past session)."""
     import subprocess
 
     port = os.environ.get("APPLIEDIN_WEB_PORT", "8787")
