@@ -130,6 +130,19 @@ def crawl_company(
 
     Renders the page with a headless browser (JS career sites need it); falls
     back to a plain HTTP fetch if the browser isn't available."""
+    from core import flags as _flags
+
+    # This company's own preferences, before anything reads them. The feed path
+    # did this and the crawl path did not, so a company with overrides was screened
+    # on the global rules here and on its own rules there — and the companies most
+    # likely to have overrides are exactly the big career sites that land in this
+    # path. The overrides also steer the browser crawl's search terms, so applying
+    # them late would have been too late: the wrong queries were already typed.
+    prefs = _flags.effective_prefs(company.name, prefs)
+    if _flags.company_pref(company.name):
+        log.info("%s: using company preference overrides %s",
+                 company.name, sorted(_flags.company_pref(company.name)))
+
     html = _render_page(company.careers_url)
     if html is None:  # no browser / render failed -> plain fetch (static pages)
         own_client = client is None
@@ -189,6 +202,15 @@ def crawl_company(
     elif not jobs:
         log.warning("%s: %d postings but the agent judged none relevant — sample: %s",
                     company.name, len(extracted), ", ".join(j.title for j in extracted[:3]))
+
+    # The per-company title filter narrows on top, exactly as the feed path does.
+    # The crawl ignored it entirely, so "only Staff titles at Rivian" held for feed
+    # companies and quietly did nothing for career-site ones.
+    kws = _flags.company_filter(company.name)
+    if kws:
+        before = len(jobs)
+        jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
+        log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
 
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]  # skip past-run URLs

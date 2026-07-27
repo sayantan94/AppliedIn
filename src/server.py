@@ -685,7 +685,11 @@ def create_app() -> FastAPI:
         if not name:
             return {"ok": False, "error": "name required"}
         if _discovery_running() or _RUNNING["process"]:
-            return {"ok": False, "status": "already_running"}
+            # Say WHICH guard refused. Without this the dashboard offered to stop
+            # "the run", stopped discovery, retried, was refused by the process
+            # guard, and asked again — a confirm dialog that never ends.
+            return {"ok": False, "status": "already_running",
+                    "blocked_by": "discover" if _discovery_running() else "process"}
         careers_url = ((body or {}).get("careers_url") or "").strip()
         profile_id = str((body or {}).get("profile_id") or "")
         from discovery.handler import add_watchlist_company, list_watchlist_companies
@@ -876,7 +880,7 @@ def create_app() -> FastAPI:
         # on its schedule is refused honestly here instead of reporting success and
         # then being dropped silently one call deeper.
         if _discovery_running():
-            return {"ok": False, "status": "already_running"}
+            return {"ok": False, "status": "already_running", "blocked_by": "discover"}
         only = [c for c in ((body or {}).get("companies") or []) if isinstance(c, str)]
         # Everything this run finds is stamped with the chosen identity, so a whole
         # batch applies from one address without touching each job afterwards.
@@ -904,7 +908,7 @@ def create_app() -> FastAPI:
         Body may carry {companies:[names]} to run the pass on JUST those
         companies' jobs — the rest of the backlog stays untouched for later."""
         if _RUNNING["process"]:
-            return {"ok": False, "status": "already_running"}
+            return {"ok": False, "status": "already_running", "blocked_by": "process"}
         companies = [c for c in ((body or {}).get("companies") or [])
                      if isinstance(c, str) and c.strip()]
 

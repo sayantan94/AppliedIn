@@ -1205,16 +1205,26 @@ function closeAllPickers() {
 // usual reason for asking twice is that the parameters changed: the first run is
 // scanning with the rules you have just replaced, so waiting for it is waiting
 // for an answer you no longer want.
-async function offerRestart(label, retry, what = "discover") {
-  if (!confirm(`${label} is already running.\n\nStop it and start again with your current settings?`)) {
+// Offer to stop whatever is in the way and start again. Retries ONCE: if the
+// second attempt is still refused, something else is holding the guard and asking
+// again would just reopen this dialog forever, which is what happened when the
+// stop was scoped to discovery and a PROCESS run was the actual blocker.
+async function offerRestart(label, retry, blockedBy = "discover", again = false) {
+  if (again) {
+    toast("Still busy — something else is running. Try again in a moment.");
+    return;
+  }
+  const what = blockedBy === "process" ? "process" : "discover";
+  const name = what === "process" ? "Processing" : "Discovery";
+  if (!confirm(`${name} is already running.\n\nStop it and start ${label.toLowerCase()} with your current settings?`)) {
     toast("Left the current run going.");
     return;
   }
   if (!await stopRun(what, false)) return;
-  setTimeout(retry, 600);   // let both guards clear before the next request
+  setTimeout(() => retry(true), 800);   // let both guards clear first
 }
 
-async function runDiscover() {
+async function runDiscover(again = false) {
   if (demoGuard() || state.stats.discovering) return;
   closeAllPickers();
   const scope = discoverScope();
@@ -1222,7 +1232,7 @@ async function runDiscover() {
   renderDeck();
   const profile = ($("#cp-profile") || {}).value || "";
   const d = await post("/actions/discover", { companies: scope, profile_id: profile });
-  if (d && d.status === "already_running") offerRestart("Discovery", runDiscover);
+  if (d && d.status === "already_running") offerRestart("the scan", () => runDiscover(true), d.blocked_by, again);
   else if (d && d.ok && profile) {
     const p = state.profiles.find((x) => x.id === profile);
     toast(`Discovering — everything found will apply as ${p ? p.label : profile}.`);
@@ -1232,17 +1242,17 @@ async function runDiscover() {
   else if (!d) { state.stats.discovering = false; renderDeck(); }
   pollStats();
 }
-async function runCompany(name, careersUrl) {
+async function runCompany(name, careersUrl, again = false) {
   if (demoGuard()) return;
   closeAllPickers();
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
-  if (d && d.status === "already_running") offerRestart("A run", () => runCompany(name, careersUrl));
+  if (d && d.status === "already_running") offerRestart("the scan", (a) => runCompany(name, careersUrl, a), d.blocked_by, again);
   else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
   else if (d) toast(d.error || "Could not start the run.");
   pollStats();
 }
 
-async function runProcess() {
+async function runProcess(again = false) {
   if (demoGuard() || state.stats.processing) return;
   closeAllPickers();
   const n = state.stats.found_waiting ?? 0;
@@ -1250,7 +1260,7 @@ async function runProcess() {
   state.stats.processing = true;    // optimistic; poll confirms
   renderDeck();
   const d = await post("/actions/process", { companies: scope });
-  if (d && d.status === "already_running") offerRestart("Processing", runProcess, "process");
+  if (d && d.status === "already_running") offerRestart("processing", (a) => runProcess(a), d.blocked_by, again);
   else if (d && d.ok) toast(scope.length
     ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · apply.`
     : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
