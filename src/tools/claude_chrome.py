@@ -501,7 +501,40 @@ def direct_board_url(url: str) -> str:
     return ""
 
 
-def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str) -> str:
+def _skills_block(skills: str) -> str:
+    """The choose-your-skills block, or nothing when there is no résumé to back it."""
+    if not skills:
+        return ""
+    return ("\nSKILLS THE RÉSUMÉ EVIDENCES — when a form asks you to CHOOSE skills "
+            "rather than type them, these are the ones the owner can defend. Pick "
+            "every one the form offers that appears here, and add the ones it "
+            "missed. Never pick a skill that is not in this list.\n" + skills + "\n")
+
+
+def _resume_skills(resume_tex: str) -> str:
+    """The Skills section of the tailored résumé, as plain text.
+
+    Some forms ask the candidate to CHOOSE skills from a list rather than type
+    them (Apple's "Add related skills to your profile" is the clearest case, and
+    it drives how the profile is matched against the posting). The session cannot
+    read the résumé file — its tools are the browser and Write, nothing else — so
+    without this it would be picking skills by guesswork, and a skill is a claim
+    about a person rather than a keyword to match.
+    """
+    if not resume_tex:
+        return ""
+    m = re.search(r"\\section\{Skills\}(.*?)(?=\\section\{)", resume_tex, re.S)
+    if not m:
+        return ""
+    body = re.sub(r"\\textbf\{([^}]*)\}", r"\1", m.group(1))     # keep category labels
+    body = re.sub(r"\\[a-zA-Z]+\*?(\[[^\]]*\])?", " ", body)      # drop other commands
+    body = body.replace("{", " ").replace("}", " ").replace("\\", " ")
+    body = re.sub(r"[ \t]+", " ", body)
+    return "\n".join(ln.strip() for ln in body.splitlines() if ln.strip())[:1200]
+
+
+def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str,
+          resume_skills: str = "") -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
     resume_line = (f"""
 RÉSUMÉ — attach {resume_path}
@@ -548,6 +581,7 @@ deliberating and spend your attention on the rest of the form:
 EVERY APPROVED ANSWER — the only facts you may use:
 {json.dumps(facts, indent=1)[:9000]}
 {resume_line}{site_rules}
+{_skills_block(resume_skills)}
 
 RULES — these are not style preferences, they decide whether this application is
 honest:
@@ -652,7 +686,8 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     log.info("chrome engine: handing %s to claude --chrome", url)
 
     report, problem = await run_task(
-        _task(url, company, facts, resume_path, _site_rules(url, company)),
+        _task(url, company, facts, resume_path, _site_rules(url, company),
+              _resume_skills(resume_tex)),
         report_key="outcome",
         model=(getattr(get_settings(), "chrome_model", "") or ""),
         timeout_s=TIMEOUT_S,

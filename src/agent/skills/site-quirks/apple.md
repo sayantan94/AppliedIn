@@ -52,6 +52,43 @@ success_phrases:
 ## Applying
 
 - Apple's postings live on jobs.apple.com and the application is on the same
-  domain, so no board rewrite is needed.
+  domain, so no board rewrite is needed. The apply link is labelled
+  **"Submit Resume"**, not Apply.
+
+### "Add related skills to your profile" — fill this properly, it is not optional
+
+Partway down the form is a panel headed **"Add related skills to your profile."**
+It is the highest value thing on the page and the easiest to skip, because
+nothing marks it required and it looks like a suggestion box.
+
+What it contains:
+
+- A grid of SUGGESTED skills, each with a plus icon: "BM25", "Embedding
+  Generation", "Hybrid Search", "RAG Pipelines", "Ranking", "SQL", "Vector
+  Search". These are generated from THIS posting, so they are the vocabulary the
+  role is screened on.
+- A search field, "Add a new skill to your profile", for anything not suggested.
+- Skills already on the profile, shown as green ticked chips with an x to remove.
+- An **Add Skills** button.
+- Below it, an optional proficiency section for the skills now on the profile.
+
+How to work it:
+
+1. Add EVERY suggested skill the owner genuinely has. The task gives you a
+   SKILLS THE RÉSUMÉ EVIDENCES list; check each suggestion against it and click
+   its plus when it matches. Do not stop at two or three: the panel exists to
+   match the profile against the posting's own keywords, and a skill left unadded
+   is a match thrown away.
+2. Then add what the suggestions missed. Work through that same list and type
+   anything relevant into the search field. This is where a generically titled
+   profile becomes a specific one.
+3. **Click Add Skills.** Selections are not saved until you do, and a panel full
+   of chosen skills that was never committed looks identical to one you filled.
+4. Set proficiency if the section appears, but only where the résumé supports the
+   level. It is optional and a wrong claim is worse than a blank.
+
+The one limit: a skill is a claim about the owner, so add only what the evidence
+list supports. "As many as possible" means every one they can defend, not every
+one on offer. If a suggested skill is not in that list, leave it.
 - An Apple ID sign in may be required before the form appears. If it asks for one
   and no session exists, stop and report it rather than creating an account.

@@ -336,6 +336,8 @@ function renderDetail() {
       <span class="cp-dt-hint">Edits apply to ${esc(co)} only.</span>
       ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
         title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
+      <button class="cp-lk cp-add-btn cp-add-go" id="cp-dt-scan" type="button"
+        title="Scan ${esc(co)} now with these rules, score and tailor what it finds. Stops before applying.">Scan now</button>
     </div>`;
 }
 
@@ -1689,7 +1691,7 @@ function wire() {
   const addCompany = async () => {
     if (demoGuard()) return;
     const name = $("#cp-add-name").value.trim();
-    if (!name) { toast("Give the company a name first."); return; }
+    if (!name) { toast("Type a company name above first, or pick one in the list and use Scan now."); return; }
     const d = await post("/actions/watchlist",
                          { name, careers_url: $("#cp-add-url").value.trim() });
     if (d && d.ok) {
@@ -1705,7 +1707,7 @@ function wire() {
   $("#cp-add-run").addEventListener("click", async () => {
     if (demoGuard()) return;
     const name = $("#cp-add-name").value.trim();
-    if (!name) { toast("Give the company a name first."); return; }
+    if (!name) { toast("Type a company name above first, or pick one in the list and use Scan now."); return; }
     const url = $("#cp-add-url").value.trim();
     $("#cp-add-name").value = ""; $("#cp-add-url").value = "";
     await runCompany(name, url);   // endpoint adds it to the watchlist if new
@@ -1792,6 +1794,19 @@ function wire() {
     if (e.target.tagName === "SELECT" && e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
   });
   $("#cp-detail").addEventListener("click", async (e) => {
+    if (e.target.closest("#cp-dt-scan")) {
+      const co = state.detailCo;
+      if (!co) return;
+      // A field still focused has not been committed yet, and scanning with the
+      // rules you just typed but did not blur is the worst kind of surprise:
+      // it looks like the edit was ignored.
+      const open = document.activeElement;
+      if (open && open.classList && open.classList.contains("cp-dt-in")) {
+        await commitCpref(open);
+      }
+      runCompany(co);
+      return;
+    }
     if (!e.target.closest("#cp-dt-reset")) return;
     const co = state.detailCo;
     if (!co) return;
