@@ -222,14 +222,42 @@
                   title="Paste a job URL — tailor your résumé to that one role, no discovery needed">✎ Tailor a role</button>
                 <div id="rolepicker" class="copicker rolepicker" hidden>
                   <div class="cp-role-h">Tailor your résumé to one role</div>
-                  <div class="cp-head">
-                    <input id="rp-url" class="cp-search" type="text"
-                      placeholder="paste a job URL (Greenhouse / Lever / Ashby / Workday…)"
-                      autocomplete="off" spellcheck="false" />
+                  <!-- Two ways in. A URL when there is a posting; pasted text when
+                       a recruiter described the role in a message and there is
+                       nothing to fetch. -->
+                  <div class="rp-tabs" role="tablist">
+                    <button class="rp-tab on" id="rp-tab-url" type="button" role="tab">From a link</button>
+                    <button class="rp-tab" id="rp-tab-text" type="button" role="tab">From a message</button>
                   </div>
-                  <div class="cp-role-foot">
-                    <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>
-                    <button id="rp-go" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
+
+                  <div id="rp-pane-url">
+                    <div class="cp-head">
+                      <input id="rp-url" class="cp-search" type="text"
+                        placeholder="paste a job URL (Greenhouse / Lever / Ashby / Workday…)"
+                        autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div class="cp-role-foot">
+                      <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>
+                      <button id="rp-go" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
+                    </div>
+                  </div>
+
+                  <div id="rp-pane-text" hidden>
+                    <div class="cp-head rp-textwrap">
+                      <textarea id="rp-text" class="cp-search rp-text" rows="7"
+                        placeholder="Paste the recruiter's message or the role description here."
+                        spellcheck="false"></textarea>
+                      <div class="rp-row">
+                        <input id="rp-company" class="cp-search" type="text"
+                          placeholder="Company (optional)" autocomplete="off" spellcheck="false" />
+                        <input id="rp-title" class="cp-search" type="text"
+                          placeholder="Role title (optional)" autocomplete="off" spellcheck="false" />
+                      </div>
+                    </div>
+                    <div class="cp-role-foot">
+                      <span>Tailors a résumé to the text. Nothing is applied to.</span>
+                      <button id="rp-go-text" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
+                    </div>
                   </div>
                 </div>
               </div>

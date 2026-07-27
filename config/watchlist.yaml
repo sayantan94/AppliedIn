@@ -102,6 +102,11 @@ companies:
   # --- Big tech ---
   - name: Netflix
     careers_url: https://explore.jobs.netflix.net/careers
+    # browser: explore.jobs.netflix.net renders its listing client-side, so a
+    # plain fetch extracted 10 postings out of hundreds. That fragment usually
+    # holds a match or two, so the "escalate when nothing is relevant" rule never
+    # fired and every rescan saw the same ten.
+    discovery: browser
     mode: gated
   - name: Google
     careers_url: https://www.google.com/about/careers/applications/jobs/results

@@ -1209,6 +1209,19 @@ function closeAllPickers() {
 // second attempt is still refused, something else is holding the guard and asking
 // again would just reopen this dialog forever, which is what happened when the
 // stop was scoped to discovery and a PROCESS run was the actual blocker.
+// Changing a company's rules in Discover should make Discover act on them, so a
+// scan follows the edit. Debounced rather than immediate: the fields commit on
+// blur, so tabbing through four of them would otherwise launch four crawls of the
+// same careers page. One scan, after the edits stop.
+let _rescanTimer = null;
+function scheduleRescan(co) {
+  clearTimeout(_rescanTimer);
+  _rescanTimer = setTimeout(() => {
+    toast(`Scanning ${co} with the new rules…`);
+    runCompany(co);
+  }, 2500);
+}
+
 async function offerRestart(label, retry, blockedBy = "discover", again = false) {
   if (again) {
     toast("Still busy — something else is running. Try again in a moment.");
@@ -1817,10 +1830,14 @@ function wire() {
                          { name: co, overrides: { [f.k]: val } });
     if (d && d.ok) {
       state.cprefs = d.prefs || {};
-      toast(matchesDefault
+      const moved = d.rescreened
+        ? ` ${d.rescreened} job${d.rescreened === 1 ? "" : "s"} re-screened.` : "";
+      toast((matchesDefault
         ? `${co}: ${f.label.toLowerCase()} shared with everything else again.`
-        : `${co}: ${f.label.toLowerCase()} now applies to ${co} only.`);
+        : `${co}: ${f.label.toLowerCase()} now applies to ${co} only.`) + moved);
       renderPicker();
+      if (d.rescreened) loadApps();
+      scheduleRescan(co);          // the rules changed; go find what they match
     }
   };
   $("#cp-detail").addEventListener("keydown", (e) => {
@@ -1836,6 +1853,7 @@ function wire() {
   });
   $("#cp-detail").addEventListener("click", async (e) => {
     if (e.target.closest("#cp-dt-scan")) {
+      clearTimeout(_rescanTimer);        // scanning now; do not scan twice
       const co = state.detailCo;
       if (!co) return;
       // A field still focused has not been committed yet, and scanning with the
@@ -1854,8 +1872,11 @@ function wire() {
     const d = await post("/actions/company-prefs", { name: co, overrides: {} });
     if (d && d.ok) {
       state.cprefs = d.prefs || {};
-      toast(`${co}: shares your preferences again.`);
+      toast(`${co}: shares your preferences again.`
+            + (d.rescreened ? ` ${d.rescreened} job(s) re-screened.` : ""));
       renderPicker();
+      if (d.rescreened) loadApps();
+      scheduleRescan(co);
     }
   });
 
@@ -1899,6 +1920,45 @@ function wire() {
       pollStats();
     } else if (d) toast(d.error || "Couldn't start — check the URL.");
   };
+  // Tailor from PASTED text: a recruiter's message with the role in it, where
+  // there is no posting to fetch and nothing to apply to at the end.
+  const runRoleText = async () => {
+    if (demoGuard()) return;
+    const text = $("#rp-text").value.trim();
+    if (text.length < 80) {
+      toast("Paste more of the message — a line or two is not enough to tailor against.");
+      return;
+    }
+    const d = await post("/actions/tailor-text", {
+      text,
+      company: $("#rp-company").value.trim(),
+      title: $("#rp-title").value.trim(),
+    });
+    if (d && d.ok) {
+      $("#rp-text").value = ""; $("#rp-company").value = ""; $("#rp-title").value = "";
+      closeRp();
+      toast(`▶ Tailoring a résumé for ${d.title} @ ${d.company} — it'll land in Tailored.`);
+      pollStats();
+    } else if (d) toast(d.error || "Couldn't start.");
+  };
+
+  const showRpTab = (which) => {
+    const url = which === "url";
+    $("#rp-pane-url").hidden = !url;
+    $("#rp-pane-text").hidden = url;
+    $("#rp-tab-url").classList.toggle("on", url);
+    $("#rp-tab-text").classList.toggle("on", !url);
+    fitPopover(rp);                       // the text pane is taller than the link one
+    (url ? $("#rp-url") : $("#rp-text")).focus();
+  };
+  $("#rp-tab-url").addEventListener("click", () => showRpTab("url"));
+  $("#rp-tab-text").addEventListener("click", () => showRpTab("text"));
+  $("#rp-go-text").addEventListener("click", runRoleText);
+  $("#rp-text").addEventListener("keydown", (e) => {
+    // Enter belongs to the textarea; the shortcut has to be deliberate.
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); runRoleText(); }
+  });
+
   rpBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const show = rp.hidden;

@@ -176,6 +176,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "google-adk" },
+    { name = "greenlet" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "mcp" },
@@ -201,6 +202,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35" },
     { name = "google-adk", specifier = ">=2.5.0" },
+    { name = "greenlet", specifier = ">=3" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "litellm", specifier = ">=1.92.0" },
     { name = "mcp", specifier = ">=1.28.1" },

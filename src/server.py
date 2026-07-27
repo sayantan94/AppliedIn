@@ -42,6 +42,60 @@ def _discovery_running() -> bool:
     return bool(_RUNNING["discover"] or _handler._RUNNING.locked())
 
 
+def _rescreen_company(name: str) -> int:
+    """Re-apply a company's CURRENT rules to the jobs already on its board.
+
+    Only `found` and rules-skipped rows move. Anything tailored, applied or in
+    flight is left exactly as it is: a résumé already written is work the owner
+    paid for, and a submitted application cannot be unsubmitted by a filter.
+    """
+    from core import flags
+    from discovery.relevance import relevant
+    from discovery.watchlist import load_preferences
+
+    settings = get_settings()
+    base = load_preferences(Path(settings.config_dir) / "preferences.yaml")
+    prefs = flags.effective_prefs(name, base)
+    kws = flags.company_filter(name)
+
+    stores = make_stores(settings)
+    low = (name or "").strip().lower()
+    rows = [r for r in stores.tracking.all()
+            if (r.get("company") or "").lower() == low
+            and r.get("status") in ("found", "skipped")
+            and not str(r.get("pk", "")).startswith("meta#")]
+    if not rows:
+        return 0
+
+    # One screen call for the whole set rather than one per row: the relevance
+    # screen is a model call and this can be a hundred jobs.
+    from core.models import JobRecord
+
+    cands = [JobRecord(company=name, job_id=str(r["pk"]).split("#", 1)[-1],
+                       title=r.get("title") or "", jd_url=r.get("jd_url") or "",
+                       jd_text=r.get("jd_text") or r.get("title") or "", ats="custom")
+             for r in rows]
+    keep = {j.jd_url or j.title for j in relevant(cands, prefs)}
+    if kws:
+        keep = {k for k in keep
+                if any(flags.title_matches_filter(t, kws)
+                       for t in [k] + [r.get("title", "") for r in rows
+                                       if (r.get("jd_url") or r.get("title")) == k])}
+
+    moved = 0
+    for r in rows:
+        key = r.get("jd_url") or r.get("title") or ""
+        ok = key in keep
+        st = r.get("status")
+        if st == "found" and not ok:
+            stores.tracking.set_status(r["pk"], Status.SKIPPED, skip_reason="preferences")
+            moved += 1
+        elif st == "skipped" and r.get("skip_reason") in ("preferences", "title_filter") and ok:
+            stores.tracking.set_status(r["pk"], Status.FOUND, skip_reason="")
+            moved += 1
+    return moved
+
+
 def _throttle_state() -> dict:
     """Whether model calls are being held back, and for how long.
 
@@ -656,7 +710,15 @@ def create_app() -> FastAPI:
                 except (TypeError, ValueError):
                     return {"ok": False, "error": f"{k} must be a number"}
         flags.set_company_pref(name, over)
-        return {"ok": True, "prefs": flags.company_prefs()}
+
+        # Re-screen what is ALREADY on the board. Without this the new rules only
+        # governed future finds, so a company kept a backlog screened under rules
+        # the owner had just replaced — and the whole point of narrowing a company
+        # is usually to get rid of what is sitting there. The title filter
+        # endpoint has always reconciled; this one did not, which made two
+        # controls that look alike behave differently.
+        moved = _rescreen_company(name)
+        return {"ok": True, "prefs": flags.company_prefs(), "rescreened": moved}
 
     @app.post("/actions/clear-llm-error")
     def clear_llm_error():
@@ -796,6 +858,65 @@ def create_app() -> FastAPI:
 
         background.add_task(_run)
         return {"ok": True, "status": "running", "pk": pk}
+
+    @app.post("/actions/tailor-text")
+    def tailor_text(body: dict, background: BackgroundTasks):
+        """Tailor a résumé to text you PASTE, with no URL and no application.
+
+        The case this exists for: a recruiter messages you on LinkedIn with the
+        role described in the message itself. There is nothing to fetch, often no
+        posting to link to, and you want a résumé to send back rather than an
+        application to submit. `/actions/apply-role` cannot serve that — it starts
+        from a URL and ends at an approval gate.
+
+        Same scorer, writer and truthfulness guard as every other tailor, so the
+        résumé it produces is grounded in the same approved facts. It stops at
+        TAILORED and never queues an apply: there is nothing to apply to.
+        """
+        import hashlib
+
+        from core.models import JobRecord
+
+        text = ((body or {}).get("text") or "").strip()
+        if len(text) < 80:
+            return {"ok": False,
+                    "error": "paste the role description — a line or two is not "
+                             "enough to tailor against"}
+        company = ((body or {}).get("company") or "").strip() or "Reach out"
+        title = ((body or {}).get("title") or "").strip() or "Role from a message"
+        # Hash the TEXT, so pasting the same message twice re-tailors one row
+        # instead of littering the board with near-duplicates.
+        job_id = "text-" + hashlib.sha1(text.encode()).hexdigest()[:12]
+
+        stores = make_stores(settings)
+        job = JobRecord(company=company, job_id=job_id, title=title,
+                        jd_url="", jd_text=text, ats="custom")
+        pk = job.pk
+        if not stores.tracking.put_new(job):
+            stores.tracking.set_status(pk, Status.FOUND, jd_text=text, title=title,
+                                       skip_reason="", fail_kind="", fail_reason="")
+
+        def _run() -> None:
+            import logging
+
+            from agent.run import run_job
+            from core.events import emit
+
+            _RUNNING["process"] = True
+            try:
+                emit("running", agent="workflow", company=company, pk=pk,
+                     detail=f"▶ tailoring a résumé for {title} @ {company}…")
+                run_job(pk, stores)
+                emit("applied", agent="workflow", company=company, pk=pk,
+                     detail=f"{company}: résumé tailored — download it from the card")
+            except Exception:
+                logging.getLogger("server").exception("tailor-text failed")
+            finally:
+                _RUNNING["process"] = False
+
+        background.add_task(_run)
+        return {"ok": True, "status": "tailoring", "pk": pk,
+                "company": company, "title": title}
 
     @app.post("/actions/apply-role")
     def apply_role(body: dict, background: BackgroundTasks):

@@ -1924,6 +1924,25 @@ a.rowlk, button.rowlk { display: inline-block; }
 .rolebtn { color: var(--scan); border-color: color-mix(in srgb, var(--scan) 35%, var(--border)); }
 .rolebtn:hover { color: var(--scan); border-color: color-mix(in srgb, var(--scan) 55%, transparent);
   background: color-mix(in srgb, var(--scan) 8%, var(--card)); }
+/* Tailor panel: two ways in, so the tabs have to be unmistakable rather than
+   decorative — picking the wrong one means pasting a URL into a box that wants
+   a paragraph. */
+.rp-tabs { display: flex; gap: 2px; padding: 8px 12px 0; }
+.rp-tab {
+  border: 0; background: none; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--faint); padding: 5px 10px; border-radius: var(--r-sm);
+}
+.rp-tab:hover { color: var(--fg); background: var(--card-2); }
+.rp-tab.on { color: var(--scan); background: color-mix(in srgb, var(--scan) 12%, transparent); }
+.rp-textwrap { display: flex; flex-direction: column; gap: 7px; }
+.rp-text {
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  resize: vertical; min-height: 120px;
+}
+.rp-row { display: flex; gap: 7px; }
+.rp-row .cp-search { flex: 1; min-width: 0; }
+
 .rolepicker { left: 0; right: auto; width: min(340px, calc(100vw - 32px)); }
 .cp-role-h {
   padding: 11px 12px 4px;

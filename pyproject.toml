@@ -14,6 +14,13 @@ dependencies = [
     "redis>=8.0.1",
     "mcp>=1.28.1",
     "sqlalchemy>=2.0.51",
+    # SQLAlchemy's async path needs greenlet, and google-adk's session store uses
+    # it. SQLAlchemy declares it conditionally, which is enough for a resolver and
+    # not enough here: without it every tailor dies with "the greenlet library is
+    # required" and the job is recorded as errored, which looks like the model
+    # failing rather than a missing package. Declared explicitly so no change to
+    # the install extras can prune it again.
+    "greenlet>=3",
     "orjson>=3.11.9",
 ]
 
