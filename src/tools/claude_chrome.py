@@ -36,10 +36,14 @@ BLOCK_REASONS = frozenset({"application_limit", "already_applied", "captcha", "l
 ALLOWED_TOOLS = ("mcp__claude-in-chrome", "Write")
 
 
-# The browser sessions this process has started. Tracked so a reset can end them:
-# emptying the store while a session is still filling a form leaves the owner
-# watching a browser do work for a job that no longer exists.
-_LIVE: set[int] = set()
+# The browser sessions this process has started, each tagged with WHAT it is
+# doing. Tracked so a reset or a stop can end them.
+#
+# The tag is the point. Stopping a discovery run must not kill an application
+# that happens to be in flight: the crawl is disposable and the apply is a form
+# already half filled under someone's real name. An untagged set could only offer
+# "kill everything", which is the wrong answer to "stop this discovery".
+_LIVE: dict[int, str] = {}
 
 # Sessions run CONCURRENTLY. There was briefly a semaphore here serialising them,
 # on the theory that two sessions on one browser corrupt each other. That theory
@@ -98,13 +102,15 @@ def _is_browser_conflict(text: str) -> bool:
     return any(m in low for m in _CONFLICT_MARKERS)
 
 
-def kill_live_sessions() -> int:
-    """End every browser session this process started. Returns how many."""
+def kill_live_sessions(kind: str = "") -> int:
+    """End browser sessions this process started; `kind` limits it to one sort
+    ("apply", "crawl", "jd"). Empty means all of them, which is what a full reset
+    wants and what a scoped stop must never use."""
     import os
     import signal
 
     killed = 0
-    for pid in list(_LIVE):
+    for pid in [p for p, k in list(_LIVE.items()) if not kind or k == kind]:
         try:
             os.kill(pid, signal.SIGTERM)
             killed += 1
@@ -112,7 +118,7 @@ def kill_live_sessions() -> int:
             pass
         except OSError:
             log.warning("could not stop chrome session %s", pid, exc_info=True)
-        _LIVE.discard(pid)
+        _LIVE.pop(pid, None)
     if killed:
         log.info("stopped %d browser session(s)", killed)
     return killed
@@ -177,7 +183,8 @@ def _report(stdout: str, key: str) -> dict:
 
 async def run_task(task: str, *, report_key: str, model: str = "",
                    timeout_s: int = DEFAULT_TIMEOUT_S,
-                   allow_dirs: list[str] | None = None) -> tuple[dict, str]:
+                   allow_dirs: list[str] | None = None,
+                   kind: str = "") -> tuple[dict, str]:
     """Run `task` in the owner's Chrome. Returns (report, problem).
 
     `report_key` is a field the task's closing JSON must contain, so a report can
@@ -190,12 +197,13 @@ async def run_task(task: str, *, report_key: str, model: str = "",
         return {}, why
 
     return await _run_task_impl(task, report_key=report_key, model=model,
-                                timeout_s=timeout_s, allow_dirs=allow_dirs)
+                                timeout_s=timeout_s, allow_dirs=allow_dirs, kind=kind)
 
 
 async def _run_task_impl(task: str, *, report_key: str, model: str = "",
                          timeout_s: int = DEFAULT_TIMEOUT_S,
-                         allow_dirs: list[str] | None = None) -> tuple[dict, str]:
+                         allow_dirs: list[str] | None = None,
+                         kind: str = "") -> tuple[dict, str]:
     """run_task's body, split out so tests can stand in for the subprocess."""
     # The report comes back as a FILE the task writes, so the happy path is a
     # json.load of exactly one object rather than a guess at which braces in a
@@ -230,7 +238,7 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
         # CLI's own advice is to redirect it, so redirect it.
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _LIVE.add(proc.pid)
+    _LIVE[proc.pid] = kind or "other"
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except TimeoutError:
@@ -242,7 +250,7 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
                     "left open — it may have submitted. Raise the ceiling if this "
                     "portal is simply slow.")
 
-    _LIVE.discard(proc.pid)
+    _LIVE.pop(proc.pid, None)
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
 
     # The REPORT FILE decides, before anything else. A session can do the whole
@@ -690,7 +698,7 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
               _resume_skills(resume_tex)),
         report_key="outcome",
         model=(getattr(get_settings(), "chrome_model", "") or ""),
-        timeout_s=TIMEOUT_S,
+        timeout_s=TIMEOUT_S, kind="apply",
         allow_dirs=resume_dirs(resume_path),
     )
     if problem:

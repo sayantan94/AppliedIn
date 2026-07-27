@@ -426,6 +426,8 @@ function renderDeck() {
   const disc = $("#btn-discover"), proc = $("#btn-process");
   disc.disabled = !!s.discovering;
   disc.classList.toggle("running", !!s.discovering);
+  const stopBtn = $("#btn-stop");
+  if (stopBtn) stopBtn.hidden = !s.discovering;   // scan only; an apply is not stoppable from here
   renderDiscoverLabel();
   proc.disabled = !!s.processing;
   proc.classList.toggle("running", !!s.processing);
@@ -1199,6 +1201,19 @@ function closeAllPickers() {
   if (co) { co.setAttribute("aria-expanded", "false"); co.classList.remove("open"); }
 }
 
+// A run is already going. Offer to stop it and start the new one, because the
+// usual reason for asking twice is that the parameters changed: the first run is
+// scanning with the rules you have just replaced, so waiting for it is waiting
+// for an answer you no longer want.
+async function offerRestart(label, retry, what = "discover") {
+  if (!confirm(`${label} is already running.\n\nStop it and start again with your current settings?`)) {
+    toast("Left the current run going.");
+    return;
+  }
+  if (!await stopRun(what, false)) return;
+  setTimeout(retry, 600);   // let both guards clear before the next request
+}
+
 async function runDiscover() {
   if (demoGuard() || state.stats.discovering) return;
   closeAllPickers();
@@ -1207,7 +1222,7 @@ async function runDiscover() {
   renderDeck();
   const profile = ($("#cp-profile") || {}).value || "";
   const d = await post("/actions/discover", { companies: scope, profile_id: profile });
-  if (d && d.status === "already_running") toast("Discovery is already running.");
+  if (d && d.status === "already_running") offerRestart("Discovery", runDiscover);
   else if (d && d.ok && profile) {
     const p = state.profiles.find((x) => x.id === profile);
     toast(`Discovering — everything found will apply as ${p ? p.label : profile}.`);
@@ -1221,7 +1236,7 @@ async function runCompany(name, careersUrl) {
   if (demoGuard()) return;
   closeAllPickers();
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
-  if (d && d.status === "already_running") toast("A run is already going — wait for it to finish.");
+  if (d && d.status === "already_running") offerRestart("A run", () => runCompany(name, careersUrl));
   else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
   else if (d) toast(d.error || "Could not start the run.");
   pollStats();
@@ -1235,7 +1250,7 @@ async function runProcess() {
   state.stats.processing = true;    // optimistic; poll confirms
   renderDeck();
   const d = await post("/actions/process", { companies: scope });
-  if (d && d.status === "already_running") toast("A processing run is already going.");
+  if (d && d.status === "already_running") offerRestart("Processing", runProcess, "process");
   else if (d && d.ok) toast(scope.length
     ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · apply.`
     : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
@@ -1281,6 +1296,21 @@ function paneAction(act, pk) {
     toast("Marked applied — won't resubmit.");
   }
   scheduleReload();
+}
+
+// Stops the SCAN only. An application already being filled is left alone: the
+// crawl is disposable, the apply is a form half completed under a real name.
+async function stopRun(what = "discover", ask = true) {
+  if (demoGuard()) return false;
+  if (ask && !confirm("Stop the scan in progress?\n\nAnything already found is kept, and an application being filled is not touched.")) return false;
+  const d = await post("/actions/stop-run", { what });
+  if (!d || !d.ok) { toast("Could not stop the run."); return false; }
+  toast(d.sessions_killed ? `Stopped — ${d.sessions_killed} browser session(s) ended.` : "Stopped.");
+  if (what !== "process") state.stats.discovering = false;
+  if (what !== "discover") state.stats.processing = false;
+  renderDeck();
+  pollStats();
+  return true;
 }
 
 function approveAll() {
@@ -1646,6 +1676,7 @@ window.addEventListener("resize", () => {
 
 function wire() {
   $("#btn-discover").addEventListener("click", runDiscover);
+  $("#btn-stop").addEventListener("click", () => stopRun("discover"));
   $("#btn-process").addEventListener("click", runProcess);
 
   // company picker (for discovery)

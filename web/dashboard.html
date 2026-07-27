@@ -107,6 +107,15 @@
               </div>
             </div>
 
+            <!-- After the Discover group, not inside it: wedged between the
+                 button and its own dropdown caret it split a single control in
+                 two. Only visible while discovery is running, and it stops ONLY
+                 discovery, never an application in flight. -->
+            <button id="btn-stop" class="act act-stop" type="button" hidden
+              title="Stop the discovery run in progress. An application already being filled is not touched.">
+              <span class="act-label">Stop scan</span>
+            </button>
+
             <span class="act-arrow" aria-hidden="true">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

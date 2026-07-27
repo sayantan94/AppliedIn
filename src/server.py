@@ -28,6 +28,20 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 _RUNNING = {"discover": False, "process": False}
 
 
+def _discovery_running() -> bool:
+    """True while ANY discovery is in flight, not just one this module started.
+
+    The daemon's scheduled sweep calls `run_discovery` directly and never touches
+    the flag above, so a scheduled scan used to be invisible here: the dashboard
+    showed idle, the stop control stayed hidden, and pressing Discover reported
+    success while the single-flight lock quietly refused it. The lock is the real
+    answer to "is a scan running", so ask it.
+    """
+    from discovery import handler as _handler
+
+    return bool(_RUNNING["discover"] or _handler._RUNNING.locked())
+
+
 def _throttle_state() -> dict:
     """Whether model calls are being held back, and for how long.
 
@@ -263,7 +277,7 @@ def create_app() -> FastAPI:
                 "headless": flags.browser_headless(),
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
-                "discovering": _RUNNING["discover"], "processing": _RUNNING["process"],
+                "discovering": _discovery_running(), "processing": _RUNNING["process"],
                 "throttle": _throttle_state(),
                 # Empty = healthy. ["daemon"] = NOTHING is running the pipeline
                 # (e.g. someone started `python -m server`, which serves this very
@@ -670,7 +684,7 @@ def create_app() -> FastAPI:
         name = ((body or {}).get("name") or "").strip()
         if not name:
             return {"ok": False, "error": "name required"}
-        if _RUNNING["discover"] or _RUNNING["process"]:
+        if _discovery_running() or _RUNNING["process"]:
             return {"ok": False, "status": "already_running"}
         careers_url = ((body or {}).get("careers_url") or "").strip()
         profile_id = str((body or {}).get("profile_id") or "")
@@ -858,7 +872,10 @@ def create_app() -> FastAPI:
         Body may carry `{"companies": ["Ramp", ...]}` to scope the run to the
         picked companies; omit/empty = the whole watchlist. Discover-only: it does
         not score, tailor, or apply (that's /actions/process)."""
-        if _RUNNING["discover"]:
+        # Asks the lock, not just this module's flag, so a scan the daemon started
+        # on its schedule is refused honestly here instead of reporting success and
+        # then being dropped silently one call deeper.
+        if _discovery_running():
             return {"ok": False, "status": "already_running"}
         only = [c for c in ((body or {}).get("companies") or []) if isinstance(c, str)]
         # Everything this run finds is stamped with the chosen identity, so a whole
@@ -924,6 +941,54 @@ def create_app() -> FastAPI:
         from core.events import emit
         emit("applied", pk=pk, agent="applier", detail="Marked applied by you — no resubmit.")
         return {"ok": True}
+
+    @app.post("/actions/stop-run")
+    def stop_run(body: dict | None = None):
+        """Stop the DISCOVERY run, the PROCESS run, or both.
+
+        `what` is "discover", "process" or "all" (default "discover", because the
+        stop control the dashboard shows sits next to Discover).
+
+        Scoped on purpose. Stopping discovery must not touch an application that
+        happens to be in flight: a crawl is disposable, while an apply is a form
+        already half filled under someone's real name and abandoning it midway can
+        leave a submission nobody can account for. Browser sessions are killed by
+        TAG for the same reason, so "stop this discovery" ends crawl and posting
+        reads only.
+
+        Two guards have to be released, not one: this module's `_RUNNING` flags
+        and the single-flight lock inside `discovery.handler`. Clearing only the
+        flags would report success and then have the next run refused by the lock,
+        which reads as the stop having done nothing.
+        """
+        from discovery import handler as _handler
+        from tools.claude_chrome import kill_live_sessions
+
+        what = ((body or {}).get("what") or "discover").lower()
+        if what not in ("discover", "process", "all"):
+            return {"ok": False, "error": "what must be discover, process or all"}
+
+        was = {"discover": _RUNNING["discover"], "process": _RUNNING["process"]}
+        killed = 0
+        if what in ("discover", "all"):
+            # The crawl and the posting reads it spawns. Never "apply".
+            killed += kill_live_sessions("crawl") + kill_live_sessions("jd")
+            _RUNNING["discover"] = False
+            # Only held while a run is in flight, and releasing an unheld lock
+            # raises, so this is best effort by design.
+            try:
+                _handler._RUNNING.release()
+            except RuntimeError:
+                pass
+        if what in ("process", "all"):
+            _RUNNING["process"] = False
+        if what == "all":
+            killed += kill_live_sessions("apply")
+
+        from core.events import emit
+        emit("running", agent="daemon",
+             detail=f"{what} stopped by you — {killed} browser session(s) ended")
+        return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
 
     @app.post("/actions/queue-apply/{pk}")
     def queue_apply(pk: str):

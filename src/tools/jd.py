@@ -121,13 +121,13 @@ def _from_chrome(url: str) -> dict | None:
             'verbatim: responsibilities, requirements, everything>"}')
     try:
         report, problem = asyncio.run(
-            run_task(task, report_key="description", timeout_s=300))
+            run_task(task, report_key="description", timeout_s=300, kind="jd"))
     except RuntimeError:  # already inside a loop
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             report, problem = pool.submit(
                 lambda: asyncio.run(run_task(task, report_key="description",
-                                             timeout_s=300))).result()
+                                             timeout_s=300, kind="jd"))).result()
     if problem or not report:
         log.warning("could not read %s in the browser: %s", url, problem)
         return None

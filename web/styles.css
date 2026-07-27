@@ -216,6 +216,16 @@ button:disabled { cursor: default; }
 .act-badge.zero { opacity: 0.55; }
 .act:disabled { opacity: 0.75; }
 .act.running { pointer-events: none; }
+/* Stop is destructive and only appears mid run, so it reads as the exception it
+   is: outlined and quiet next to the two primary actions, never competing with
+   them for the click. */
+.act-stop {
+  border: 1px solid color-mix(in srgb, var(--bad, #d9544f) 45%, transparent);
+  background: color-mix(in srgb, var(--bad, #d9544f) 10%, transparent);
+  color: var(--bad, #d9544f);
+  padding: 0 14px;
+}
+.act-stop:hover { background: color-mix(in srgb, var(--bad, #d9544f) 20%, transparent); }
 .act-spin {
   display: none;
   width: 14px;

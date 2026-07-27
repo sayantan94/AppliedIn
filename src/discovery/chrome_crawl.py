@@ -175,7 +175,7 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
 
     report, problem = await run_task(
         _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules),
-        report_key="jobs", model=model, timeout_s=TIMEOUT_S)
+        report_key="jobs", model=model, timeout_s=TIMEOUT_S, kind="crawl")
     if problem:
         log.warning("chrome crawl of %s failed: %s", company, problem)
         return [], "", problem
