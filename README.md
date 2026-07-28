@@ -26,7 +26,7 @@ The graph combines multi-agent orchestration, review-and-critique loops, tool
 use, durable state, and human-in-the-loop control. The default mode stops before
 every submission.
 
-![AppliedIn pipeline dashboard showing jobs moving from found to tailored and applied](docs/screenshots/readme-pipeline-light.png)
+![AppliedIn pipeline dashboard showing jobs moving from found to tailored and applied](docs/screenshots/readme-pipeline-light-v2.png)
 
 > Start with one job URL. You can see a tailored resume before configuring
 > discovery or browser automation.
@@ -180,7 +180,7 @@ Edit [`config/watchlist.yaml`](config/watchlist.yaml) or add a company from the
 dashboard. AppliedIn resolves common ATS providers such as Greenhouse, Lever,
 Ashby, and Workday, then falls back to a browser crawl for custom career sites.
 
-![Company discovery picker showing a selected watchlist and the live agent activity feed](docs/screenshots/readme-discovery-light.png)
+![Company discovery picker showing a selected watchlist and the live agent activity feed](docs/screenshots/readme-discovery-light-v2.png)
 
 *Run discovery against one company, a selected group, or the full watchlist.*
 
@@ -267,7 +267,7 @@ AppliedIn uses Google ADK to coordinate specialized agents inside a durable,
 stateful pipeline. The graph is defined in
 [`src/agent/graph.py`](src/agent/graph.py).
 
-![Filterable agent activity log showing discovery, tailoring, gates, and confirmed submissions](docs/screenshots/readme-agent-logs.png)
+![Filterable agent activity log showing discovery, tailoring, gates, and confirmed submissions](docs/screenshots/readme-agent-logs-v2.png)
 
 *Every model step, tool call, human gate, failure, and confirmed submission is
 visible and filterable.*
@@ -295,7 +295,7 @@ visible and filterable.*
    confirmation. Login walls, CAPTCHAs, and uncertain outcomes stop in a visible
    state instead of being retried blindly.
 
-![Human review queue showing approval and login gates alongside live workflow activity](docs/screenshots/readme-human-gates.png)
+![Human review queue showing approval and login gates alongside live workflow activity](docs/screenshots/readme-human-gates-v2.png)
 
 *The graph pauses visibly when it needs approval, an answer, or a browser login.*
 
