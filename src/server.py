@@ -1485,6 +1485,20 @@ def create_app() -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    # StaticFiles sends an ETag and Last-Modified but no Cache-Control, so a
+    # browser is free to apply its own heuristic and serve app.js from cache
+    # WITHOUT revalidating. That turns "the fix is deployed" into "the fix is
+    # deployed and the page still runs yesterday's code", which reads as the fix
+    # not working and costs an hour of chasing a bug that is no longer there.
+    # no-cache does not mean "do not store": the browser still caches, it just
+    # asks first, and the ETag above makes that a 304 with no body.
+    @app.middleware("http")
+    async def _revalidate_assets(request, call_next):  # noqa: ANN001, ANN202
+        response = await call_next(request)
+        if request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     # The dashboard lives in dashboard.html because index.html is the public
     # landing page (Vercel serves whatever is called index.html at the root).
     # Locally, "/" should still open the dashboard.
