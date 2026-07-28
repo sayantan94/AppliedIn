@@ -129,75 +129,75 @@ def _worker_loop() -> None:
         time.sleep(POLL_INTERVAL)
 
 
-def _apply_lanes() -> int:
-    """How many applications may run at once.
-
-    The Chrome engine acts in the owner's ONE browser, so lanes cannot be
-    isolated the way separate Playwright profiles were: two sessions clicking in
-    the same window interleave and both fail. Anything else keeps the old
-    concurrency.
-    """
-    from core.config import get_settings
-
-    return 1 if (get_settings().apply_engine or "").lower() == "chrome" else 3
-
-
-_APPLY_LANES = _apply_lanes()
 
 
 def _apply_loop() -> None:
-    """APPLY worker — its OWN thread, so slow browser applies never block the
-    evaluate worker. Submits up to _APPLY_LANES jobs CONCURRENTLY (each on its own
-    Chrome profile). All applies run in ONE event loop (never one asyncio.run per
-    thread — browser-use shares async objects that otherwise cross loops and
-    crash). Pause-aware. Runs 24/7."""
+    """APPLY worker — its own thread, so a slow browser apply never blocks the
+    evaluate worker.
+
+    Runs up to _APPLY_CONCURRENCY applications at once, never two to the same
+    company: the queue leases a company while one of its jobs is in flight. Work
+    starts the moment a slot frees, with no pacing.
+
+    A retryable failure goes back with backoff; a terminal one never does. See
+    core.apply_queue — an unconfirmed submit in particular must reach the owner
+    rather than be retried, since it may already have gone through.
+    """
     import asyncio
+    from concurrent.futures import ThreadPoolExecutor
 
     from agent.run import _apply_direct
     from core import flags
-    from core.config import get_settings
+    from core.apply_queue import ApplyQueue, is_retryable
     from core.stores import make_stores as _mk
-    from tools.browser_apply import set_profile_override
 
     stores = make_stores()
-    base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
+    q = ApplyQueue(stores.tracking.r)
+    # Leases describe what is running NOW, and nothing is running in a process
+    # that has just started. Without this a crash mid apply would block that
+    # company for good.
+    if (freed := q.reset_leases()):
+        log.info("released %d stale company lease(s) from a previous run", freed)
 
-    async def _apply_batch(pks: list) -> None:
-        lanes: asyncio.Queue[str] = asyncio.Queue()
-        for i in range(_APPLY_LANES):
-            lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
-
-        async def _one(pk: str) -> None:
-            lane = await lanes.get()  # blocks until a lane frees → caps concurrency
-            try:
-                set_profile_override(lane)  # task-local → this apply's Chrome profile
-                log.info("apply: %s", await _apply_direct(pk, _mk()))
-            except Exception:
-                log.exception("apply failed for %s", pk)
-            finally:
-                lanes.put_nowait(lane)
-
-        await asyncio.gather(*(_one(pk) for pk in pks))
-
-    while True:
-        if flags.paused():
-            time.sleep(POLL_INTERVAL)
-            continue
-        items = stores.queue.drain(stores.apply_queue)
-        if not items:
-            time.sleep(POLL_INTERVAL)
-            continue
-        # Take only ONE lane-batch; re-queue the rest so they PERSIST in Redis
-        # (never held in memory — a restart mustn't strand them). Next cycle pops
-        # the next batch, re-checking pause each time.
-        batch = items[:_APPLY_LANES]
-        for rest in items[_APPLY_LANES:]:
-            stores.queue.enqueue(stores.apply_queue, rest)
+    def _run_one(item: dict) -> None:
+        pk = item["pk"]
         try:
-            asyncio.run(_apply_batch([it["pk"] for it in batch]))
-        except Exception:
-            log.exception("apply batch failed")
-        time.sleep(POLL_INTERVAL)
+            result = asyncio.run(_apply_direct(pk, _mk())) or {}
+            log.info("apply: %s", result)
+            again, why = is_retryable(result)
+            if again:
+                q.retry(item, why)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("apply crashed for %s", pk)
+            q.retry(item, f"crashed: {exc}")
+        finally:
+            q.done(item)      # release the company, whatever happened
+
+    # Sized to the ceiling; the live flag is enforced per dispatch below, so
+    # turning concurrency down takes effect on the next application rather than
+    # needing a restart.
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="apply") as pool:
+        running: set = set()
+        while True:
+            running = {f for f in running if not f.done()}
+            if flags.paused():
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # Fold in anything the old flat queue still holds, so an upgrade never
+            # strands work someone already approved.
+            for it in stores.queue.drain(stores.apply_queue):
+                if (pk := it.get("pk")):
+                    q.put(pk, (stores.tracking.get(pk) or {}).get("company", ""))
+
+            if len(running) >= flags.apply_concurrency():
+                time.sleep(POLL_INTERVAL)      # at the limit; let one finish
+                continue
+            item = q.next()
+            if not item:
+                time.sleep(POLL_INTERVAL)
+                continue
+            running.add(pool.submit(_run_one, item))
 
 
 def run_discovery_once(only: list[str] | None = None, profile_id: str = "") -> dict:
@@ -221,7 +221,8 @@ def run_discovery_once(only: list[str] | None = None, profile_id: str = "") -> d
 def process_backlog_once(companies: list | None = None) -> dict:
     """One on-demand pass over the discovered backlog (the UI 'Process
     applications' button): score + tailor EVERY waiting `found` job, then apply
-    everything that qualifies — _APPLY_LANES at a time, up to the daily cap.
+    everything that qualifies — queued for the apply worker, which runs them
+    a few at a time and never two to one company.
     ``companies`` (names, case-insensitive) scopes the pass to just those
     companies' jobs — everything else stays untouched in the backlog/queue for a
     later run. None/empty = the whole backlog.
@@ -233,7 +234,6 @@ def process_backlog_once(companies: list | None = None) -> dict:
     from core import flags as _flags
     from core.config import get_settings
     from core.models import Status
-    from tools.browser_apply import set_profile_override
 
     stores = make_stores()
     sel = {c.strip().lower() for c in (companies or []) if c and c.strip()}
@@ -264,51 +264,29 @@ def process_backlog_once(companies: list | None = None) -> dict:
             except Exception:
                 log.exception("could not mark %s errored", row.get("pk"))
 
-    # 2) APPLY — drain the apply queue, _APPLY_LANES concurrently, until empty.
-    base = (getattr(get_settings(), "browser_profile_dir", "") or "").strip()
+    # 2) APPLY — hand everything to the SAME queue the apply worker drains, rather
+    # than applying here. Two code paths applying concurrently was the actual
+    # concurrency bug: each respected its own limit and neither knew about the
+    # other, so a process run and the worker could drive the same company at once.
+    from core import flags as _f
+    from core.apply_queue import ApplyQueue
 
-    async def _apply_batch(pks: list) -> None:
-        lanes: asyncio.Queue[str] = asyncio.Queue()
-        for i in range(_APPLY_LANES):
-            lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
-
-        async def _one(pk: str) -> None:
-            lane = await lanes.get()
-            try:
-                set_profile_override(lane)
-                log.info("process apply: %s", await _apply_direct(pk, make_stores()))
-            except Exception:
-                log.exception("process: apply failed for %s", pk)
-            finally:
-                lanes.put_nowait(lane)
-
-        await asyncio.gather(*(_one(pk) for pk in pks))
-
+    q = ApplyQueue(stores.tracking.r)
     applied = 0
-    while True:
-        items = stores.queue.drain(stores.apply_queue)
-        if not items:
-            break
+    for it in stores.queue.drain(stores.apply_queue):
+        pk = it.get("pk", "")
+        row = stores.tracking.get(pk) or {}
         if sel or skipped:
-            # Scoped/skip-filtered run: apply only in-scope companies' jobs;
-            # everything else goes straight back on the queue for a later pass.
-            keep, defer = [], []
-            for it in items:
-                row = stores.tracking.get(it.get("pk", "")) or {}
-                (keep if _in_scope(row.get("company")) else defer).append(it)
-            for it in defer:
+            # Scoped run: out of scope jobs go back untouched for a later pass.
+            if not _in_scope(row.get("company")):
                 stores.queue.enqueue(stores.apply_queue, it)
-            if not keep:
-                break  # only out-of-scope jobs remain — leave them queued
-            items = keep
-        batch = items[:_APPLY_LANES]
-        for rest in items[_APPLY_LANES:]:
-            stores.queue.enqueue(stores.apply_queue, rest)  # persist the overflow
-        try:
-            asyncio.run(_apply_batch([it["pk"] for it in batch]))
-            applied += len(batch)
-        except Exception:
-            log.exception("process: apply batch failed")
+                continue
+        q.put(pk, row.get("company", ""))
+        applied += 1
+    if applied:
+        log.info("process: queued %d application(s) — the apply worker drains them "
+                 "%d at a time, never two to one company", applied,
+                 _f.apply_concurrency())
 
     result = {"evaluated": evaluated, "applied": applied}
     log.info("process backlog done: %s", result)

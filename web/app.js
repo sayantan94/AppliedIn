@@ -41,6 +41,11 @@ const state = {
   headless: false,
   paused: false,
   autoMin: 8,
+  queue: null,        // /apply-queue snapshot: who runs, who waits, the limit
+  dead: [],           // /apply-queue/dead: jobs that used every attempt
+  secOpen: { closed: false }, // pipeline stack: which foldable sections are open
+  openCos: new Set(), // pipeline stack: companies expanded inside Found
+  page: {},           // pipeline stack: rows revealed per list key
 };
 
 // --- text helpers ----------------------------------------------------------
@@ -129,15 +134,15 @@ function tagHtml(s) {
 const GATE_LABEL = {
   approval: "awaiting your approval",
   unknown_field: "needs an answer from you",
-  captcha: "CAPTCHA — finish manually",
+  captcha: "CAPTCHA, finish it manually",
   no_account: "account/login needed",
   low_confidence: "needs review",
 };
 const gateLabel = (r) => GATE_LABEL[r] || String(r || "review").replace(/_/g, " ");
 function defaultGateText(r) {
-  if (r.gate_reason === "no_account") return "Auto-signup was blocked. Approve once the account exists.";
-  if (r.gate_reason === "captcha") return "A CAPTCHA blocked the bot — apply manually, then approve to mark done.";
-  return "Paused for your go-ahead — approve to continue.";
+  if (r.gate_reason === "no_account") return "Automatic signup was blocked. Approve once the account exists.";
+  if (r.gate_reason === "captcha") return "A CAPTCHA blocked the bot. Apply manually, then approve to mark it done.";
+  return "Paused for your approval. Approve to continue.";
 }
 
 // The deliberately-kept "Unable to do it" bucket: things the automation could
@@ -427,7 +432,9 @@ function renderDeck() {
   disc.disabled = !!s.discovering;
   disc.classList.toggle("running", !!s.discovering);
   const stopBtn = $("#btn-stop");
-  if (stopBtn) stopBtn.hidden = !s.discovering;   // scan only; an apply is not stoppable from here
+  if (stopBtn) stopBtn.hidden = !s.discovering;   // scan only
+  const stopApply = $("#btn-stop-apply");
+  if (stopApply) stopApply.hidden = !(s.applying > 0);   // from /stats, polled always
   renderDiscoverLabel();
   proc.disabled = !!s.processing;
   proc.classList.toggle("running", !!s.processing);
@@ -489,33 +496,21 @@ const awaitsApproval = (r) => r.gate_reason === "approval" && !!r.gate_question;
 // tailored before approval gates carried the status.
 const canApply = (r) => r.status === "tailored" || awaitsApproval(r);
 
-const LANES = [
-  { label: "Found",      st: ["found"],                cls: "ln-found",
-    match: (r) => r.status === "found",
-    hint: "Discovered — waiting for a Process run" },
-  { label: "Tailored",   st: ["tailored", "tailoring", "needs_human"], cls: "ln-ready",
-    match: (r) => r.status === "tailored" || r.status === "tailoring"
-                  || (r.status === "needs_human" && awaitsApproval(r)),
-    hint: "Résumé tailored (or tailoring now, in yellow) — the apply waits for your ▶ approval" },
-  { label: "Submitting", st: ["submitting"],           cls: "ln-live",
-    hint: "The browser is filling the application now" },
-  { label: "Applied",    st: ["applied", "applied_manual"], cls: "ln-ok",
-    hint: "Submitted — confirmation captured" },
-  { label: "Human check", st: ["needs_human"],         cls: "ln-captcha",
-    match: (r) => r.status === "needs_human" && r.gate_reason === "captcha",
-    hint: "Filled and ready — a CAPTCHA needs 10 seconds of human. One click re-opens the window" },
-  { label: "Needs you",  st: ["needs_human"],          cls: "ln-warn",
-    match: (r) => r.status === "needs_human" && !awaitsApproval(r)
-                  && r.gate_reason !== "captcha",
-    hint: "Paused on a question — answer in the Needs-you tab" },
-  { label: "Flagged",    st: ["failed"],               cls: "ln-flag",
-    match: (r) => r.status === "failed" && r.fail_kind === "spam_flagged",
-    hint: "The portal called the submit 'possible spam' — Retry re-runs it with human-style clicks" },
-  { label: "Unable",     st: ["failed", "error", "job_gone", "uncertain"], cls: "ln-bad",
-    match: (r) => ["failed", "error", "job_gone", "uncertain"].includes(r.status)
-                  && r.fail_kind !== "spam_flagged",
-    hint: "The automation couldn't finish — reason & screenshot inside" },
-];
+/* The pipeline stack. Rank on screen equals rank in the owner's head:
+   1 gates blocking an application, 2 tailored work awaiting a go, 3 live
+   submits, 4 fresh confirmations, 5 the raw backlog, 6 closed work.
+   Sections replace the old eight equal lanes, whose columns treated five
+   blocking questions and 575 raw finds as peers. */
+/* One classifier, one section per row. Every row lands somewhere, so a status
+   the backend invents tomorrow falls to Closed instead of off the board. */
+function sectionOf(r) {
+  if (r.status === "needs_human") return awaitsApproval(r) ? "ready" : "needs";
+  if (r.status === "tailored" || r.status === "tailoring") return "ready";
+  if (r.status === "submitting") return "flight";
+  if (["applied", "applied_manual"].includes(r.status)) return "applied";
+  if (r.status === "found") return "found";
+  return "closed";
+}
 
 // A job's location, marked when it matches the FIRST tier of the location
 // preference (Washington) so the ranking is visible at a glance rather than
@@ -561,24 +556,24 @@ function laneCard(r) {
   let retry = "";
   if (r.status === "failed" && r.fail_kind === "spam_flagged") {
     retry = `<button class="kc-retry" data-act="retry" data-pk="${esc(r.pk)}"
-       title="Re-run this application with human-style clicks">↻ Retry</button>`;
+       title="Run this application again with human style clicks">↻ Retry</button>`;
   } else if (r.status === "needs_human" && r.gate_reason === "captcha") {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
-       title="Re-opens the filled application in Chrome — solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
+       title="Opens the filled application in Chrome again. Solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
   } else if (canApply(r)) {
     // Two ways to send it: now, or in line. Queueing matters when several are
-    // ready — they share one real browser, so running them at once fights.
+    // ready, since they share one real browser and running them at once fights.
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
-       title="Approve — the browser applies with the tailored résumé now">▶ Apply</button>
+       title="Approve. The browser applies with the tailored résumé now">▶ Apply</button>
       <button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
-       title="Add to the apply queue — runs when a browser lane is free, one at a time">＋ Queue</button>`;
+       title="Add to the apply queue. It runs when a browser lane is free, one at a time">＋ Queue</button>`;
   } else if (r.status === "found") {
     retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
-       title="Score + tailor this job now (stops at ready-to-apply)">▶ Run now</button>`;
+       title="Score and tailor this job now. It stops before applying">▶ Run now</button>`;
   } else if (isStuck(r)) {
     // The recovery path that used to mean editing the store by hand.
     retry = `<button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
-       title="Clear the failure and put this back on the apply queue">↻ Re-queue</button>`;
+       title="Clear the failure and put this job back on the apply queue">↻ Requeue</button>`;
   }
   const act = state.activity[r.pk];
   const live = (["tailoring", "submitting"].includes(r.status) && act && act.detail)
@@ -597,7 +592,7 @@ function laneCard(r) {
    says how many are in it. A tier the owner has filtered out is dropped entirely
    rather than shown empty. */
 function bucketed(rows) {
-  if (!rows.length) return `<div class="kl-empty">—</div>`;
+  if (!rows.length) return `<div class="kl-empty">none</div>`;
   const groups = new Map(LOC_TIERS.map((t) => [t.key, []]));
   for (const r of rows) groups.get(locTier(r.location).key).push(r);
 
@@ -617,7 +612,7 @@ function bucketed(rows) {
     const shut = state.collapsed.has(tier.key) && !state.locFilter;
     html += `<div class="bucket ${tier.cls}${shut ? " shut" : ""}">
       <button class="bk-head" data-bucket="${tier.key}"
-        aria-expanded="${!shut}" title="${esc(tier.label)} — ${shut ? "show" : "hide"}">
+        aria-expanded="${!shut}" title="${esc(tier.label)}. Click to ${shut ? "show" : "hide"}">
         <span class="bk-caret" aria-hidden="true">${shut ? "▸" : "▾"}</span>
         <span class="bk-name">${tier.head}</span>
         <span class="bk-n mono">${inTier.length}</span>
@@ -628,63 +623,268 @@ function bucketed(rows) {
   return html || `<div class="kl-empty">none in this location</div>`;
 }
 
+/* Reveal step for the dense lists. Fold plus paging keeps the DOM flat:
+   the 575 found jobs render as 43 company rows until one is opened, and an
+   opened company shows a page at a time. Nothing is hidden for good, since
+   every fold carries its count and opens on one click. */
+const REVEAL = 25;
+const moreBtn = (key, shown, total, step = REVEAL) =>
+  `<button class="ps-more" data-more="${esc(key)}" data-next="${shown + step}"
+     title="Reveal the next rows">Show ${Math.min(step, total - shown)} more of ${total}</button>`;
+
+/* Compact gate card for the top section. The question itself is on the card,
+   so triage never needs a click; answering happens in the drawer or the
+   Needs you tab, both one click away. */
+function gateMini(r) {
+  const captcha = r.gate_reason === "captcha";
+  const act = captcha
+    ? `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
+         title="Opens the filled application in Chrome again. Solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`
+    : `<button class="kc-retry kc-apply" data-open="${esc(r.pk)}"
+         title="Open the question and type an answer">✎ Answer</button>`;
+  const q = String(r.gate_question || defaultGateText(r))
+    .replace(/[#*_`>]/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+  return `<div class="ncard" data-open="${esc(r.pk)}" role="button" tabindex="0"
+      title="Open details">
+    <div class="nc-co">${esc(r.company)}<span class="nc-role">${esc(r.title)}</span></div>
+    <div class="nc-q">${esc(q)}</div>
+    <div class="nc-foot"><span class="nc-gate">${esc(gateLabel(r.gate_reason))}</span>${act}</div>
+  </div>`;
+}
+
+/* Dense one-line rows for the big states. A row is the whole record's handle:
+   click opens the drawer, the action button on it is the same one the card
+   carried. */
+function foundRow(r) {
+  const sc = r.match_score != null
+    ? `<span class="jr-score">${scoreHtml(r.match_score)}</span>`
+    : `<span class="jr-score jr-none mono">·</span>`;
+  return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
+    ${sc}
+    <span class="jr-title">${esc(r.title)}</span>
+    ${r.location ? `<span class="jr-loc" title="${esc(r.location)}">${esc(String(r.location).slice(0, 40))}</span>` : ""}
+    <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
+    <button class="kc-retry kc-run jr-act" data-act="run-now" data-pk="${esc(r.pk)}"
+      title="Score and tailor this job now. It stops before applying">▶ Run now</button>
+  </div>`;
+}
+function appliedRow(r) {
+  return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
+    <span class="jr-mark">✓</span>
+    <span class="jr-co">${esc(r.company)}</span>
+    <span class="jr-title">${esc(r.title)}</span>
+    ${r.status === "applied_manual" ? `<span class="ps-chip">manual</span>` : ""}
+    <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
+  </div>`;
+}
+function closedRow(r) {
+  const failed = isStuck(r);
+  let act = "";
+  if (r.status === "failed" && r.fail_kind === "spam_flagged") {
+    act = `<button class="kc-retry jr-act" data-act="retry" data-pk="${esc(r.pk)}"
+      title="Run this application again with human style clicks">↻ Retry</button>`;
+  } else if (failed) {
+    act = `<button class="kc-retry kc-queue jr-act" data-act="queue-apply" data-pk="${esc(r.pk)}"
+      title="Clear the failure and put this job back on the apply queue">↻ Requeue</button>`;
+  }
+  const whyFull = r.closed_reason || r.fail_reason || r.skip_reason || "";
+  const why = String(whyFull).replace(/\s+/g, " ").trim().slice(0, 90);
+  return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
+    <span class="jr-dot${failed ? " bad" : ""}"></span>
+    <span class="jr-co">${esc(r.company)}</span>
+    <span class="jr-title">${esc(r.title)}</span>
+    ${failed ? tagHtml(r.status) : ""}
+    ${why ? `<span class="jr-why" title="${esc(whyFull)}">${esc(why)}</span>` : ""}
+    <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
+    ${act}
+  </div>`;
+}
+
+// ── the six sections ──
+function needsSec(rows) {
+  const n = rows.length;
+  return `<section class="psec ps-needs${n ? " has" : ""}">
+    <div class="ps-head">
+      <span class="ps-dot${n ? " on" : ""}"></span>
+      <span class="ps-name">Needs you</span>
+      <span class="ps-n mono${n ? " hot" : ""}">${n}</span>
+      <span class="ps-hint">${n ? "A question is blocking each of these applications."
+                                : "Nothing is waiting on you."}</span>
+      ${n ? `<button class="ps-link on" data-goto-needs="1"
+        title="The Needs you tab has room to write answers">Open the Needs you tab</button>` : ""}
+    </div>
+    ${n ? `<div class="ps-grid">${rows.map(gateMini).join("")}</div>` : ""}
+  </section>`;
+}
+
+function readySec(rows) {
+  const n = rows.length;
+  const nApprove = rows.filter(canApply).length;
+  // Location pills, carried over from the old Tailored lane: only tiers that
+  // hold jobs are offered, and the counts read without opening anything.
+  let locBar = "";
+  if (n) {
+    const present = LOC_TIERS
+      .map((t) => ({ t, n: rows.filter((r) => locTier(r.location).key === t.key).length }))
+      .filter((x) => x.n);
+    if (present.length > 1) {
+      const pill = (key, label, cnt, cls) =>
+        `<button class="lp ${cls}${state.locFilter === key ? " on" : ""}" data-loc="${key}"
+           title="${esc(label)}">${esc(label)}<span class="lp-n mono">${cnt}</span></button>`;
+      locBar = `<div class="locbar">
+        ${pill("", "All", n, "lp-all")}
+        ${present.map((x) => pill(x.t.key, x.t.short, x.n, x.t.cls)).join("")}
+      </div>`;
+    }
+  }
+  return `<section class="psec ps-ready${n ? " has" : ""}">
+    <div class="ps-head">
+      <span class="ps-dot${n ? " on" : ""}"></span>
+      <span class="ps-name">Ready to apply</span>
+      <span class="ps-n mono">${n}</span>
+      <span class="ps-hint">${n ? "Tailored and waiting for your approval. Apply sends one now, Queue lines it up."
+                                : "Nothing is tailored yet. Run jobs from Found below."}</span>
+      ${nApprove ? `<button class="ps-link on" data-approve-all="1"
+        title="Approve all ${nApprove} and start the applies, a few at a time">Approve all ${nApprove}</button>` : ""}
+    </div>
+    ${n ? `<div class="ps-ready-body">${locBar}${bucketed(rows)}</div>` : ""}
+  </section>`;
+}
+
+function flightSec(rows) {
+  const n = rows.length;
+  return `<section class="psec ps-flight${n ? " has" : ""}">
+    <div class="ps-head">
+      <span class="ps-dot${n ? " on live" : ""}"></span>
+      <span class="ps-name">In flight</span>
+      <span class="ps-n mono">${n}</span>
+      <span class="ps-hint">${n ? "The browser is filling these right now."
+                                : "No application is running right now."}</span>
+    </div>
+    ${n ? `<div class="ps-grid">${rows.map(laneCard).join("")}</div>` : ""}
+  </section>`;
+}
+
+function appliedSec(rows) {
+  const n = rows.length;
+  const shown = state.page.applied || 6;
+  return `<section class="psec ps-applied">
+    <div class="ps-head">
+      <span class="ps-dot"></span>
+      <span class="ps-name">Applied</span>
+      <span class="ps-n mono">${n}</span>
+      <span class="ps-hint">${n ? "Submitted, confirmation captured. Newest first."
+                                : "Nothing submitted yet."}</span>
+    </div>
+    ${n ? `<div class="jrows">${rows.slice(0, shown).map(appliedRow).join("")}</div>
+      ${n > shown ? moreBtn("applied", shown, n) : ""}` : ""}
+  </section>`;
+}
+
+/* The 575. Raw material, so it renders as an aggregate first: one row per
+   company, best score forward, and postings appear only when a company is
+   opened, a page at a time. A company under the active company filter opens
+   itself, and a narrow search opens every match. */
+function foundGroup(co, rows, forceOpen) {
+  const open = forceOpen || state.openCos.has(co);
+  const best = rows.reduce((m, r) => Math.max(m, r.match_score ?? -1), -1);
+  const scored = rows.filter((r) => r.match_score != null).length;
+  const key = `co:${co}`;
+  const shown = state.page[key] || REVEAL;
+  return `<div class="fgroup">
+    <button class="fg-head" data-co-fold="${esc(co)}" aria-expanded="${open}"
+      title="${open ? "Hide" : "Show"} the postings found at ${esc(co)}">
+      <span class="ps-caret">${open ? "▾" : "▸"}</span>
+      <span class="fg-co">${esc(co)}</span>
+      <span class="fg-n mono">${rows.length}</span>
+      ${best >= 0
+        ? `<span class="fg-best mono">best ${scoreHtml(best)} · ${scored} scored</span>`
+        : `<span class="fg-best mono">not scored yet</span>`}
+    </button>
+    ${open ? `<div class="jrows fg-rows">${rows.slice(0, shown).map(foundRow).join("")}</div>
+      ${rows.length > shown ? moreBtn(key, shown, rows.length) : ""}` : ""}
+  </div>`;
+}
+function foundSec(rows) {
+  const n = rows.length;
+  const groups = new Map();
+  for (const r of rows) {
+    const k = r.company || "Unknown";
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const gs = [...groups.entries()];
+  for (const [, list] of gs) {
+    list.sort((a, b) => (b.match_score ?? -1) - (a.match_score ?? -1)
+      || new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  }
+  gs.sort((a, b) => {
+    const ba = a[1][0]?.match_score ?? -1, bb = b[1][0]?.match_score ?? -1;
+    return bb - ba || b[1].length - a[1].length || a[0].localeCompare(b[0]);
+  });
+  const openAll = filtersActive() && n <= 120;   // a narrow search shows its hits
+  return `<section class="psec ps-found">
+    <div class="ps-head">
+      <span class="ps-dot"></span>
+      <span class="ps-name">Found</span>
+      <span class="ps-n mono">${n}</span>
+      ${n ? `<span class="ps-chip">${groups.size} compan${groups.size === 1 ? "y" : "ies"}</span>` : ""}
+      <span class="ps-hint">${n ? "The backlog. Open a company to browse what discovery found there."
+                                : "Nothing discovered is waiting. Discover finds new postings."}</span>
+      ${n ? `<button class="ps-link on" data-run-all="1"
+        title="Score and tailor all ${n} found jobs. Each stops before applying">▶ Run all</button>` : ""}
+    </div>
+    ${n ? `<div class="fgroups">${gs.map(([co, list]) =>
+        foundGroup(co, list, openAll || state.coFilter === co)).join("")}</div>` : ""}
+  </section>`;
+}
+
+function closedSec(rows) {
+  const n = rows.length;
+  if (!n) return "";
+  const fails = rows.filter(isStuck);
+  const skips = rows.filter((r) => !isStuck(r));
+  const open = !!state.secOpen.closed;
+  const shown = state.page.skipped || REVEAL;
+  const body = !open ? "" : `<div class="ps-closed-body">
+    ${fails.length ? `<div class="ps-sub">Could not finish</div>
+      <div class="jrows">${fails.map(closedRow).join("")}</div>` : ""}
+    ${skips.length ? `<div class="ps-sub">Skipped or capped</div>
+      <div class="jrows">${skips.slice(0, shown).map(closedRow).join("")}</div>
+      ${skips.length > shown ? moreBtn("skipped", shown, skips.length) : ""}` : ""}
+  </div>`;
+  return `<section class="psec ps-closed">
+    <button class="ps-head ps-fold" data-sec-fold="closed" aria-expanded="${open}"
+      title="${open ? "Hide" : "Show"} closed work">
+      <span class="ps-caret">${open ? "▾" : "▸"}</span>
+      <span class="ps-name">Closed</span>
+      <span class="ps-n mono">${n}</span>
+      ${fails.length ? `<span class="ps-chip bad">${fails.length} failed</span>` : ""}
+      ${skips.length ? `<span class="ps-chip">${skips.length} skipped</span>` : ""}
+      <span class="ps-hint">Reference only. Nothing here is waiting on you.</span>
+    </button>
+    ${body}
+  </section>`;
+}
+
 function viewPipeline() {
   if (!state.apps.length) {
     return `<div class="empty"><div class="empty-big">No applications yet</div>
-      Click <b>Discover · All</b> above to find jobs from your watchlist —<br>
-      they'll move across this board: found → tailored → applied.</div>`;
+      Click <b>Discover · All</b> above to find jobs from your watchlist.<br>
+      They move down this board: found, then tailored, then applied.</div>`;
   }
-  let shown = 0;
-  const lanes = LANES.map((l) => {
-    const rows = visible(state.apps.filter((r) => l.match ? l.match(r) : l.st.includes(r.status)));
-    shown += rows.length;
-    const runAll = (l.label === "Found" && rows.length)
-      ? `<button class="kl-runall" data-run-all="1" title="Score + tailor all ${rows.length} found jobs (stops each at ready-to-apply)">▶ Run all</button>`
-      : "";
-    // Location filter for the lane it governs — pills rather than a dropdown, so
-    // the tiers and their counts are readable without opening anything. Only
-    // tiers that actually hold jobs are offered; an empty option is a dead end.
-    let locBar = "";
-    if (l.label === "Tailored" && rows.length) {
-      const present = LOC_TIERS
-        .map((t) => ({ t, n: rows.filter((r) => locTier(r.location).key === t.key).length }))
-        .filter((x) => x.n);
-      if (present.length > 1) {
-        const pill = (key, label, n, cls) =>
-          `<button class="lp ${cls}${state.locFilter === key ? " on" : ""}" data-loc="${key}"
-             title="${esc(label)}">${esc(label)}<span class="lp-n mono">${n}</span></button>`;
-        locBar = `<div class="locbar">
-          ${pill("", "All", rows.length, "lp-all")}
-          ${present.map((x) => pill(x.t.key, x.t.short, x.n, x.t.cls)).join("")}
-        </div>`;
-      }
-    }
-    return `<div class="klane ${l.cls}">
-      <div class="kl-head" title="${esc(l.hint)}">
-        <span class="kl-dot"></span><span class="kl-name">${l.label}</span>
-        <span class="kl-n mono">${rows.length}</span>${runAll}
-      </div>
-      ${locBar}
-      <div class="kl-cards">${
-        l.label === "Tailored" ? bucketed(rows)
-                               : (rows.map(laneCard).join("") || `<div class="kl-empty">—</div>`)
-      }</div>
-    </div>`;
-  }).join("");
+  const S = { needs: [], ready: [], flight: [], applied: [], found: [], closed: [] };
+  for (const r of visible(state.apps)) S[sectionOf(r)].push(r);
+  const shown = Object.values(S).reduce((a, b) => a + b.length, 0);
   if (!shown && filtersActive()) return emptyFiltered();
-  const nApprove = visible(state.apps.filter(canApply)).length;
-  const approveNote = nApprove ? `<div class="pane-note">
-    <span>${nApprove} tailored job${nApprove === 1 ? "" : "s"} await${nApprove === 1 ? "s" : ""} your apply approval.</span>
-    <button class="btn btn-amber" data-approve-all="1">Approve all ${nApprove}</button>
-  </div>` : "";
-  const base = byCompany(state.apps);
-  const hidden = [["skipped", "skipped"], ["capped", "capped"]]
-    .map(([k, l]) => [base.filter((r) => r.status === k).length, l])
-    .filter(([n]) => n)
-    .map(([n, l]) => `${n} ${l}`);
-  const note = hidden.length
-    ? `<div class="knote">Not on the board: ${hidden.join(" · ")} — see the Applications tab.</div>` : "";
-  return `${approveNote}<div class="kboard">${lanes}</div>${note}`;
+  return `<div class="pstack">
+    ${needsSec(S.needs)}
+    ${readySec(S.ready)}
+    ${flightSec(S.flight)}
+    ${appliedSec(S.applied)}
+    ${foundSec(S.found)}
+    ${closedSec(S.closed)}
+  </div>`;
 }
 
 // --- Applications table ----------------------------------------------------
@@ -1159,8 +1359,11 @@ async function pollStats() {
     const was = !!(state.stats.discovering || state.stats.processing);
     applyStats(s);
     renderDeck();
+    // Same cadence as the rest of the poll, but only while the panel is open.
+    const qpEl = $("#qpicker");
+    if (qpEl && !qpEl.hidden) loadQueue();
     const is = !!(s.discovering || s.processing);
-    if (was && !is) { loadApps(); toast("Run finished — board updated."); }
+    if (was && !is) { loadApps(); loadQueue(); toast("Run finished — board updated."); }
   } catch { /* backend briefly away — keep last known state */ }
 }
 
@@ -1168,7 +1371,7 @@ let _reloadTimer = null;
 function scheduleReload() {
   if (DEMO) return;
   clearTimeout(_reloadTimer);
-  _reloadTimer = setTimeout(() => { loadApps(); }, 800);
+  _reloadTimer = setTimeout(() => { loadApps(); loadQueue(); }, 800);
 }
 
 async function post(path, body) {
@@ -1214,12 +1417,24 @@ function closeAllPickers() {
 // blur, so tabbing through four of them would otherwise launch four crawls of the
 // same careers page. One scan, after the edits stop.
 let _rescanTimer = null;
-function scheduleRescan(co) {
+let _rescanWaits = 0;
+function scheduleRescan(co, url = "", waiting = false) {
   clearTimeout(_rescanTimer);
+  if (!waiting) _rescanWaits = 0;
+  // Editing four fields commits four times; one scan after the edits settle.
+  // If the pipeline is busy the scan waits rather than asking, backing off so it
+  // is not asking the server every two seconds either. It gives up after a few
+  // minutes and says so once, because a scan nobody is waiting for should not
+  // retry forever.
+  if (waiting && ++_rescanWaits > 6) {
+    toast(`${co}: rules saved. The pipeline is busy, so use Scan now when it frees up.`);
+    return;
+  }
+  const wait = waiting ? Math.min(30000, 5000 * _rescanWaits) : 2500;
   _rescanTimer = setTimeout(() => {
-    toast(`Scanning ${co} with the new rules…`);
-    runCompany(co);
-  }, 2500);
+    if (!_rescanWaits) toast(`Scanning ${co} with the new rules…`);
+    runCompany(co, url, false, true);      // silent: never prompts
+  }, wait);
 }
 
 async function offerRestart(label, retry, blockedBy = "discover", again = false) {
@@ -1255,11 +1470,17 @@ async function runDiscover(again = false) {
   else if (!d) { state.stats.discovering = false; renderDeck(); }
   pollStats();
 }
-async function runCompany(name, careersUrl, again = false) {
+async function runCompany(name, careersUrl, again = false, silent = false) {
   if (demoGuard()) return;
   closeAllPickers();
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
-  if (d && d.status === "already_running") offerRestart("the scan", (a) => runCompany(name, careersUrl, a), d.blocked_by, again);
+  if (d && d.status === "already_running") {
+    // A scan the OWNER asked for may interrupt to ask. One this scheduled itself
+    // after a rules edit must not: editing four fields would mean four dialogs,
+    // and the answer to all of them is the same. It waits and tries again.
+    if (silent) scheduleRescan(name, careersUrl, true);
+    else offerRestart("the scan", (a) => runCompany(name, careersUrl, a), d.blocked_by, again);
+  }
   else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
   else if (d) toast(d.error || "Could not start the run.");
   pollStats();
@@ -1305,7 +1526,7 @@ function paneAction(act, pk) {
     toast("Approved — opening the application.");
   } else if (act === "queue-apply") {
     markBusy(pk, "queued…");
-    post(`/actions/queue-apply/${encodeURIComponent(pk)}`);
+    post(`/actions/queue-apply/${encodeURIComponent(pk)}`).then(() => loadQueue());
     toast("Queued — it applies when a browser lane is free.");
   } else if (act === "skip") {
     if (!confirm("Skip this job? It moves to closed.")) return;
@@ -1344,7 +1565,7 @@ function approveAll() {
     + `They run a few at a time — finish any CAPTCHA windows as they open.`)) return;
   state.apps.filter((a) => a.status === "needs_human" && a.gate_reason === "approval")
     .forEach((a) => markBusy(a.pk, "queued…"));
-  post("/actions/approve-all", { company: "__all__" });
+  post("/actions/approve-all", { company: "__all__" }).then(() => loadQueue());
   toast(`Approving ${n} — applications are running.`);
   scheduleReload();
 }
@@ -1682,6 +1903,184 @@ function toast(msg) {
   }, 2800);
 }
 
+// --- apply queue -----------------------------------------------------------
+// The queue panel answers its two questions with structure, not prose:
+// "why has mine not started" — either every lane is busy, or its company
+// already has one running, and each waiting row says which — and "what gave
+// up" — the dead list, each with its reason and how many tries it got.
+async function loadQueue() {
+  if (DEMO) return;
+  try {
+    const [q, d] = await Promise.all([
+      fetch(api("/apply-queue"), { headers: auth.header() }).then((r) => r.json()),
+      fetch(api("/apply-queue/dead"), { headers: auth.header() }).then((r) => r.json()),
+    ]);
+    state.queue = q || {};
+    state.dead = (d && d.dead) || [];
+    renderQueueBadge();
+    renderQueuePanel();
+  } catch { /* backend briefly away — keep last known state */ }
+}
+
+function renderQueueBadge() {
+  const q = state.queue || {};
+  const n = (q.total || 0) + (q.dlq || 0);
+  const b = $("#q-count");
+  if (!b) return;
+  b.hidden = !n;
+  b.textContent = String(n);
+  b.classList.toggle("dead", (q.dlq || 0) > 0);   // red only when something gave up
+  $("#btn-queue").classList.toggle("live", (q.running || []).length > 0);
+}
+
+// Queue keys arrive lowercased; the watchlist knows the proper casing.
+function queueCoName(c) {
+  const lc = String(c).toLowerCase();
+  return state.companies.find((x) => x.toLowerCase() === lc)
+    || ((state.apps.find((a) => (a.company || "").toLowerCase() === lc) || {}).company)
+    || c;
+}
+
+function renderQueuePanel() {
+  const box = $("#q-body");
+  if (!box) return;
+  const q = state.queue || {};
+  const cc = Math.min(6, Math.max(1, q.concurrency || 3));
+  const maxTries = q.max_attempts || 3;
+  const running = q.running || [];
+  const queued = q.queued || {};
+  const total = q.total ?? Object.values(queued).reduce((a, b) => a + b, 0);
+
+  // The limit drawn as six lane slots: lit up to the cap, pulsing where an
+  // application is running right now. Clicking a slot sets the cap to it, so
+  // the control and the live picture are the same object.
+  const lanes = Array.from({ length: 6 }, (_, i) => {
+    const k = i + 1;
+    const cls = k <= running.length ? " busy" : k <= cc ? " open" : "";
+    return `<button type="button" class="q-lane${cls}" data-cc="${k}"
+      aria-pressed="${k === cc}" title="Allow ${k} at once">${k}</button>`;
+  }).join("");
+  const paused = !!state.stats.paused;
+  const busyChip = running.length
+    ? `<span class="q-chip mono">${running.length} of ${cc} busy</span>`
+    : paused && total
+      ? `<span class="q-chip mono warn">paused</span>` : "";
+  const laneSec = `<div class="q-sec">
+    <div class="q-sec-h">Runs at once${busyChip}</div>
+    <div class="q-lanes" role="group" aria-label="How many applications run at once">${lanes}</div>
+    <div class="q-note">${paused && total
+      ? `Nothing is running because the pipeline is <b>paused</b>. Unpause in the
+         deck and these ${total} start straight away.`
+      : `Up to <b>${cc}</b> run at the same time, never two at the same company.
+         A new limit starts with the next application.`}</div>
+  </div>`;
+
+  // One row per company: running ones first with what queues behind them, then
+  // waiting ones, each carrying the exact reason it has not started.
+  const cos = [...new Set([...running, ...Object.keys(queued).filter((c) => queued[c] > 0)])];
+  cos.sort((a, b) => {
+    const ra = running.includes(a), rb = running.includes(b);
+    if (ra !== rb) return ra ? -1 : 1;
+    return (queued[b] || 0) - (queued[a] || 0) || String(a).localeCompare(String(b));
+  });
+  let freeLanes = Math.max(0, cc - running.length);
+  const rows = cos.map((c) => {
+    const n = queued[c] || 0;
+    const isRun = running.includes(c);
+    const name = esc(queueCoName(c));
+    let stateHtml, why = "";
+    if (isRun) {
+      stateHtml = `<span class="q-state live">applying now</span>`;
+      if (n) why = `<span class="q-why"
+        title="One ${name} application runs at a time. The rest wait behind it.">${n} behind it</span>`;
+    } else {
+      stateHtml = `<span class="q-state mono">${n} waiting</span>`;
+      if (freeLanes > 0) {
+        freeLanes -= 1;
+        why = `<span class="q-why next" title="A lane is free. It starts next.">starts next</span>`;
+      } else {
+        why = cc === 1
+          ? `<span class="q-why" title="Starts when the lane opens.">the lane is busy</span>`
+          : `<span class="q-why" title="Starts when one of the ${cc} lanes opens.">all ${cc} lanes busy</span>`;
+      }
+    }
+    return `<div class="q-co${isRun ? " running" : ""}">
+      <span class="q-dot"></span>
+      <span class="q-co-name">${name}</span>
+      ${stateHtml}${why}
+    </div>`;
+  }).join("");
+  const queueSec = `<div class="q-sec">
+    <div class="q-sec-h">Queue${total ? `<span class="q-chip mono">${total} waiting</span>` : ""}</div>
+    ${cos.length ? `<div class="q-cos">${rows}</div>`
+      : `<div class="q-idle">Nothing is queued or running. The Queue button on a
+          tailored card lines an application up here.</div>`}
+  </div>`;
+
+  const deadRows = state.dead.map((d) => {
+    const tries = d.attempts ?? maxTries;
+    const hist = (d.history || [])
+      .map((h) => `try ${h.attempt}: ${h.reason} (${when(h.at)})`).join("\n");
+    return `<div class="q-dead">
+      <div class="q-dead-m">
+        <div class="q-dead-t"><span class="q-dead-co">${esc(d.company || d.pk)}</span>
+          <span class="q-dead-role">${esc(d.title || "")}</span></div>
+        <div class="q-dead-why">${esc(d.reason || "no reason recorded")}</div>
+      </div>
+      <span class="q-tries mono" title="${esc(hist || `${tries} tries`)}">${tries}×</span>
+      <button class="q-revive" type="button" data-revive="${esc(d.pk)}"
+        title="Clear the failures and put it back in the queue">Revive</button>
+    </div>`;
+  }).join("");
+  const deadSec = state.dead.length ? `<div class="q-sec">
+    <div class="q-sec-h">Gave up<span class="q-chip mono bad">${state.dead.length}</span>
+      ${state.dead.length > 1 ? `<button class="cp-lk q-reviveall" type="button"
+        data-revive-all="1" title="Put every one of these back in the queue">Revive all</button>` : ""}</div>
+    <div class="q-deads">${deadRows}</div>
+  </div>` : "";
+
+  const keepScroll = box.scrollTop;   // 3s refreshes must not jump the list
+  box.innerHTML = laneSec + queueSec + deadSec;
+  box.scrollTop = keepScroll;
+  const foot = $("#q-foot");
+  if (foot) {
+    // Stop lives here as well as in the deck. This panel is where you look when
+    // you care about applications, and a control you have to go hunting for is
+    // one you will not find while the thing you want stopped is running.
+    foot.innerHTML = `<span class="q-foot-t">Environment failures, like a browser
+      conflict or a timeout, retry with backoff, up to ${maxTries} tries. A
+      failure about the application itself never retries.</span>`
+      + (running.length
+         ? `<button class="cp-lk cp-add-btn q-stop" id="q-stop" type="button"
+              title="Stop the ${running.length} application(s) being filled now. A part filled form is left open in your browser."
+              >Stop applying</button>`
+         : "");
+  }
+}
+
+async function setConcurrency(v) {
+  if (demoGuard()) return;
+  if (v === (state.queue || {}).concurrency) return;
+  const d = await post("/actions/apply-concurrency", { value: v });
+  if (d && d.ok) {
+    state.queue = { ...(state.queue || {}), concurrency: d.concurrency };
+    renderQueuePanel();
+    toast(`Limit set to ${d.concurrency}. It takes effect with the next application.`);
+  } else if (d) toast(d.error || "Could not change the limit.");
+}
+
+async function reviveDead(pk) {
+  if (demoGuard()) return;
+  const d = await post("/actions/apply-revive", pk ? { pk } : {});
+  if (d && d.ok) {
+    toast(d.revived
+      ? `Revived ${d.revived === 1 ? "it" : d.revived}. Back in the queue.`
+      : "Nothing to revive.");
+    loadQueue();
+    scheduleReload();
+  } else if (d) toast(d.error || "Could not revive.");
+}
+
 // --- wiring ----------------------------------------------------------------
 // Cap an open popover to the room actually below its button. Without this a
 // tall one (job preferences) hangs past the bottom of the window and its Save
@@ -1700,6 +2099,26 @@ window.addEventListener("resize", () => {
 function wire() {
   $("#btn-discover").addEventListener("click", runDiscover);
   $("#btn-stop").addEventListener("click", () => stopRun("discover"));
+  $("#qpicker").addEventListener("click", (e) => {
+    if (e.target.closest("#q-stop")) stopApplying();
+  });
+  $("#btn-stop-apply").addEventListener("click", stopApplying);
+  async function stopApplying() {
+    if (demoGuard()) return;
+    // Spelled out rather than a generic "are you sure": the cost is a form left
+    // part filled, and if it had already submitted the confirmation goes unread.
+    if (!confirm("Stop the applications in progress?\n\n"
+                 + "A form being filled is left open in your browser, unsubmitted. "
+                 + "If one had already gone through, check the portal, because its "
+                 + "confirmation will not be recorded.")) return;
+    const d = await post("/actions/stop-run", { what: "apply" });
+    if (!d || !d.ok) { toast("Could not stop the applications."); return; }
+    toast(d.sessions_killed
+      ? `Stopped ${d.sessions_killed} application(s). Check your browser tabs.`
+      : "Nothing was in progress.");
+    loadQueue && loadQueue();
+    pollStats();
+  }
   $("#btn-process").addEventListener("click", runProcess);
 
   // company picker (for discovery)
@@ -2179,6 +2598,30 @@ function wire() {
     } else cb.checked = !skip;
   });
 
+  // --- apply queue: who runs, who waits and why, what gave up ---
+  const qp = $("#qpicker"), qBtn = $("#btn-queue");
+  const closeQp = () => {
+    if (!qp.hidden) { qp.hidden = true; qBtn.setAttribute("aria-expanded", "false"); }
+  };
+  qBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const show = qp.hidden;
+    qp.hidden = !show;
+    qBtn.setAttribute("aria-expanded", String(show));
+    if (show) { renderQueuePanel(); fitPopover(qp); loadQueue(); }
+  });
+  qp.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const lane = e.target.closest("[data-cc]");
+    if (lane) { setConcurrency(Number(lane.dataset.cc)); return; }
+    if (e.target.closest("[data-revive-all]")) { reviveDead(""); return; }
+    const rv = e.target.closest("[data-revive]");
+    if (rv) reviveDead(rv.dataset.revive);
+  });
+  document.addEventListener("click", (e) => {
+    if (!qp.hidden && !e.target.closest(".qmgr")) closeQp();
+  });
+
   $("#llm-banner-x").addEventListener("click", () => {
     $("#llm-banner").hidden = true;
     if (!DEMO) post("/actions/clear-llm-error");
@@ -2204,6 +2647,33 @@ function wire() {
       state.coFilter = ""; state.query = ""; state.logKind = "all";
       $("#co-filter").value = ""; $("#co-filter").classList.remove("on");
       $("#search").value = "";
+      renderPane();
+      return;
+    }
+    // Pipeline stack: folds, company rollups, paging, and the jump to the
+    // Needs you tab. All of them re-render only; none of them post anything.
+    if (e.target.closest("[data-goto-needs]")) {
+      state.tab = "needs";
+      renderTabs(); renderPane();
+      return;
+    }
+    const secFold = e.target.closest("[data-sec-fold]");
+    if (secFold) {
+      const k = secFold.dataset.secFold;
+      state.secOpen[k] = !state.secOpen[k];
+      renderPane();
+      return;
+    }
+    const coFold = e.target.closest("[data-co-fold]");
+    if (coFold) {
+      const co = coFold.dataset.coFold;
+      state.openCos.has(co) ? state.openCos.delete(co) : state.openCos.add(co);
+      renderPane();
+      return;
+    }
+    const reveal = e.target.closest("[data-more]");
+    if (reveal) {
+      state.page[reveal.dataset.more] = Number(reveal.dataset.next);
       renderPane();
       return;
     }
@@ -2354,6 +2824,7 @@ function wire() {
     if (!$("#rmodal").hidden) closeResume();
     else if (!$("#drawer").hidden) closeDrawer();
     else if (!picker.hidden) closePicker();
+    else if (!qp.hidden) closeQp();
     else closeMenu();
   });
 }
@@ -2374,6 +2845,8 @@ async function boot() {
     renderAll();
   }
   loadCompanies().catch(() => {});
+  loadQueue();   // the workbar badge needs a first read; after this it only
+                 // refreshes on events, or every 3s while the panel is open
   if (!DEMO) {
     connectLive();                                      // live activity (SSE)
     setInterval(pollStats, 3000);                       // button/vitals state

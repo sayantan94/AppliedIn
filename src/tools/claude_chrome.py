@@ -509,6 +509,18 @@ def direct_board_url(url: str) -> str:
     return ""
 
 
+def _history_block(history: str) -> str:
+    """The employment and education block, or nothing when there is no résumé."""
+    if not history:
+        return ""
+    return ("\nEMPLOYMENT AND EDUCATION — some forms make you RETYPE this into "
+            "structured fields rather than accepting the résumé file. Use exactly "
+            "what is below: these employers, titles, dates and degrees, and these "
+            "bullets for any role description box. Never invent an entry, a date or "
+            "a description to fill a field. If a form needs something that is not "
+            "here, ask rather than guess.\n" + history + "\n")
+
+
 def _skills_block(skills: str) -> str:
     """The choose-your-skills block, or nothing when there is no résumé to back it."""
     if not skills:
@@ -517,6 +529,86 @@ def _skills_block(skills: str) -> str:
             "rather than type them, these are the ones the owner can defend. Pick "
             "every one the form offers that appears here, and add the ones it "
             "missed. Never pick a skill that is not in this list.\n" + skills + "\n")
+
+
+def _braced(text: str, start: int) -> tuple[str, int]:
+    """The contents of the {...} beginning at `start`, and the index after it.
+
+    A regex cannot do this: résumé bullets nest two and three levels deep
+    (\\textbf inside \\resumeItem inside \\small), and a pattern that allows one
+    level silently drops exactly the richest lines — which are the ones worth
+    having.
+    """
+    if start >= len(text) or text[start] != "{":
+        return "", start
+    depth, i = 0, start
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:i], i + 1
+        i += 1
+    return text[start + 1:], len(text)
+
+
+def _args(text: str, macro: str) -> list[list[str]]:
+    """Every occurrence of `macro` with its brace arguments, braces matched."""
+    out, i, tok = [], 0, "\\" + macro
+    while (j := text.find(tok, i)) != -1:
+        k = j + len(tok)
+        args = []
+        while k < len(text) and text[k] == "{":
+            arg, k = _braced(text, k)
+            args.append(arg)
+        out.append(args)
+        i = k if k > j else j + len(tok)
+    return out
+
+
+def _resume_history(resume_tex: str) -> str:
+    """Employment and education from the tailored résumé, as plain text.
+
+    Workday and its relatives do not just take a résumé file: they ask the
+    candidate to RETYPE their history into structured fields, one entry per role,
+    with separate date segments, and that page is what a recruiter's search
+    queries. The session cannot read the résumé file — its tools are the browser
+    and Write — so without this it reached that page with nothing to type and left
+    it empty or, worse, guessed.
+
+    Bullets are included because those forms have a "Role Description" box, and a
+    description invented to fill it is a claim nobody can stand behind.
+    """
+    if not resume_tex:
+        return ""
+
+    def _clean(t: str) -> str:
+        t = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", t)
+        t = re.sub(r"\\[a-zA-Z]+\*?", " ", t)
+        t = t.replace("{", "").replace("}", "").replace("---", "—").replace("--", "–")
+        t = t.replace("\\&", "&").replace("\\%", "%").replace("\\$", "$")
+        return re.sub(r"[ \t]+", " ", t).strip(" ,;")
+
+    out: list[str] = []
+    for label, head in (("EMPLOYMENT", "Experience"), ("EDUCATION", "Education")):
+        m = re.search(rf"\\section\{{{head}\}}(.*?)(?=\\section\{{|\Z)", resume_tex, re.S)
+        if not m:
+            continue
+        rows: list[str] = []
+        for block in re.split(r"\\resumeSubheading(?=\{)", m.group(1))[1:]:
+            head_args = _args("\\resumeSubheading" + block.split("\\resumeItem")[0],
+                              "resumeSubheading")
+            parts = [c for a in (head_args[0] if head_args else [])[:4] if (c := _clean(a))]
+            if not parts:
+                continue
+            rows.append("  " + " | ".join(parts))
+            for args in _args(block, "resumeItem")[:6]:
+                if args and (txt := _clean(args[0])):
+                    rows.append("      - " + txt[:300])
+        if rows:
+            out.append(label + "\n" + "\n".join(rows))
+    return "\n\n".join(out)[:4500]
 
 
 def _resume_skills(resume_tex: str) -> str:
@@ -542,7 +634,7 @@ def _resume_skills(resume_tex: str) -> str:
 
 
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str,
-          resume_skills: str = "") -> str:
+          resume_skills: str = "", resume_history: str = "") -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
     resume_line = (f"""
 RÉSUMÉ — attach {resume_path}
@@ -589,7 +681,7 @@ deliberating and spend your attention on the rest of the form:
 EVERY APPROVED ANSWER — the only facts you may use:
 {json.dumps(facts, indent=1)[:9000]}
 {resume_line}{site_rules}
-{_skills_block(resume_skills)}
+{_skills_block(resume_skills)}{_history_block(resume_history)}
 
 RULES — these are not style preferences, they decide whether this application is
 honest:
@@ -695,7 +787,7 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
 
     report, problem = await run_task(
         _task(url, company, facts, resume_path, _site_rules(url, company),
-              _resume_skills(resume_tex)),
+              _resume_skills(resume_tex), _resume_history(resume_tex)),
         report_key="outcome",
         model=(getattr(get_settings(), "chrome_model", "") or ""),
         timeout_s=TIMEOUT_S, kind="apply",

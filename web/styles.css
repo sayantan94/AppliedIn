@@ -884,63 +884,7 @@ button:disabled { cursor: default; }
 }
 .chip .n { opacity: 0.65; margin-left: 5px; font-variant-numeric: tabular-nums; }
 
-/* ─── Pipeline board (kanban lanes) ──────────────────────────────────────── */
-.kboard {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(164px, 1fr);
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 6px;
-  scrollbar-width: thin;
-  align-items: start;
-}
-.klane {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  min-height: 140px;
-  display: flex;
-  flex-direction: column;
-}
-.kl-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 9px 11px;
-  border-bottom: 1px solid var(--border);
-  cursor: default;
-}
-.kl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
-.klane.ln-found .kl-dot { background: var(--info); }
-.klane.ln-ready .kl-dot { background: color-mix(in srgb, var(--scan) 60%, var(--faint)); }
-.klane.ln-live .kl-dot { background: var(--run); animation: wippulse 1.4s ease-in-out infinite; }
-.klane.ln-ok .kl-dot { background: var(--scan); }
-.klane.ln-warn .kl-dot { background: var(--run); }
-.klane.ln-flag .kl-dot { background: var(--info); }
-.klane.ln-bad .kl-dot { background: var(--bad); }
-.kl-name { font-size: 12.5px; font-weight: 600; }
-.kl-n {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--card-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  min-width: 20px;
-  padding: 0 6px;
-  text-align: center;
-}
-.kl-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 9px;
-  /* A lane with 100+ cards must scroll ITSELF — never stretch the page. */
-  max-height: min(62vh, 640px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
+/* ─── Pipeline cards (shared by the ranked stack) ────────────────────────── */
 .kl-empty { color: var(--faint); text-align: center; font-size: 12px; padding: 12px 0 8px; }
 .kcard {
   background: var(--card-2);
@@ -974,8 +918,6 @@ button:disabled { cursor: default; }
   margin-top: 9px;
   flex-wrap: wrap;
 }
-.knote { margin-top: 10px; font-size: 11.5px; color: var(--faint); }
-
 /* ─── Applications table ─────────────────────────────────────────────────── */
 .tablewrap {
   overflow-x: auto;
@@ -1809,7 +1751,6 @@ a.rowlk, button.rowlk { display: inline-block; }
   .act-process { flex: 1; justify-content: center; }
   .deck-right { margin-left: auto; }
   .deck-vitals .vital { min-width: 0; }
-  .kboard { grid-auto-columns: minmax(190px, 220px); }
 }
 @media (max-width: 560px) {
   .deck-breakdown { display: none; }
@@ -1882,7 +1823,6 @@ a.rowlk, button.rowlk { display: inline-block; }
   padding: 3px 9px;
 }
 .cp-runone:hover { text-decoration: none; background: color-mix(in srgb, var(--scan) 12%, transparent); }
-.klane.ln-captcha .kl-dot { background: var(--info); animation: wippulse 1.4s ease-in-out infinite; }
 
 /* Single-role tailor panel + per-company title filter input */
 
@@ -1987,19 +1927,6 @@ a.rowlk, button.rowlk { display: inline-block; }
   color: var(--muted);
 }
 .kc-queue:hover { border-color: var(--scan); color: var(--fg); }
-.kl-runall {
-  margin-left: auto;
-  flex: none;
-  white-space: nowrap;
-  border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
-  background: color-mix(in srgb, var(--scan) 12%, transparent);
-  color: var(--scan);
-  border-radius: var(--r-sm);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 9px;
-}
-.kl-runall:hover { background: color-mix(in srgb, var(--scan) 22%, transparent); }
 
 /* Live "what it's doing now" line on actively-working cards. */
 .kc-live {
@@ -2263,3 +2190,514 @@ a.rowlk, button.rowlk { display: inline-block; }
   font-size: 13px; line-height: 1.55; white-space: pre-wrap;
   color: var(--bad, #b3261e);
 }
+
+/* ─── Apply queue ──────────────────────────────────────────────────────────
+   Who is applying now, who is waiting and exactly why, and what gave up.
+   Same popover species as Profiles / Job preferences. Green is the one accent
+   (a lane in use, a revive); red appears only where something is dead. */
+.qmgr { position: relative; display: inline-flex; }
+.queuebtn.live {
+  color: var(--scan);
+  border-color: color-mix(in srgb, var(--scan) 40%, var(--border));
+}
+/* The count borrows the shared badge; it turns red only when something is on
+   the dead list, so a glowing workbar says which of the two questions to ask. */
+.queuebtn .skip-count.dead {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: var(--bad);
+}
+.qpicker { left: 0; right: auto; width: min(360px, calc(100vw - 32px)); }
+.q-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 4px 12px 12px;
+}
+.q-sec { display: flex; flex-direction: column; gap: 7px; }
+.q-sec-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.q-sec:first-child .q-sec-h { border-top: 0; padding-top: 2px; }
+.q-sec-h .cp-lk { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.q-chip {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: none;
+  line-height: 1.7;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--faint);
+}
+.q-chip.bad {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 42%, transparent);
+  background: color-mix(in srgb, var(--bad) 9%, transparent);
+}
+
+/* The concurrency limit drawn as the six possible lanes: lit up to the cap,
+   pulsing where an application runs right now, dim past it. Clicking a slot
+   sets the cap there, so the setting and the live picture are one control. */
+.q-lanes { display: flex; gap: 5px; }
+.q-lane {
+  flex: 1 1 0;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--card-2);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.q-lane:hover { border-color: var(--border-2); color: var(--fg); }
+.q-lane.open {
+  border-color: color-mix(in srgb, var(--scan) 40%, var(--border));
+  background: color-mix(in srgb, var(--scan) 9%, transparent);
+  color: var(--scan);
+}
+.q-lane.busy {
+  border-color: var(--scan);
+  background: color-mix(in srgb, var(--scan) 26%, transparent);
+  color: var(--fg);
+  font-weight: 600;
+  animation: lanepulse 1.8s ease-in-out infinite;
+}
+@keyframes lanepulse { 50% { background: color-mix(in srgb, var(--scan) 12%, transparent); } }
+/* the cap itself gets a doubled edge, so the boundary reads even mid pulse */
+.q-lane[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--scan); }
+.q-note { font-size: 11px; line-height: 1.5; color: var(--faint); }
+.q-note b { color: var(--muted); font-weight: 600; }
+
+/* One row per company. The right edge chip is the answer to "why has mine
+   not started": behind its own company, or out of lanes, or next. */
+.q-cos { display: flex; flex-direction: column; gap: 2px; }
+.q-co {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+}
+.q-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  opacity: 0.45;
+}
+.q-co.running .q-dot {
+  background: var(--scan);
+  opacity: 1;
+  animation: wippulse 1.4s ease-in-out infinite;
+}
+.q-co-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-state { flex: none; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.q-state.live { color: var(--scan); font-weight: 600; }
+.q-why {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  line-height: 1.6;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--faint);
+  white-space: nowrap;
+  cursor: default;
+}
+.q-why.next {
+  color: var(--scan);
+  border-color: color-mix(in srgb, var(--scan) 40%, transparent);
+  background: color-mix(in srgb, var(--scan) 8%, transparent);
+}
+.q-idle { font-size: 12px; line-height: 1.55; color: var(--faint); }
+
+/* The dead list: reason and try count in the open, revive one click away. */
+.q-deads { display: flex; flex-direction: column; gap: 6px; }
+.q-dead {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--bad) 22%, var(--border));
+  border-left: 2px solid var(--bad);
+  border-radius: var(--r-sm);
+  background: var(--card);
+}
+.q-dead-m { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.q-dead-t { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.q-dead-co { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.q-dead-role {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-dead-why { font-size: 11px; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+.q-tries {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.6;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+  border-radius: 999px;
+  color: var(--bad);
+  cursor: help;
+}
+.q-revive {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+  color: var(--scan);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+}
+
+/* ─── Pipeline: the ranked stack ───────────────────────────────────────────
+   Eight equal lanes treated five blocking questions and 575 raw finds as
+   peers. The board is now a vertical stack ordered by what needs the owner:
+   gates on top, approvals next, live work, confirmations, then the backlog
+   as a per company rollup, and closed work folded away with its count on
+   the fold. One accent carries attention; everything else stays neutral. */
+.pstack { display: flex; flex-direction: column; gap: 12px; }
+.psec {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.ps-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  flex-wrap: wrap;
+  text-align: left;
+}
+.psec > .ps-head:not(:last-child) { border-bottom: 1px solid var(--border); }
+button.ps-head {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button.ps-head:hover { background: var(--card-2); }
+.ps-name { font-size: 13px; font-weight: 600; }
+.ps-n {
+  min-width: 22px;
+  text-align: center;
+  font-size: 11px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--muted);
+}
+.ps-n.hot {
+  background: var(--scan);
+  border-color: var(--scan);
+  color: var(--bg);
+  font-weight: 700;
+}
+.ps-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-link {
+  flex: none;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 12px;
+  white-space: nowrap;
+}
+.ps-link:hover { color: var(--fg); border-color: var(--border-2); }
+.ps-link.on {
+  color: var(--scan);
+  border-color: color-mix(in srgb, var(--scan) 45%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+}
+.ps-link.on:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
+.ps-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); opacity: 0.5; }
+.ps-dot.on { background: var(--scan); opacity: 1; }
+.ps-dot.on.live { animation: wippulse 1.4s ease-in-out infinite; }
+.ps-caret {
+  flex: none;
+  width: 10px;
+  font-size: 10px;
+  color: var(--faint);
+  display: inline-flex;
+  justify-content: center;
+}
+.ps-chip {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.7;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ps-chip.bad {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
+}
+.ps-sub {
+  padding: 10px 14px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.ps-more {
+  margin: 6px 14px 12px 34px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+}
+.ps-more:hover { color: var(--fg); border-color: var(--border-2); }
+
+/* Needs you: the one section allowed to shout, and only while it holds work. */
+.ps-needs.has { border-color: color-mix(in srgb, var(--scan) 50%, var(--border)); }
+.ps-needs.has > .ps-head { background: color-mix(in srgb, var(--scan) 8%, var(--card)); }
+.ps-needs.has .ps-dot.on { animation: wippulse 2s ease-in-out infinite; }
+
+/* Card grids for the small, card worthy states. */
+.ps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+}
+.ncard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--scan);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.13s, transform 0.13s, box-shadow 0.13s;
+}
+.ncard:hover {
+  border-color: var(--border-2);
+  border-left-color: var(--scan);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-1);
+}
+.nc-co { font-size: 13px; font-weight: 600; }
+.nc-role {
+  display: block;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nc-q {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.nc-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+.nc-foot .kc-retry { margin-left: auto; }
+.nc-gate {
+  font-size: 10px;
+  line-height: 1.7;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Ready to apply keeps the location tiers, laid out as a grid rather than a
+   narrow lane. */
+.ps-ready-body { padding: 2px 14px 12px; }
+.ps-ready-body .locbar { padding: 8px 0 2px; }
+.ps-ready-body .bucket { margin-bottom: 10px; }
+.ps-ready-body .bk-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+/* Dense rows: the handle for one record in a big state. */
+.jrows { display: flex; flex-direction: column; padding: 4px 0; }
+.jrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.jrow + .jrow { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.jrow:hover { background: var(--card-2); }
+.jr-score { flex: none; width: 72px; display: inline-flex; }
+.jr-none { color: var(--faint); }
+.jr-mark { flex: none; width: 16px; text-align: center; color: var(--scan); font-weight: 700; }
+.jr-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); opacity: 0.5; }
+.jr-dot.bad { background: var(--bad); opacity: 1; }
+.jr-co {
+  flex: none;
+  max-width: 150px;
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jr-title {
+  flex: 1 1 auto;
+  min-width: 120px;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jr-loc,
+.jr-why {
+  flex: 0 1 auto;
+  max-width: 200px;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jr-when {
+  flex: none;
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.jrow .pill { flex: none; }
+.jrow .kc-retry {
+  flex: none;
+  margin-left: 0;
+  min-height: 24px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+/* Found: one row per company until opened. */
+.fgroups { padding: 2px 0 6px; }
+.fg-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 14px;
+  background: none;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.fgroup:first-child .fg-head { border-top: 0; }
+.fg-head:hover { background: var(--card-2); }
+.fg-co { font-size: 12.5px; font-weight: 600; }
+.fg-n {
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+.fg-best {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.fg-rows .jrow { padding-left: 34px; }
+
+@media (max-width: 700px) {
+  .jr-loc, .jr-why, .fg-best { display: none; }
+  .jr-co { max-width: 110px; }
+}
+.q-revive:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
+
+/* Stop applying, inside the queue panel. Destructive, so it reads as the
+   exception: outlined in --bad, never competing with the lane controls. */
+#q-foot { display: flex; align-items: flex-start; gap: 10px; }
+.q-foot-t { flex: 1; }
+.q-stop {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+  color: var(--bad);
+  white-space: nowrap;
+}
+.q-stop:hover { background: color-mix(in srgb, var(--bad) 20%, transparent); border-color: var(--bad); }
+.q-chip.warn { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }

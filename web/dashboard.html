@@ -115,6 +115,13 @@
               title="Stop the discovery run in progress. An application already being filled is not touched.">
               <span class="act-label">Stop scan</span>
             </button>
+            <!-- Separate from Stop scan on purpose. Ending a scan costs a few
+                 minutes; ending an application leaves a half filled form, so the
+                 two must never be one button. Shown only while one is running. -->
+            <button id="btn-stop-apply" class="act act-stop" type="button" hidden
+              title="Stop the applications in progress. A form already part filled is left open in your browser.">
+              <span class="act-label">Stop applying</span>
+            </button>
 
             <span class="act-arrow" aria-hidden="true">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
@@ -259,6 +266,16 @@
                       <button id="rp-go-text" class="cp-lk cp-add-btn" type="button">Tailor résumé</button>
                     </div>
                   </div>
+                </div>
+              </div>
+              <div class="qmgr" id="qmgr">
+                <button id="btn-queue" class="skipbtn queuebtn" aria-haspopup="true" aria-expanded="false"
+                  title="Applications running now, the ones waiting their turn, and the ones that gave up">⇶ Apply queue<span
+                    id="q-count" class="skip-count mono" hidden>0</span></button>
+                <div id="qpicker" class="copicker qpicker" hidden>
+                  <div class="cp-role-h">Apply queue</div>
+                  <div id="q-body" class="q-body"></div>
+                  <div class="cp-foot" id="q-foot"></div>
                 </div>
               </div>
               <div class="profmgr" id="profmgr">

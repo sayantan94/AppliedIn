@@ -65,6 +65,26 @@ def assisted() -> bool:
     return apply_mode() == "assisted"
 
 
+def apply_concurrency() -> int:
+    """How many applications may run AT ONCE, always to different companies.
+
+    A runtime flag rather than an env var, because the right number depends on
+    what the machine is doing right now: three browser sessions is comfortable
+    while you are away, and one is what you want when you are using the laptop.
+    Clamped to 1..6 — the per company lease already prevents the collision that
+    matters, and beyond a handful the sessions simply fight for the screen.
+    """
+    raw = get_flag("apply_concurrency", "")
+    if not raw:
+        import os
+
+        raw = os.environ.get("APPLIEDIN_APPLY_CONCURRENCY", "3")
+    try:
+        return max(1, min(6, int(raw)))
+    except (TypeError, ValueError):
+        return 3
+
+
 def browser_headless() -> bool:
     """Whether apply runs Chrome HEADLESS (no visible windows). Runtime flag
     overrides the env default. Note: a CAPTCHA / human handoff can't open a

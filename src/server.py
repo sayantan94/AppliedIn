@@ -96,6 +96,16 @@ def _rescreen_company(name: str) -> int:
     return moved
 
 
+def _applying_now() -> int:
+    """Applications being filled at this moment, from the queue's leases."""
+    try:
+        from core.apply_queue import ApplyQueue
+
+        return len(ApplyQueue(make_stores(get_settings()).tracking.r).depth()["running"])
+    except Exception:  # noqa: BLE001 — a stat must never break the dashboard
+        return 0
+
+
 def _throttle_state() -> dict:
     """Whether model calls are being held back, and for how long.
 
@@ -332,6 +342,11 @@ def create_app() -> FastAPI:
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _discovery_running(), "processing": _RUNNING["process"],
+                # How many applications are being filled right now. In /stats
+                # rather than only in /apply-queue because the deck needs it every
+                # poll to know whether to offer Stop applying, and that panel is
+                # usually closed.
+                "applying": _applying_now(),
                 "throttle": _throttle_state(),
                 # Empty = healthy. ["daemon"] = NOTHING is running the pipeline
                 # (e.g. someone started `python -m server`, which serves this very
@@ -1086,12 +1101,18 @@ def create_app() -> FastAPI:
         flags would report success and then have the next run refused by the lock,
         which reads as the stop having done nothing.
         """
+        import logging
+
         from discovery import handler as _handler
         from tools.claude_chrome import kill_live_sessions
 
+        log = logging.getLogger("server")
+        stores = make_stores(settings)
+
         what = ((body or {}).get("what") or "discover").lower()
-        if what not in ("discover", "process", "all"):
-            return {"ok": False, "error": "what must be discover, process or all"}
+        if what not in ("discover", "process", "apply", "all"):
+            return {"ok": False,
+                    "error": "what must be discover, process, apply or all"}
 
         was = {"discover": _RUNNING["discover"], "process": _RUNNING["process"]}
         killed = 0
@@ -1107,13 +1128,71 @@ def create_app() -> FastAPI:
                 pass
         if what in ("process", "all"):
             _RUNNING["process"] = False
-        if what == "all":
+        if what in ("apply", "all"):
+            # Ending an application mid form is the one stop with a real cost: the
+            # page may be half filled, and if it had already been submitted the
+            # confirmation is now unread. It is still the owner's call to make, so
+            # the button exists — but nothing else in the product reaches here.
             killed += kill_live_sessions("apply")
+            from core.apply_queue import ApplyQueue
+
+            q = ApplyQueue(stores.tracking.r)
+            freed = q.reset_leases()
+            log.info("apply stopped by owner: %d session(s), %d lease(s) freed",
+                     killed, freed)
 
         from core.events import emit
         emit("running", agent="daemon",
              detail=f"{what} stopped by you — {killed} browser session(s) ended")
         return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
+
+    @app.get("/apply-queue")
+    def apply_queue_state():
+        """The application queue: what is waiting, per company, and what is
+        running right now. `running` is the answer to "why has mine not started":
+        either the limit is reached, or that company already has one going."""
+        from core import flags
+        from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
+
+        q = ApplyQueue(make_stores(settings).tracking.r)
+        return {**q.depth(), "concurrency": flags.apply_concurrency(),
+                "max_attempts": MAX_ATTEMPTS}
+
+    @app.post("/actions/apply-concurrency")
+    def set_apply_concurrency(body: dict):
+        """How many applications may run at once, across DIFFERENT companies.
+        Takes effect on the next application rather than needing a restart."""
+        from core import flags
+
+        try:
+            n = int((body or {}).get("value"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "value must be a number"}
+        flags.set_flag("apply_concurrency", str(max(1, min(6, n))))
+        return {"ok": True, "concurrency": flags.apply_concurrency()}
+
+    @app.get("/apply-queue/dead")
+    def apply_dead_letters():
+        """Applications the queue gave up on, with every attempt recorded."""
+        from core.apply_queue import ApplyQueue
+
+        rows = ApplyQueue(make_stores(settings).tracking.r).dead_letters()
+        stores = make_stores(settings)
+        for r in rows:                       # a pk alone is not readable on a card
+            row = stores.tracking.get(r.get("pk", "")) or {}
+            r["title"] = row.get("title", "")
+            r["status"] = row.get("status", "")
+        return {"dead": rows}
+
+    @app.post("/actions/apply-revive")
+    def apply_revive(body: dict | None = None):
+        """Put dead lettered applications back. `pk` for one, omitted for all.
+        Attempts reset: asking again is a new decision, not a continuation."""
+        from core.apply_queue import ApplyQueue
+
+        pk = ((body or {}).get("pk") or "").strip()
+        n = ApplyQueue(make_stores(settings).tracking.r).revive(pk)
+        return {"ok": True, "revived": n}
 
     @app.post("/actions/queue-apply/{pk}")
     def queue_apply(pk: str):
@@ -1135,7 +1214,8 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": f"already {row.get('status')} — refusing to re-apply"}
         stores.tracking.set_status(pk, Status.TAILORED, fail_reason="", skip_reason="",
                                    gate_reason="approval")
-        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        from core.apply_queue import ApplyQueue
+        ApplyQueue(stores.tracking.r).put(pk, row.get("company", ""))
         from core.events import emit
         emit("running", pk=pk, agent="applier", detail="queued for apply…",
              url=row.get("jd_url", ""))
