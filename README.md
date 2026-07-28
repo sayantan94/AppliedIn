@@ -28,6 +28,8 @@ every submission.
 
 ![AppliedIn pipeline dashboard showing jobs moving from found to tailored and applied](docs/screenshots/readme-pipeline-light-v2.png)
 
+![AppliedIn pipeline dashboard showing jobs moving from found to tailored and applied](docs/screenshots/readme-pipeline-light-v3.png)
+
 > Start with one job URL. You can see a tailored resume before configuring
 > discovery or browser automation.
 

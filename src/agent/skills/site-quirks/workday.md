@@ -64,6 +64,7 @@ verified.
 what recruiter searches match on, so it is worth filling properly rather than
 accepting whatever the parser guessed.
 
+
 - Add every skill the SKILLS THE RÉSUMÉ EVIDENCES list in your task supports.
   Work through that list rather than improvising: it is the set the owner can
   defend in an interview.
@@ -71,6 +72,7 @@ accepting whatever the parser guessed.
   that is what the search is looking for.
 - Remove anything the parser invented that is not in the list. A skill is a claim
   about a person.
+- Do not get stuck in the skill for long time, add the skills tha are best fit and move on to next step.
 
 **Résumé.** Even with autofill, confirm the attached filename matches the résumé
 given for this task. A profile that already has an older résumé will show that one
