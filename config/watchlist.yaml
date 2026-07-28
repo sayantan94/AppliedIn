@@ -16,6 +16,11 @@ companies:
     mode: gated
   - name: Meta
     careers_url: https://www.metacareers.com/jobs
+    # browser: metacareers.com refuses a scripted request outright, answering 400
+    # and then 429, and serves the same page normally to a real session. The
+    # fallback would reach the browser anyway, but only after spending a refused
+    # request and logging a warning on every single run.
+    discovery: browser
     mode: gated
   - name: Mistral AI
     careers_url: https://mistral.ai/careers

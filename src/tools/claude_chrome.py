@@ -96,6 +96,114 @@ opening a new one. Only report a browser problem if that recovery also fails.
 """
 
 
+# Discovery YIELDS to an application. Two sessions reading pages coexist fine, and
+# that is why there is no blanket lock — but a crawl is not a reader: it opens
+# tabs, types into a search box, scrolls and navigates, all in the same Chrome
+# where a form is being filled. It steals the active tab, and the apply is left
+# screenshotting somebody else's page.
+#
+# The two are not equal, which is what makes this easy to decide. A crawl is
+# disposable: delay it and nothing is lost but a few minutes. An application is a
+# form part filled under a real name, and disturbing it can leave a submission
+# nobody can account for. So the crawl waits.
+#
+# Only "crawl" waits. A "jd" read is part of an apply's own flow, so making it
+# wait for other applications would serialise applies and undo the concurrency
+# that is wanted.
+_YIELDS_TO_APPLY = frozenset({"crawl"})
+_YIELD_POLL_S = 5
+_YIELD_MAX_S = 1800     # give up waiting after 30 minutes and run anyway
+
+
+def applies_running() -> int:
+    """How many applications are being filled right now."""
+    return sum(1 for k in _LIVE.values() if k == "apply")
+
+
+# The openings of every reason _envelope_reason can produce. These describe the
+# INFRASTRUCTURE rather than the application, so they are complete sentences on
+# their own and must not be introduced as "the agent finished without confirming
+# a submission" — the agent did not finish, it was cut off.
+INFRA_OPENINGS = (
+    "Rate limited by the model API",
+    "The model API returned",
+    "The session was cut off",
+)
+
+
+def is_infrastructure(detail: str) -> bool:
+    """Whether a failure detail is about the plumbing, not the application."""
+    return (detail or "").strip().startswith(INFRA_OPENINGS)
+
+
+# SIGTERM. Every cluster of these in the log is followed within seconds by
+# "daemon up": they are in-flight sessions killed by a restart or by Stop, not
+# anything that happened on the page.
+_SIGTERM = (143, -15)
+
+
+def _envelope_reason(stdout: str, returncode: int | None = None) -> str:
+    """A plain sentence for how the session ENDED, from its own result envelope.
+
+    `claude -p --output-format json` closes with a record carrying `subtype` and
+    `terminal_reason`. When there is no report, that record is the only account of
+    what happened, and it distinguishes a run that was cut off from one that
+    genuinely could not do the job.
+    """
+    import json as _json
+
+    # Match on ANY of the envelope's own markers, not one key. Requiring "subtype"
+    # meant an envelope that carried only terminal_reason was skipped, and the
+    # session was reported as unexplained when the explanation was right there.
+    marks = ('"subtype"', '"terminal_reason"', '"api_error_status"', '"num_turns"')
+    tail = ""
+    for line in reversed(stdout.strip().splitlines()):
+        t = line.lstrip()
+        if t.startswith("{") and any(m in t for m in marks):
+            tail = line
+            break
+    if not tail:
+        return ""
+    try:
+        env = _json.loads(tail)
+    except Exception:  # noqa: BLE001
+        return ""
+
+    reason = str(env.get("terminal_reason") or "")
+    subtype = str(env.get("subtype") or "")
+    turns = env.get("num_turns")
+    status = env.get("api_error_status")
+
+    # Checked before the envelope's own fields: a killed session still writes
+    # `aborted_streaming`, so reading only the envelope reports a restart as a
+    # connection failure and sends the owner looking at their network.
+    if returncode in _SIGTERM:
+        return ("The daemon was restarted (or Stop was pressed) while this was "
+                "running" + (f", after {turns} steps" if turns else "")
+                + ". Nothing was submitted, and it goes back on the queue.")
+
+    # The API status is checked FIRST because it is the more specific fact. Almost
+    # every aborted stream here is a 429 underneath, and reporting it as a generic
+    # connection failure sends the owner looking at their network when the answer
+    # is that too much was being asked at once.
+    if status == 429:
+        return ("Rate limited by the model API partway through"
+                + (f", after {turns} steps" if turns else "")
+                + ". Nothing was submitted. This retries by itself; if it keeps "
+                  "happening, lower how many applications run at once.")
+    if status:
+        return (f"The model API returned {status} partway through. Nothing was "
+                "submitted; this retries by itself.")
+    if reason == "aborted_streaming" or subtype == "error_during_execution":
+        return ("The session was cut off partway through"
+                + (f" after {turns} steps" if turns else "")
+                + ". That is a connection failure rather than a problem with the "
+                  "application, so nothing was submitted and it is worth retrying.")
+    if subtype and subtype != "success":
+        return f"The session ended as {subtype!r} without reporting what it did."
+    return ""
+
+
 def _is_browser_conflict(text: str) -> bool:
     """True when a session failed because another one held the browser."""
     low = (text or "").lower()
@@ -196,6 +304,22 @@ async def run_task(task: str, *, report_key: str, model: str = "",
     if not ok:
         return {}, why
 
+    if kind in _YIELDS_TO_APPLY and applies_running():
+        waited = 0
+        log.info("%s session waiting: %d application(s) are being filled",
+                 kind, applies_running())
+        while applies_running() and waited < _YIELD_MAX_S:
+            await asyncio.sleep(_YIELD_POLL_S)
+            waited += _YIELD_POLL_S
+        if applies_running():
+            # Running anyway rather than dropping the work: half an hour of
+            # applications means something is wedged, and a scan that silently
+            # never happens is worse than one that risks a collision.
+            log.warning("%s session waited %ds and is starting while an application "
+                        "is still running", kind, waited)
+        else:
+            log.info("%s session waited %ds for the browser", kind, waited)
+
     return await _run_task_impl(task, report_key=report_key, model=model,
                                 timeout_s=timeout_s, allow_dirs=allow_dirs, kind=kind)
 
@@ -290,8 +414,27 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
             "it produced no output at all"
         return {}, f"claude --chrome failed (exit {proc.returncode}): {tail[:200]}"
     if not report:
-        return {}, ("The Chrome session ended without a structured result, so what "
-                    "it did is unknown. Check the browser.")
+        # The envelope says WHY, and it is usually not the agent's doing. A session
+        # whose stream aborted is a transport failure: the run was cut off partway,
+        # so "it did not report" describes the symptom and blames the wrong thing.
+        # Naming it matters because the two need opposite responses — retry the
+        # transport, investigate the page.
+        why = _envelope_reason(stdout, proc.returncode)
+        if "Rate limited" in why:
+            # Same banner the orchestration rate limit uses. A single card saying
+            # "rate limited" reads as bad luck; the banner is what makes a pattern
+            # visible, and the pattern is the thing worth acting on.
+            try:
+                from core import flags
+
+                flags.note_llm_error(
+                    "browser", "Applications are being rate limited by the model "
+                    "API and cut off partway through. They retry by themselves. "
+                    "Lower how many run at once in the apply queue if it persists.")
+            except Exception:  # noqa: BLE001 — a banner must never break an apply
+                log.debug("could not record the rate limit banner", exc_info=True)
+        return {}, (why or "The Chrome session ended without a structured result, "
+                           "so what it did is unknown. Check the browser.")
 
     # A session can produce a perfectly well-formed report whose CONTENT is "I
     # could read the page but every click failed". That is the browser being held
@@ -698,6 +841,14 @@ honest:
    written in plain sentences. Do not use dashes as connectors. Make it
    genuinely useful to a reader deciding whether to interview them.
 5. Remember to click each text box / radio button / checkbox after selecting
+6. If the portal offers "Continue with Google" (or Sign in with Google), PREFER IT
+   over creating an account, but ONLY when the Google account it is already signed
+   in as matches the email this application is going out under, shown in the
+   answers above. Check the account it names before clicking through.
+   If it names a different account, or offers an account chooser, or asks for a
+   password: STOP and report it. Do not switch accounts, do not sign in, do not
+   create one. An application sent from the wrong address reaches the wrong inbox
+   and cannot be recalled, and a password is never yours to type.
 
 WORK IN PASSES, NOT FIELD BY FIELD. Read the whole form once and note what every
 field needs. Then fill everything you can in as few actions as possible: all the

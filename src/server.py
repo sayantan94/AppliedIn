@@ -806,12 +806,26 @@ def create_app() -> FastAPI:
                 waiting = sum(1 for r in stores.tracking.all()
                               if (r.get("company") or "").strip().lower() == name.strip().lower()
                               and r.get("status") == "tailored")
+                # Distinguish "nothing matched" from "nothing was READ". They look
+                # the same from here and mean opposite things: the first is a
+                # preferences question the owner can act on, the second is a
+                # careers page that could not be reached, and telling them to
+                # loosen their preferences would waste their time and never work.
+                total = sum(1 for r in stores.tracking.all()
+                            if (r.get("company") or "").strip().lower()
+                            == name.strip().lower()
+                            and not str(r.get("pk", "")).startswith("meta#"))
+                if waiting:
+                    msg = f"{name}: {waiting} tailored job(s) awaiting your approval"
+                elif total:
+                    msg = (f"{name}: run complete — nothing NEW matched your "
+                           f"preferences ({total} already tracked)")
+                else:
+                    msg = (f"{name}: run complete — no postings could be read from "
+                           f"this careers page at all. That is a reading problem "
+                           f"rather than a preferences one; check the Logs view")
                 emit("applied", agent="workflow", company=name,
-                     pk=f"meta#run#{name.lower()}",
-                     detail=(f"{name}: {waiting} tailored job(s) awaiting your approval"
-                             if waiting else
-                             f"{name}: run complete — no new roles matched your "
-                             f"preferences this time"))
+                     pk=f"meta#run#{name.lower()}", detail=msg)
             except Exception:
                 logging.getLogger("server").exception("run-company process failed")
             finally:
@@ -1155,7 +1169,8 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
 
         q = ApplyQueue(make_stores(settings).tracking.r)
-        return {**q.depth(), "concurrency": flags.apply_concurrency(),
+        return {**q.depth(), "pending": q.pending(),
+                "concurrency": flags.apply_concurrency(),
                 "max_attempts": MAX_ATTEMPTS}
 
     @app.post("/actions/apply-concurrency")
@@ -1170,6 +1185,69 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": "value must be a number"}
         flags.set_flag("apply_concurrency", str(max(1, min(6, n))))
         return {"ok": True, "concurrency": flags.apply_concurrency()}
+
+    @app.post("/actions/drain-company")
+    def drain_company(body: dict, background: BackgroundTasks):
+        """Work through ONE company's queue now, back to back, and stop there.
+
+        The manual counterpart to the apply worker, for when automatic applying is
+        paused: pause means "do not go off on your own", not "do nothing I ask", so
+        this deliberately runs while paused. Nobody else's queue is touched.
+
+        Jobs run ONE AT A TIME because they go to the same employer, which is the
+        same lease the worker obeys — this cannot open a second session against a
+        company that already has one, by hand or otherwise. Four applications back
+        to back is over half an hour of browser sessions, so the loop checks
+        between each whether the flush is still wanted; Stop applying clears it.
+
+        NOTHING IS LEASED HERE. An earlier version took the first job in the
+        handler, and when the handler then failed the job was already out of the
+        queue with its company marked busy: it ran nowhere, and that employer
+        looked permanently in flight. Leasing belongs inside the loop that also has
+        the `finally` to release it.
+        """
+        import logging
+
+        from agent.run import run_queued
+        from core.apply_queue import ApplyQueue
+
+        log = logging.getLogger("server")
+        company = (body or {}).get("company", "").strip()
+        if not company:
+            return {"ok": False, "error": "name a company"}
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+        co = company.strip().lower()
+
+        # Read-only checks, so a refusal changes nothing.
+        depth = q.depth()
+        waiting = depth["queued"].get(co, 0)
+        if co in depth["running"]:
+            return {"ok": False, "error": f"{company} already has an application running"}
+        if not waiting:
+            return {"ok": False, "error": f"nothing is waiting for {company}"}
+        if not q.start_flush(company):      # atomic claim
+            return {"ok": False, "error": f"{company} is already being worked through"}
+
+        def _flush() -> None:
+            done = 0
+            try:
+                while True:
+                    item = q.next(only=company)
+                    if item is None:
+                        return                 # drained, or the rest is backing off
+                    run_queued(item, q)        # releases the lease in its own finally
+                    done += 1
+                    if co not in q.flushing():
+                        log.info("flush of %s stopped after %d", company, done)
+                        return
+            finally:
+                q.stop_flush(company)
+                log.info("flush of %s finished: %d application(s)", company, done)
+
+        background.add_task(_flush)
+        log.info("flush: working through %s (%d queued)", company, waiting)
+        return {"ok": True, "company": company, "queued": waiting}
 
     @app.get("/apply-queue/dead")
     def apply_dead_letters():
@@ -1253,66 +1331,44 @@ def create_app() -> FastAPI:
         return {"ok": True, "headless": flags.browser_headless()}
 
     @app.post("/actions/approve-all")
-    def approve_all(body: dict, background: BackgroundTasks):
+    def approve_all(body: dict):
         """Approve every job waiting only for your go-ahead (gate 'approval'),
-        optionally scoped to one company. They run 5 AT A TIME (parallel batches)
-        for speed — each apply gets its own Chrome profile so the windows don't
-        collide (Chrome locks a profile to one process)."""
+        optionally scoped to one company, and hand them to the apply queue.
+
+        This ENQUEUES; it does not apply. It used to run the applies itself, five
+        at a time on their own Chrome profiles, which meant approving one company
+        opened five sessions against that same employer at once — the exact thing
+        the per company queue exists to prevent, bypassed by the button most likely
+        to hit a single company. Dispatch belongs in one place, so this puts the
+        work in the queue and the daemon's apply loop drains it under the per
+        company lease and the live concurrency flag.
+
+        Nothing starts here, so if the daemon is paused the jobs sit in the queue
+        and the Apply queue panel says so, rather than quietly running anyway.
+        """
+        from core.apply_queue import ApplyQueue
+
         company = (body.get("company") or "").strip().lower()
         stores = make_stores(settings)
-        pks = []
+        picked: list[tuple[str, str]] = []
         # Approval gates live on TAILORED rows (tailoring done, awaiting the
         # go-ahead); stragglers from the old flow may still sit in needs_human.
         for r in [*stores.tracking.query_status(Status.TAILORED),
                   *stores.tracking.query_status(Status.NEEDS_HUMAN)]:
             if company and company != "__all__" and (r.get("company") or "").lower() != company:
                 continue
-            q = (r.get("gate_pending") or {}).get("question", "")
+            q_ = (r.get("gate_pending") or {}).get("question", "")
             if (r.get("status") == "tailored"
                     or r.get("gate_reason") == "approval"
-                    or q.startswith("Ready to apply")):
-                pks.append(r["pk"])
+                    or q_.startswith("Ready to apply")):
+                picked.append((r["pk"], r.get("company") or ""))
 
-        _LANES = 5  # concurrent applies (also the number of Chrome profiles)
-
-        def _run_all(items: list) -> None:
-            import asyncio
-
-            from agent.run import _apply_direct
-            from core.logging import get_logger
-            from core.stores import make_stores as _mk
-            from tools.browser_apply import set_profile_override
-            lg = get_logger("approve_all")
-
-            # Run every apply as a coroutine in ONE event loop (never one
-            # asyncio.run per thread — browser-use shares async objects that then
-            # cross loops and crash). A queue of distinct profile dirs both caps
-            # concurrency at _LANES and hands each apply its own Chrome profile
-            # (Chrome locks a user_data_dir to one process). Lane 0 is the real
-            # logged-in profile; 1..N are fresh (fine for public ATS forms).
-            base = (getattr(settings, "browser_profile_dir", "") or "").strip()
-
-            async def _driver() -> None:
-                lanes: asyncio.Queue[str] = asyncio.Queue()
-                for i in range(_LANES):
-                    lanes.put_nowait(base if i == 0 else (f"{base}-{i}" if base else ""))
-
-                async def _one(pk: str) -> None:
-                    lane = await lanes.get()  # blocks until a lane frees → caps at _LANES
-                    try:
-                        set_profile_override(lane)  # task-local contextvar → this apply
-                        await _apply_direct(pk, _mk())
-                    except Exception:
-                        lg.exception("approve-all failed for %s", pk)
-                    finally:
-                        lanes.put_nowait(lane)
-
-                await asyncio.gather(*(_one(pk) for pk in items))
-
-            asyncio.run(_driver())
-
-        background.add_task(_run_all, pks)
-        return {"ok": True, "approving": len(pks), "lanes": _LANES}
+        q = ApplyQueue(stores.tracking.r)
+        queued = sum(1 for pk, co in picked if q.put(pk, co))
+        log.info("approve-all queued %d of %d eligible job(s)%s",
+                 queued, len(picked), f" for {company}" if company else "")
+        return {"ok": True, "approving": queued, "queued": queued,
+                "already_queued": len(picked) - queued}
 
     @app.post("/actions/pause")
     def set_pause(body: dict):

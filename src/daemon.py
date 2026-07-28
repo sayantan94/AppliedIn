@@ -131,6 +131,47 @@ def _worker_loop() -> None:
 
 
 
+_LAST_RECLAIM = [0.0]
+RECLAIM_EVERY_S = 120
+
+
+def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
+    """Re-queue applications the store calls in flight that nobody is running.
+
+    Startup recovery is not enough on its own: it only catches jobs orphaned by
+    the LAST restart. A worker that dies mid run, a browser session killed by
+    hand, or a pause landing between the status write and the apply leaves a job
+    reading `submitting` for good, and the board shows it as in flight forever
+    while nothing will ever pick it up. That is worse than a visible failure,
+    because it looks like progress.
+
+    The lease is the authority on what is truly running, which is why it records
+    the pk: a company lease alone cannot say WHICH of two jobs at one employer is
+    the live one.
+    """
+    now = time.monotonic()
+    if now - _LAST_RECLAIM[0] < RECLAIM_EVERY_S:
+        return
+    _LAST_RECLAIM[0] = now
+
+    from core.models import Status
+
+    live = q.in_flight()
+    n = 0
+    for r in stores.tracking.all():
+        pk = str(r.get("pk", ""))
+        if pk.startswith("meta#") or r.get("status") != Status.SUBMITTING.value:
+            continue
+        if pk in live:
+            continue                       # genuinely being filled right now
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval")
+        q.put(pk, r.get("company", ""))
+        n += 1
+    if n:
+        log.warning("reclaimed %d application(s) that were marked in flight with no "
+                    "worker running them", n)
+
+
 def _apply_loop() -> None:
     """APPLY worker — its own thread, so a slow browser apply never blocks the
     evaluate worker.
@@ -143,13 +184,11 @@ def _apply_loop() -> None:
     core.apply_queue — an unconfirmed submit in particular must reach the owner
     rather than be retried, since it may already have gone through.
     """
-    import asyncio
     from concurrent.futures import ThreadPoolExecutor
 
-    from agent.run import _apply_direct
+    from agent.run import run_queued
     from core import flags
-    from core.apply_queue import ApplyQueue, is_retryable
-    from core.stores import make_stores as _mk
+    from core.apply_queue import ApplyQueue
 
     stores = make_stores()
     q = ApplyQueue(stores.tracking.r)
@@ -160,18 +199,7 @@ def _apply_loop() -> None:
         log.info("released %d stale company lease(s) from a previous run", freed)
 
     def _run_one(item: dict) -> None:
-        pk = item["pk"]
-        try:
-            result = asyncio.run(_apply_direct(pk, _mk())) or {}
-            log.info("apply: %s", result)
-            again, why = is_retryable(result)
-            if again:
-                q.retry(item, why)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("apply crashed for %s", pk)
-            q.retry(item, f"crashed: {exc}")
-        finally:
-            q.done(item)      # release the company, whatever happened
+        run_queued(item, q)   # shared with the dashboard's per company drain
 
     # Sized to the ceiling; the live flag is enforced per dispatch below, so
     # turning concurrency down takes effect on the next application rather than
@@ -195,6 +223,7 @@ def _apply_loop() -> None:
                 continue
             item = q.next()
             if not item:
+                _reclaim_orphans(stores, q)   # cheap, and only when otherwise idle
                 time.sleep(POLL_INTERVAL)
                 continue
             running.add(pool.submit(_run_one, item))

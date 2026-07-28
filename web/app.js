@@ -227,10 +227,12 @@ function renderPicker() {
         const over = state.cprefs[c.toLowerCase()] || {};
         const nOver = Object.keys(over).length;
         const sel = state.detailCo === c;
+        const pending = (state.pendingScan || {}).co === c;
         return `<div class="cp-item ${sk ? "skipped" : ""} ${sel ? "sel" : ""}">
           <label class="cp-name">
             <input type="checkbox" value="${esc(c)}" ${state.picked.has(c) ? "checked" : ""}>
             <span>${esc(c)}</span></label>
+          ${pending ? `<span class="cp-pending" title="Its rules changed. It scans as soon as the current scan finishes.">scan waiting</span>` : ""}
           <button class="cp-roles ${nOver ? "custom" : ""}" type="button" data-detail="${esc(c)}"
             title="${nOver ? `${nOver} preference${nOver === 1 ? "" : "s"} set for ${esc(c)}; the rest use your defaults`
                            : `${esc(c)} uses your default job preferences`}"
@@ -400,9 +402,18 @@ function renderLlmBanner() {
   if (!b) return;
   const err = state.stats.llm_error;
   if (!err || !err.msg) { b.hidden = true; return; }
-  $("#llm-banner-msg").textContent =
-    `LLM failure in ${err.where || "the pipeline"}: ${err.msg} — screening degraded ` +
-    `to the keyword filter; scoring/tailoring/applying will fail until this is fixed.`;
+  // Two different problems share this banner and they need opposite reactions.
+  // An orchestration outage degrades screening and stays broken until fixed. A
+  // browser rate limit submits nothing, retries itself, and only needs the owner
+  // if it persists. Telling them "screening degraded, will fail until fixed" for
+  // the second one would send them hunting a fault that is already handling
+  // itself.
+  const isBrowser = (err.where || "") === "browser";
+  $("#llm-banner-msg").textContent = isBrowser
+    ? `${err.msg}`
+    : `LLM failure in ${err.where || "the pipeline"}: ${err.msg} — screening degraded `
+      + `to the keyword filter; scoring/tailoring/applying will fail until this is fixed.`;
+  b.classList.toggle("soft", isBrowser);
   b.hidden = false;
 }
 
@@ -503,9 +514,23 @@ const canApply = (r) => r.status === "tailored" || awaitsApproval(r);
    blocking questions and 575 raw finds as peers. */
 /* One classifier, one section per row. Every row lands somewhere, so a status
    the backend invents tomorrow falls to Closed instead of off the board. */
-function sectionOf(r) {
-  if (r.status === "needs_human") return awaitsApproval(r) ? "ready" : "needs";
-  if (r.status === "tailored" || r.status === "tailoring") return "ready";
+/* pks sitting in the apply queue. A queued job keeps its `tailored` status (the
+   queue, not the row, is what holds the order), so without this it renders in
+   "Ready to apply" looking exactly like a job nobody has approved — you press
+   Apply, the card does not move, and it reads as though the click was lost. */
+function queuedPks() {
+  const q = state.queue || {};
+  return new Set((q.pending || []).map((it) => it.pk));
+}
+
+function sectionOf(r, queued) {
+  if (r.status === "needs_human") {
+    if (queued && queued.has(r.pk)) return "queued";
+    return awaitsApproval(r) ? "ready" : "needs";
+  }
+  if (r.status === "tailored" || r.status === "tailoring") {
+    return (queued && queued.has(r.pk)) ? "queued" : "ready";
+  }
   if (r.status === "submitting") return "flight";
   if (["applied", "applied_manual"].includes(r.status)) return "applied";
   if (r.status === "found") return "found";
@@ -561,12 +586,13 @@ function laneCard(r) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Opens the filled application in Chrome again. Solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
   } else if (canApply(r)) {
-    // Two ways to send it: now, or in line. Queueing matters when several are
-    // ready, since they share one real browser and running them at once fights.
+    // ONE control. Apply and Queue were two buttons doing two different things:
+    // Apply ran the browser immediately, straight past the per company rule, so
+    // approving three roles at one employer opened three sessions against it.
+    // Approving now means "put it in line", which is the only thing it can mean,
+    // so there is nothing left for a second button to say.
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
-       title="Approve. The browser applies with the tailored résumé now">▶ Apply</button>
-      <button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
-       title="Add to the apply queue. It runs when a browser lane is free, one at a time">＋ Queue</button>`;
+       title="Approve and join the apply queue. It starts when this company is free">▶ Apply</button>`;
   } else if (r.status === "found") {
     retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
        title="Score and tailor this job now. It stops before applying">▶ Run now</button>`;
@@ -745,7 +771,7 @@ function readySec(rows) {
       <span class="ps-hint">${n ? "Tailored and waiting for your approval. Apply sends one now, Queue lines it up."
                                 : "Nothing is tailored yet. Run jobs from Found below."}</span>
       ${nApprove ? `<button class="ps-link on" data-approve-all="1"
-        title="Approve all ${nApprove} and start the applies, a few at a time">Approve all ${nApprove}</button>` : ""}
+        title="Approve all ${nApprove} and put them in the apply queue, one at a time per company">Approve all ${nApprove}</button>` : ""}
     </div>
     ${n ? `<div class="ps-ready-body">${locBar}${bucketed(rows)}</div>` : ""}
   </section>`;
@@ -764,6 +790,71 @@ function flightSec(rows) {
     ${n ? `<div class="ps-grid">${rows.map(laneCard).join("")}</div>` : ""}
   </section>`;
 }
+
+/* Queued: approved, waiting its turn. Its own section because "Ready to apply"
+   means "you have not decided yet" and In flight means "a browser is on it right
+   now" — a queued job is neither, and putting it in either one makes a button
+   press look like it did nothing. Rendered in DISPATCH order from the queue
+   rather than in board order, because the order is the useful part. */
+function queuedSec(rows) {
+  const q = state.queue || {};
+  const cap = q.concurrency || 1;
+  const byPk = {};
+  rows.forEach((r) => { byPk[r.pk] = r; });
+  // `rows` has already been through the board's filters, so intersecting with it
+  // is what makes "filter to Microsoft" show Microsoft's queue and not everyone's.
+  // Position and "starts next" are worked out on the FULL queue BEFORE that
+  // filter: hiding NVIDIA does not move a Microsoft job up the line, and
+  // renumbering it to 1 would claim it did.
+  const pend = (q.pending || [])
+    .map((it, gi) => ({ ...it, pos: gi + 1, first: gi < cap && !it.blocked }))
+    .filter((it) => byPk[it.pk]);
+  if (!pend.length) return "";
+
+  const list = pend.slice(0, 14).map((it) => {
+    const r = byPk[it.pk] || {};
+    const why = it.blocked === "company_busy" ? `${esc(it.company)} is busy`
+      : it.blocked === "backoff" ? `retry in ${Math.ceil(it.ready_in / 60)}m`
+      : it.first ? "starts next" : "waiting for a slot";
+    return `<li class="un-row${it.first ? " un-next" : ""}"
+        data-open="${esc(it.pk)}" role="button" tabindex="0">
+      <span class="un-pos mono">${it.pos}</span>
+      <span class="un-co">${esc(it.company)}</span>
+      <span class="un-title">${esc(r.title || it.pk)}</span>
+      <span class="un-rank mono" title="position within ${esc(it.company)}">#${it.company_rank}</span>
+      <span class="un-why">${why}</span>
+    </li>`;
+  }).join("");
+
+  // One run control per company. The point of "just this company" is that you work
+  // through an employer deliberately while automatic applying is off, so the
+  // control belongs beside that company's jobs rather than on one global button.
+  const running = new Set(q.running || []);
+  const cos = [];
+  pend.forEach((it) => { if (!cos.includes(it.company)) cos.push(it.company); });
+  const runners = cos.map((co) => {
+    const busy = running.has((co || "").trim().toLowerCase());
+    const n = pend.filter((it) => it.company === co).length;
+    return `<button class="ps-link${busy ? "" : " on"}" data-act="drain-co"
+       data-company="${esc(co)}"${busy ? " disabled" : ""}
+       title="${busy ? `${esc(co)} already has one running`
+                     : `Work through ${esc(co)}'s ${n} queued job(s) now, one after another`}"
+      >${busy ? "● " : "▶ "}Process ${esc(co)}${busy ? "" : ` (${n})`}</button>`;
+  }).join("");
+
+  return `<section class="psec ps-queued has">
+    <div class="ps-head">
+      <span class="ps-dot on"></span>
+      <span class="ps-name">Queued to apply</span>
+      <span class="ps-n mono">${pend.length}</span>
+      <span class="ps-hint">In dispatch order. ${cap} at a time, never two to one company.</span>
+    </div>
+    <div class="un-runners">${runners}</div>
+    <ol class="un-list">${list}</ol>
+    ${pend.length > 14 ? `<div class="un-more">and ${pend.length - 14} more</div>` : ""}
+  </section>`;
+}
+
 
 function appliedSec(rows) {
   const n = rows.length;
@@ -873,13 +964,15 @@ function viewPipeline() {
       Click <b>Discover · All</b> above to find jobs from your watchlist.<br>
       They move down this board: found, then tailored, then applied.</div>`;
   }
-  const S = { needs: [], ready: [], flight: [], applied: [], found: [], closed: [] };
-  for (const r of visible(state.apps)) S[sectionOf(r)].push(r);
+  const S = { needs: [], ready: [], queued: [], flight: [], applied: [], found: [], closed: [] };
+  const inQ = queuedPks();
+  for (const r of visible(state.apps)) S[sectionOf(r, inQ)].push(r);
   const shown = Object.values(S).reduce((a, b) => a + b.length, 0);
   if (!shown && filtersActive()) return emptyFiltered();
   return `<div class="pstack">
     ${needsSec(S.needs)}
     ${readySec(S.ready)}
+    ${queuedSec(S.queued)}
     ${flightSec(S.flight)}
     ${appliedSec(S.applied)}
     ${foundSec(S.found)}
@@ -1364,6 +1457,16 @@ async function pollStats() {
     if (qpEl && !qpEl.hidden) loadQueue();
     const is = !!(s.discovering || s.processing);
     if (was && !is) { loadApps(); loadQueue(); toast("Run finished — board updated."); }
+    // A scan queued behind another one starts the moment discovery frees. Waiting
+    // on the state we already poll beats retrying blindly: a browser crawl runs
+    // for minutes, so a fixed number of retries gave up long before its turn came.
+    if (state.pendingScan && !s.discovering) {
+      const { co, url } = state.pendingScan;
+      state.pendingScan = null;
+      renderPicker();
+      toast(`Scanning ${co} with the new rules…`);
+      runCompany(co, url, false, true);
+    }
   } catch { /* backend briefly away — keep last known state */ }
 }
 
@@ -1417,24 +1520,23 @@ function closeAllPickers() {
 // blur, so tabbing through four of them would otherwise launch four crawls of the
 // same careers page. One scan, after the edits stop.
 let _rescanTimer = null;
-let _rescanWaits = 0;
 function scheduleRescan(co, url = "", waiting = false) {
   clearTimeout(_rescanTimer);
-  if (!waiting) _rescanWaits = 0;
-  // Editing four fields commits four times; one scan after the edits settle.
-  // If the pipeline is busy the scan waits rather than asking, backing off so it
-  // is not asking the server every two seconds either. It gives up after a few
-  // minutes and says so once, because a scan nobody is waiting for should not
-  // retry forever.
-  if (waiting && ++_rescanWaits > 6) {
-    toast(`${co}: rules saved. The pipeline is busy, so use Scan now when it frees up.`);
+  if (waiting) {
+    // Another company is already scanning. Discovery runs one at a time, so hold
+    // this one and let the stats poll start it the moment that finishes. It is
+    // remembered rather than retried, so editing rules while something else scans
+    // is a thing you can just do.
+    state.pendingScan = { co, url };
+    renderPicker();
+    toast(`${co}: rules saved. It scans as soon as the current one finishes.`);
     return;
   }
-  const wait = waiting ? Math.min(30000, 5000 * _rescanWaits) : 2500;
+  // Editing four fields commits four times; one scan once the edits settle.
   _rescanTimer = setTimeout(() => {
-    if (!_rescanWaits) toast(`Scanning ${co} with the new rules…`);
+    toast(`Scanning ${co} with the new rules…`);
     runCompany(co, url, false, true);      // silent: never prompts
-  }, wait);
+  }, 2500);
 }
 
 async function offerRestart(label, retry, blockedBy = "discover", again = false) {
@@ -1519,15 +1621,24 @@ function paneAction(act, pk) {
   if (act === "answer") {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
     const answer = (t?.value || "").trim() || "approved";
-    // Show it immediately. The first real event is a browser subprocess away, and
-    // an approve that renders nothing for a minute reads as a dead button.
-    markBusy(pk, "starting…");
-    post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
-    toast("Approved — opening the application.");
+    // Reload the queue as soon as the approve lands, so the card LEAVES "Ready to
+    // apply" and reappears under Queued with its position. Without that refresh the
+    // row sits exactly where it was until the next poll and the click reads as dead.
+    markBusy(pk, "queued…");
+    post(`/actions/resume/${encodeURIComponent(pk)}`, { answer })
+      .then(() => loadQueue());
+    toast("Queued — it starts when this company is free.");
   } else if (act === "queue-apply") {
     markBusy(pk, "queued…");
     post(`/actions/queue-apply/${encodeURIComponent(pk)}`).then(() => loadQueue());
     toast("Queued — it applies when a browser lane is free.");
+  } else if (act === "drain-co") {
+    const co = e.target.closest("[data-company]")?.dataset.company || "";
+    post("/actions/drain-company", { company: co }).then((r) => {
+      toast(r && r.ok ? `Applying to the next ${co} job.`
+                      : (r && r.error) || "Could not start it.");
+      loadQueue();
+    });
   } else if (act === "skip") {
     if (!confirm("Skip this job? It moves to closed.")) return;
     post(`/actions/skip/${encodeURIComponent(pk)}`);

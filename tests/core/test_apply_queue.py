@@ -150,3 +150,128 @@ def test_backoff_holds_a_job_until_its_time(q, monkeypatch):
     q.retry(item, "browser_conflict")
     q.done(item)
     assert q.next() is None, "a job in backoff must not be handed out early"
+
+
+def test_the_lease_records_which_job_not_just_which_company(q):
+    """A company lease cannot say WHICH of two jobs at one employer is live, and
+    recovery needs that: it is the difference between re-queueing a dead job and
+    starting a second application on top of a running one."""
+    q.put("acme#1", "Acme")
+    item = q.next()
+    assert q.in_flight() == {"acme#1"}
+    q.done(item)
+    assert q.in_flight() == set()
+
+
+def test_startup_clears_the_job_leases_too(q):
+    """Otherwise a pk left in the set after a crash is mistaken for a live job and
+    is never reclaimed."""
+    q.put("acme#1", "Acme")
+    q.next()
+    assert q.in_flight()
+    q.reset_leases()
+    assert q.in_flight() == set()
+
+
+def test_the_same_job_is_not_queued_twice(q):
+    """Approve-all is one button over many rows and gets clicked twice; a rescan
+    re-approves rows that are already waiting. Each extra copy is dispatched and
+    then refused by the duplicate guard, which spends that company's turn on a job
+    that cannot run and makes the queue depth lie about the work left."""
+    assert q.put("acme#1", "Acme") is True
+    assert q.put("acme#1", "Acme") is False, "already waiting"
+    assert q.depth()["total"] == 1
+
+    item = q.next()                     # once it is running it is no longer pending,
+    assert q.put("acme#1", "Acme") is True   # so asking again is a real request
+    q.done(item)
+
+
+def test_a_retry_is_never_swallowed_by_the_dedupe(q, monkeypatch):
+    """retry() re-queues while the lease is STILL held — the worker releases it in a
+    finally, after. Deduping against the in-flight set instead of the pending list
+    would silently drop every retry and the job would vanish."""
+    monkeypatch.setattr(aq, "BACKOFF_S", (0,))
+    q.put("acme#1", "Acme")
+    item = q.next()
+    assert q.retry(item, "browser_conflict") is True, "must re-queue while leased"
+    q.done(item)
+    assert q.next()["pk"] == "acme#1"
+
+
+def test_finishing_one_lets_the_next_at_that_company_start(q):
+    """The behaviour the queue is for: a company's jobs drain one after another
+    without anything else prompting them, and every one of them eventually runs."""
+    for i in range(3):
+        q.put(f"msft#{i}", "Microsoft")
+
+    seen = []
+    while (item := q.next()) is not None:
+        assert len(set(seen) & {item["pk"]}) == 0
+        seen.append(item["pk"])
+        # exactly one Microsoft application is live at any moment
+        assert q.depth()["running"] == ["microsoft"]
+        assert q.next() is None, "a second must not start while this one runs"
+        q.done(item)                    # finishing frees the next
+    assert seen == ["msft#0", "msft#1", "msft#2"], "all three ran, in order"
+
+
+def test_one_company_can_be_drained_on_its_own(q):
+    """The manual control: work through a single employer while automatic applying
+    is off, without touching anyone else's queue."""
+    q.put("msft#1", "Microsoft")
+    q.put("msft#2", "Microsoft")
+    q.put("nv#1", "NVIDIA")
+
+    item = q.next(only="Microsoft")
+    assert item["pk"] == "msft#1"
+    assert q.next(only="Microsoft") is None, "still one at a time per company"
+    q.done(item)
+    assert q.next(only="Microsoft")["pk"] == "msft#2", "the next one is available"
+
+    assert q.depth()["queued"].get("nvidia") == 1, "NVIDIA was never touched"
+
+
+def test_draining_one_company_still_respects_a_running_lease(q):
+    """A manual run must not open a second session against a company the worker is
+    already applying to — that is the invariant, not a scheduling preference."""
+    q.put("msft#1", "Microsoft")
+    q.put("msft#2", "Microsoft")
+    live = q.next()                      # the daemon takes one
+    assert q.next(only="Microsoft") is None, "by hand must not jump the lease"
+    q.done(live)
+    assert q.next(only="Microsoft") is not None
+
+
+def test_a_manual_flush_can_be_stopped_between_jobs(q):
+    """Working through a company runs its jobs back to back — four applications is
+    over half an hour of browser sessions. The flag is checked BETWEEN jobs, so
+    stopping is a decision not to start the next one rather than abandoning a form
+    that is already half filled under a real name."""
+    q.start_flush("Microsoft")
+    assert q.flushing() == {"microsoft"}
+    assert "microsoft" in q.depth()["flushing"], "the board must be able to show it"
+
+    q.start_flush("Waymo")
+    assert q.stop_flush("Microsoft") == 1
+    assert q.flushing() == {"waymo"}, "stopping one must not stop the other"
+
+    assert q.stop_flush() == 1, "unnamed stops everything"
+    assert q.flushing() == set()
+
+
+def test_no_flush_survives_a_restart(q):
+    """A flush is a loop inside one process. If the flag outlived it, that company
+    would look busy for ever and Process would refuse to start again."""
+    q.start_flush("Microsoft")
+    q.reset_leases()
+    assert q.flushing() == set()
+
+
+def test_claiming_a_flush_is_atomic(q):
+    """Two quick clicks on Process must not start two loops against one employer.
+    SADD reports whether THIS caller took it, so the second is refused."""
+    assert q.start_flush("Microsoft") is True
+    assert q.start_flush("Microsoft") is False, "already claimed"
+    q.stop_flush("Microsoft")
+    assert q.start_flush("Microsoft") is True, "claimable again once released"

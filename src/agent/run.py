@@ -277,6 +277,37 @@ def _save_output(pk: str, row: dict, jd_text: str, stores: Any) -> None:
 
 
 
+def _enqueue_apply(pk: str, stores: Any) -> dict:
+    """Hand an approved job to the apply queue instead of applying it here.
+
+    Approving is a decision; dispatching is the queue's job. When ▶ Apply ran the
+    browser itself, approving three roles at one employer opened three sessions
+    against it at once — the per company rule held only for work that happened to
+    arrive through the queue, and the button was the easiest way around it. A queue
+    that can be walked around is not a queue.
+
+    The row keeps its approval so the queue has something to dispatch, and the
+    daemon starts it under the company lease and the live concurrency flag.
+    """
+    from core.apply_queue import ApplyQueue
+
+    row = stores.tracking.get(pk) or {}
+    # Terminal states are refused here as well as at dispatch. Queueing an applied
+    # row is harmless (the duplicate guard catches it) but it spends that company's
+    # turn on a job that cannot run.
+    if row.get("status") in ("applied", "applied_manual"):
+        log.warning("refusing to queue %s: already %s", pk, row.get("status"))
+        return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
+
+    q = ApplyQueue(stores.tracking.r)
+    fresh = q.put(pk, row.get("company") or "")
+    stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                               fail_reason="", fail_kind="")
+    ahead = q.depth()["queued"].get((row.get("company") or "").strip().lower(), 0)
+    log.info("queued %s for apply (%s in that company's queue)", pk, ahead)
+    return {"result": "queued", "pk": pk, "queued": fresh, "company_depth": ahead}
+
+
 def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
     """Human answered the gate: SAVE the answer as a reusable fact, then continue.
 
@@ -295,7 +326,7 @@ def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
         # re-queued items) still take the one-click ▶ Apply: approving one means
         # "run the browser apply for it now".
         if row.get("status") == "tailored":
-            return _run(_apply_direct(pk, stores))
+            return _enqueue_apply(pk, stores)
         return {"result": "not_gated", "pk": pk}
 
     question = (row.get("gate_pending") or {}).get("question") or ""
@@ -312,8 +343,34 @@ def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
                                company=company or None, source="dashboard")
 
     if approval or row.get("gate_source") == "applier" or call_id == "direct":
-        return _run(_apply_direct(pk, stores))
+        return _enqueue_apply(pk, stores)
     return _run(_resume_job_async(pk, answer, call_id, stores))
+
+
+def run_queued(item: dict, q: Any) -> dict:
+    """Run ONE leased application and settle its place in the queue.
+
+    Shared by the daemon's apply worker and the dashboard's per company drain, so
+    the retry rules, the dead letter path and the lease release cannot drift apart
+    between them. Releasing the lease in a `finally` is the whole point: a lease
+    left behind by a crash blocks that employer until the process restarts.
+    """
+    from core.apply_queue import is_retryable
+
+    pk = item["pk"]
+    try:
+        result = _run(_apply_direct(pk, make_stores())) or {}
+        log.info("apply: %s", result)
+        again, why = is_retryable(result)
+        if again:
+            q.retry(item, why)
+        return result
+    except Exception as exc:  # noqa: BLE001 — one bad apply must not kill the worker
+        log.exception("apply crashed for %s", pk)
+        q.retry(item, f"crashed: {exc}")
+        return {"result": "error", "pk": pk, "reason": str(exc)}
+    finally:
+        q.done(item)
 
 
 async def _apply_direct(pk: str, stores: Any) -> dict:
@@ -615,6 +672,11 @@ def _fail_reason(outcome: dict) -> str:
             return ("The browser agent ended without any final report — most likely "
                     "an internal error during the run (check the Logs), or the "
                     "posting has no application form. Retry usually resolves it.")
+        from tools.claude_chrome import is_infrastructure
+
+        if is_infrastructure(detail):
+            return detail      # already a complete explanation; a prefix saying the
+                               # agent "finished" would contradict it
         return ("The browser agent finished without confirming a submission: "
                 f"{detail}")
     return detail or "Could not confirm the application was submitted."

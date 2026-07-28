@@ -173,6 +173,15 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
         log.debug("could not load company skills for %s", company, exc_info=True)
         site_rules = ""
 
+    # Say so if this is about to wait. A scan that sits silent for ten minutes
+    # because an application is being filled looks identical to one that hung.
+    from core.events import emit
+    from tools.claude_chrome import applies_running
+
+    if (n := applies_running()):
+        emit("running", agent="finder", company=company,
+             detail=f"{company}: waiting for {n} application(s) to finish before scanning")
+
     report, problem = await run_task(
         _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules),
         report_key="jobs", model=model, timeout_s=TIMEOUT_S, kind="crawl")

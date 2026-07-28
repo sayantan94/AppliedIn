@@ -118,6 +118,27 @@ def _default_extractor(html: str, company: str) -> list[JobRecord]:
     ]
 
 
+def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
+    """Dedup against past runs and queue what is genuinely new."""
+    from core.events import emit
+    from tools import seen
+
+    already = seen.load()
+    jobs = [j for j in jobs if j.jd_url not in already]
+
+    enqueued, new_jobs = 0, []
+    for job in jobs:
+        if stores.tracking.put_new(job):
+            stores.queue.enqueue(stores.tailor_queue, {"pk": job.pk})
+            emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
+            new_jobs.append(job)
+            enqueued += 1
+    seen.mark(new_jobs)
+    if enqueued:
+        log.info("%s: enqueued %d new job(s)", company.name, enqueued)
+    return enqueued
+
+
 def crawl_company(
     company: CompanyConfig,
     prefs: Preferences,
@@ -153,11 +174,39 @@ def crawl_company(
             resp.raise_for_status()
             html = resp.text
         except httpx.HTTPError as exc:
-            log.warning("crawl fetch failed for %s: %s", company.name, exc)
-            return 0
+            # A site that REFUSES the plain fetch is the clearest case for the
+            # browser, not a reason to give up. metacareers.com answers 400 and
+            # then 429 to a scripted request and serves the same page normally to
+            # a real session. Returning 0 here meant a company could never be
+            # crawled at all, while the run reported "no new roles matched your
+            # preferences" — which was untrue, and unfixable by changing them.
+            # INFO, not a warning: for a site marked browser this is the expected
+            # path, and a warning every run trains the reader to ignore warnings.
+            log.info("%s: plain fetch refused (%s) — reading the page in the "
+                     "browser instead", company.name, str(exc)[:90])
+            html = ""
         finally:
             if own_client:
                 client.close()
+
+    if not html and extractor is None:
+        found = _browser_extract(company.careers_url, company.name, prefs)
+        jobs = relevant(found, prefs)
+        # Three outcomes that a single "0 new" line used to blur together, and
+        # they need different actions from the owner: fix the URL, loosen the
+        # preferences, or nothing at all.
+        if not found:
+            log.warning("%s: read 0 postings from the careers page, by fetch or by "
+                        "browser. This is a READING problem, not a preferences one "
+                        "— check the careers_url in watchlist.yaml", company.name)
+        elif not jobs:
+            log.info("%s: browser read %d posting(s), none matched the preferences "
+                     "— sample: %s", company.name, len(found),
+                     ", ".join(j.title for j in found[:3]))
+        else:
+            log.info("%s: browser read %d posting(s), %d relevant",
+                     company.name, len(found), len(jobs))
+        return _enqueue(company, jobs, stores)
 
     # If the page actually embeds a known ATS, we shouldn't be here — log it so
     # the watchlist can be corrected to feed mode.
@@ -212,17 +261,4 @@ def crawl_company(
         jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
 
-    already = seen.load()
-    jobs = [j for j in jobs if j.jd_url not in already]  # skip past-run URLs
-
-    enqueued, new_jobs = 0, []
-    for job in jobs:
-        if stores.tracking.put_new(job):
-            stores.queue.enqueue(stores.tailor_queue, {"pk": job.pk})
-            emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
-            new_jobs.append(job)
-            enqueued += 1
-    seen.mark(new_jobs)
-    if enqueued:
-        log.info("%s: enqueued %d new job(s)", company.name, enqueued)
-    return enqueued
+    return _enqueue(company, jobs, stores)

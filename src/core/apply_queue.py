@@ -57,7 +57,9 @@ BACKOFF_S = (120, 600, 1800)
 
 _KEY = "applyq"          # applyq:companies (set) and applyq:co:<company> (list)
 _DLQ = "applyq:dlq"
-_BUSY = "applyq:inflight"   # companies with an application running right now
+_BUSY = "applyq:inflight"      # companies with an application running right now
+_BUSY_PKS = "applyq:inflight:pks"   # the exact jobs, so an orphan can be told apart
+_FLUSH = "applyq:flushing"     # companies being drained by hand, right now
 
 # Outcomes that must never be retried automatically. The reasons differ but the
 # rule is the same: another attempt cannot help and might do harm.
@@ -89,8 +91,26 @@ class ApplyQueue:
     # --- writing ----------------------------------------------------------
     def put(self, pk: str, company: str, *, attempts: int = 0,
             not_before: float = 0.0, history: list | None = None,
-            queued_at: float = 0.0) -> None:
+            queued_at: float = 0.0) -> bool:
+        """Queue an application. False when that job is already waiting.
+
+        The same pk can be offered more than once — approve-all clicked twice, a
+        rescan re-approving a row, an upgrade folding in the old flat queue. Each
+        copy is dispatched and then refused by the duplicate guard, so nothing is
+        submitted twice, but it burns a company's turn on a job that cannot run and
+        makes the queue depth lie about how much work is left.
+
+        Only PENDING work is checked, never the in-flight set: `retry()` re-queues
+        an item while its lease is still held, and matching on that would silently
+        drop every retry.
+        """
         co = _norm(company)
+        for raw in (self.r.lrange(f"{_KEY}:co:{co}", 0, -1) or []):
+            try:
+                if json.loads(raw).get("pk") == pk:
+                    return False
+            except ValueError:            # a malformed entry should not block a put
+                continue
         item = {"pk": pk, "company": company, "attempts": attempts,
                 "not_before": not_before, "history": history or [],
                 # Kept so dispatch can be first come first served ACROSS companies
@@ -98,6 +118,7 @@ class ApplyQueue:
                 "queued_at": queued_at or time.time()}
         self.r.sadd(f"{_KEY}:companies", co)
         self.r.rpush(f"{_KEY}:co:{co}", json.dumps(item))
+        return True
 
     def retry(self, item: dict, reason: str) -> bool:
         """Re-queue after a retryable failure. False when it has run out of tries
@@ -123,8 +144,13 @@ class ApplyQueue:
                     item.get("pk"), int(item.get("attempts", 0)) + 1, reason[:120])
 
     # --- reading ----------------------------------------------------------
-    def next(self) -> dict | None:
+    def next(self, only: str = "") -> dict | None:
         """Lease the next application, or None when nothing can start.
+
+        `only` restricts the lease to one company, which is how a single employer's
+        queue can be drained by hand while automatic applying is paused. It narrows
+        the choice; it does not relax the rules — a company already running one is
+        still skipped, and backoff still holds.
 
         Skips any company that already has one running, so two applications never
         hit the same employer at once. The caller MUST call `done()` afterwards,
@@ -137,7 +163,10 @@ class ApplyQueue:
         busy = set(self.r.smembers(_BUSY) or [])
         best: tuple[float, str, str] | None = None      # (queued_at, company, raw)
 
+        want = _norm(only) if only else ""
         for co in list(self.r.smembers(f"{_KEY}:companies") or []):
+            if want and co != want:
+                continue
             if co in busy:
                 continue                                # one at a time per company
             key = f"{_KEY}:co:{co}"
@@ -156,19 +185,58 @@ class ApplyQueue:
             return None
         _, co, raw = best
         self.r.lrem(f"{_KEY}:co:{co}", 1, raw)
+        item = json.loads(raw)
         self.r.sadd(_BUSY, co)
-        return json.loads(raw)
+        # The pk as well as the company. A company lease cannot tell a job that is
+        # genuinely running from one whose worker died, and with two jobs at one
+        # employer it cannot tell WHICH is running. Recovery needs that.
+        self.r.sadd(_BUSY_PKS, item["pk"])
+        return item
 
     def done(self, item: dict) -> None:
         """Release a company's lease. Must run in a finally: a lease left behind by
         a crash would block that employer until the process restarted."""
         self.r.srem(_BUSY, _norm(item.get("company", "")))
+        self.r.srem(_BUSY_PKS, item.get("pk", ""))
+
+    # --- manual flush ------------------------------------------------------
+    # Draining a company by hand runs its jobs back to back, which for four
+    # applications is over half an hour of browser sessions. That has to be
+    # interruptible, and the flag is what the loop checks BETWEEN jobs: stopping
+    # mid form is a separate, more costly decision than deciding not to start the
+    # next one. Kept in Redis rather than in the process so the dashboard can show
+    # what is flushing and Stop can reach it from any request.
+    def start_flush(self, company: str) -> bool:
+        """Claim a company for a manual flush. False when one is already running.
+
+        Atomic on purpose: SADD reports whether THIS caller added it, so two quick
+        clicks cannot both start a loop against the same employer.
+        """
+        return bool(self.r.sadd(_FLUSH, _norm(company)))
+
+    def flushing(self) -> set:
+        return set(self.r.smembers(_FLUSH) or [])
+
+    def stop_flush(self, company: str = "") -> int:
+        """Ask a flush to stop after the job it is on. Everything, when unnamed."""
+        if company:
+            return int(self.r.srem(_FLUSH, _norm(company)) or 0)
+        n = self.r.scard(_FLUSH) or 0
+        self.r.delete(_FLUSH)
+        return n
+
+    def in_flight(self) -> set:
+        """The pks being applied right now. Anything the store calls `submitting`
+        that is NOT in here has lost its worker."""
+        return set(self.r.smembers(_BUSY_PKS) or [])
 
     def reset_leases(self) -> int:
         """Drop every lease. Called at startup, because a lease is in flight state
         and nothing is in flight in a process that has only just begun."""
         n = self.r.scard(_BUSY) or 0
         self.r.delete(_BUSY)
+        self.r.delete(_BUSY_PKS)
+        self.r.delete(_FLUSH)     # no flush survives the process running it
         return n
 
     # --- inspection -------------------------------------------------------
@@ -186,7 +254,51 @@ class ApplyQueue:
                 out[co] = n
         running = sorted(self.r.smembers(_BUSY) or [])
         return {"queued": out, "total": sum(out.values()),
-                "running": running, "dlq": self.r.llen(_DLQ)}
+                "running": running, "flushing": sorted(self.flushing()),
+                "dlq": self.r.llen(_DLQ)}
+
+    def pending(self, limit: int = 60) -> list[dict]:
+        """Everything waiting, in the order it will actually start.
+
+        `depth()` answers "how many"; this answers "when is mine". Dispatch is
+        first come first served by `queued_at` ACROSS companies, so that sort is
+        the global order — but a company runs one at a time, so the third Microsoft
+        job does not start third overall. `company_rank` is the honest per employer
+        position, and `blocked` says which of the two reasons is holding it: its
+        company is busy, or it is still inside a retry backoff.
+
+        An estimate, not a promise: real order also depends on how long each
+        application takes. It is ordered by the same key dispatch uses, so the next
+        job to start is always the first one listed.
+        """
+        now = time.time()
+        busy = set(self.r.smembers(_BUSY) or [])
+        items: list[dict] = []
+        for co in list(self.r.smembers(f"{_KEY}:companies") or []):
+            for raw in (self.r.lrange(f"{_KEY}:co:{co}", 0, -1) or []):
+                try:
+                    it = json.loads(raw)
+                except ValueError:
+                    continue
+                it["_co"] = co
+                items.append(it)
+
+        items.sort(key=lambda i: float(i.get("queued_at") or 0))
+        rank: dict[str, int] = {}
+        out = []
+        for it in items:
+            co = it["_co"]
+            rank[co] = rank.get(co, 0) + 1
+            waiting = float(it.get("not_before") or 0)
+            blocked = ("company_busy" if co in busy
+                       else "backoff" if waiting > now
+                       else "")
+            out.append({"pk": it.get("pk", ""), "company": it.get("company", ""),
+                        "queued_at": float(it.get("queued_at") or 0),
+                        "attempts": int(it.get("attempts") or 0),
+                        "company_rank": rank[co], "blocked": blocked,
+                        "ready_in": max(0, int(waiting - now)) if waiting > now else 0})
+        return out[:limit]
 
     def dead_letters(self) -> list[dict]:
         return [json.loads(x) for x in (self.r.lrange(_DLQ, 0, -1) or [])]
