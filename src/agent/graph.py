@@ -54,6 +54,17 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     from tools.truthfulness import validate
 
     base_latex = tool_context.state.get("base_latex") or ""
+    # Without the seed there is nothing to validate against, and both checks below
+    # would pass trivially: `_anchors("")` is empty, so every fact counts as
+    # surviving, and a bullet count of zero can never be reduced. Fail closed —
+    # an unverifiable résumé must not reach an employer.
+    if not base_latex.strip():
+        log.error("no base résumé in session state for %s — refusing to save",
+                  tool_context.state.get("pk", "?"))
+        return {"ok": False,
+                "message": "The seed résumé is missing from this run, so nothing "
+                           "can be checked against it. Stop and report this rather "
+                           "than saving."}
     # Keep every bullet: dropping \resumeItem lines is the #1 over-tailoring failure.
     base_items, new_items = base_latex.count("\\resumeItem"), tailored_latex.count("\\resumeItem")
     if new_items < base_items:

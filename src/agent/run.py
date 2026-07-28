@@ -197,6 +197,18 @@ async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
     }
     # create_session is async; a retry may find it already there.
     existing = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=pk)
+    if existing is not None and _stale_seed(existing, state["base_latex"]):
+        # The session holds the résumé the tailor edits AND the anchors the
+        # truthfulness check validates against. Both come from the state captured
+        # when the session was FIRST created, so a row whose session predates an
+        # edit to base.tex keeps tailoring from the old résumé — and the check
+        # cannot object, because it is comparing against that same old copy. A
+        # project added to base.tex silently never reached an employer, and the
+        # stale-résumé guard could not help: it re-queues for tailoring, but
+        # re-tailoring reused this session and produced the same stale result.
+        await _reset_session(pk)
+        existing = None
+        log.info("base résumé changed since %s was first seen — starting it fresh", pk)
     if existing is None:
         await sessions.create_session(app_name=_APP, user_id=_USER, session_id=pk, state=state)
     runner = Runner(agent=root_agent, app_name=_APP, session_service=sessions)
@@ -567,6 +579,19 @@ def retry_job(pk: str, stores: Any = None) -> dict:
     emit("running", pk=pk, detail=f"retry · {row.get('title','')} @ {row.get('company','')}",
          url=row.get("jd_url"))
     return run_job(pk, stores)
+
+
+def _stale_seed(session: Any, current_base: str) -> bool:
+    """Whether a session was seeded from a different base résumé than today's.
+
+    Compared by content rather than by a stored fingerprint so it is right even for
+    sessions created before this check existed.
+    """
+    try:
+        seeded = (getattr(session, "state", None) or {}).get("base_latex") or ""
+    except Exception:  # noqa: BLE001 — an unreadable session is safest treated as stale
+        return True
+    return bool(current_base) and seeded != current_base
 
 
 async def _reset_session(pk: str) -> None:
