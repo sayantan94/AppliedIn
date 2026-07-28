@@ -1334,7 +1334,14 @@ function connectLive() {
         // Drawer open on this job? Stream the agent's work into it live, so
         // watching a run doesn't mean hitting refresh.
         if (e.pk && e.pk === state.openPk && !$("#drawer").hidden) scheduleAgentLog(e.pk);
-        if (["discovered", "applied", "gate", "running", "error"].includes(e.kind)) scheduleReload();
+        // NOT "running". That is progress on a job already on the board, and
+        // scheduleLive() above already updates its line in place. Treating it as a
+        // board change meant a full rebuild — a 650KB fetch and 800+ cards of
+        // innerHTML — every couple of seconds during a run, which is most of a run,
+        // so the page spent more time rebuilding than idle and nothing could be
+        // clicked. These four are real transitions: a job appears, finishes, needs
+        // you, or breaks.
+        if (["discovered", "applied", "gate", "error"].includes(e.kind)) scheduleReload();
       } catch { /* ignore malformed lines */ }
     };
     es.onerror = () => { es.close(); setFeedStatus("connecting"); setTimeout(open, 3000); };
@@ -1471,10 +1478,25 @@ async function pollStats() {
 }
 
 let _reloadTimer = null;
+let _lastReload = 0;
+const RELOAD_DEBOUNCE_MS = 1500;   // let a burst settle before rebuilding
+const RELOAD_FLOOR_MS = 8000;      // and never rebuild more often than this
+
+/* A full board rebuild is expensive and it BLOCKS the page while it runs. Two
+   guards, because they stop different things: the debounce folds a burst of
+   transitions into one rebuild, and the floor stops a steady drip of them from
+   rebuilding continuously. Between rebuilds the board is not frozen — the live
+   lines, the queue panel and the vitals each update on their own, far cheaper
+   paths. */
 function scheduleReload() {
   if (DEMO) return;
   clearTimeout(_reloadTimer);
-  _reloadTimer = setTimeout(() => { loadApps(); loadQueue(); }, 800);
+  const wait = Math.max(RELOAD_DEBOUNCE_MS, RELOAD_FLOOR_MS - (Date.now() - _lastReload));
+  _reloadTimer = setTimeout(() => {
+    _lastReload = Date.now();
+    loadApps();
+    loadQueue();
+  }, wait);
 }
 
 async function post(path, body) {
@@ -1616,7 +1638,7 @@ function markBusy(pk, detail) {
   scheduleLive(pk);    // and show the live line, same path the SSE feed uses
 }
 
-function paneAction(act, pk) {
+function paneAction(act, pk, el) {
   if (demoGuard()) return;
   if (act === "answer") {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
@@ -1633,10 +1655,13 @@ function paneAction(act, pk) {
     post(`/actions/queue-apply/${encodeURIComponent(pk)}`).then(() => loadQueue());
     toast("Queued — it applies when a browser lane is free.");
   } else if (act === "drain-co") {
-    const co = e.target.closest("[data-company]")?.dataset.company || "";
+    // From the button's own dataset: paneAction is handed the element, not the
+    // event, so there is no e.target here.
+    const co = (el && el.dataset.company) || "";
     post("/actions/drain-company", { company: co }).then((r) => {
-      toast(r && r.ok ? `Applying to the next ${co} job.`
-                      : (r && r.error) || "Could not start it.");
+      toast(r && r.ok
+        ? `Working through ${co} — ${r.queued} queued, one at a time.`
+        : (r && r.error) || "Could not start it.");
       loadQueue();
     });
   } else if (act === "skip") {
@@ -2815,7 +2840,7 @@ function wire() {
       return;
     }
     const act = e.target.closest("[data-act]");
-    if (act) { paneAction(act.dataset.act, act.dataset.pk); return; }
+    if (act) { paneAction(act.dataset.act, act.dataset.pk, act); return; }
     const open = e.target.closest("[data-open]");
     if (open) { openDrawer(open.dataset.open); return; }
     const row = e.target.closest("tr[data-pk]");
