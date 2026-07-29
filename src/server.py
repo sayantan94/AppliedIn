@@ -1362,7 +1362,7 @@ def create_app() -> FastAPI:
     # the code is handed over as one. The session opens this and reloads until the
     # code shows up; the owner types it into the dashboard meanwhile.
     @app.get("/verify/{pk}", include_in_schema=False)
-    async def verify_page(pk: str, company: str = ""):
+    def verify_page(pk: str, company: str = ""):
         """The page a waiting session reads. It HOLDS rather than answering at once.
 
         The first version answered immediately and asked the session to reload every
@@ -1376,23 +1376,20 @@ def create_app() -> FastAPI:
         of reads rather than dozens. The page also refreshes itself, so the tab
         keeps advancing even between the session's own looks at it.
         """
-        import asyncio
-
         from fastapi.responses import HTMLResponse
 
         from core.verification import Verification
 
-        HOLD_S, TICK_S = 25, 0.5   # under a typical 30s navigation timeout
+        # Answers IMMEDIATELY. It used to hold the request open for 25 seconds to
+        # buy the session more patience per read. That backfired twice over: it
+        # bought about a minute against a nine minute problem, and a session
+        # reported the slow navigation as a FAILURE — the tab sat on newtab and the
+        # read tools errored with "unparseable URL" — so the page the whole
+        # mechanism depends on looked broken to the one thing that had to read it.
+        # A page that answers at once and refreshes itself is worth more than a
+        # page that answers slowly and looks dead.
         v = Verification(make_stores(settings).tracking.r)
         code = v.code_for(pk)
-        if not code:
-            v.start_waiting(pk, company)
-            waited = 0.0
-            while waited < HOLD_S and not v.waited_too_long(pk):
-                await asyncio.sleep(TICK_S)
-                waited += TICK_S
-                if (code := v.code_for(pk)):
-                    break
         if not code:
             # Opening the page IS the announcement. Asking the session to report
             # its wait separately would mean a run that forgot to could sit there
@@ -1400,6 +1397,8 @@ def create_app() -> FastAPI:
             v.start_waiting(pk, company)
         state = "READY" if code else ("EXPIRED" if v.waited_too_long(pk) else "WAITING")
         # Self refresh, so the tab keeps advancing between the session's own looks.
+        # The page keeps itself current, so a later read is fresh without the
+        # request having had to wait.
         refresh = "" if code else '<meta http-equiv="refresh" content="5">'
         # Deliberately plain: the session reads this with a page read, so the words
         # it must match are the only thing on it.
