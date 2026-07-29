@@ -1809,6 +1809,17 @@ async function post(path, body) {
     return null;
   }
 }
+/* Say so, permanently and in the header, when the numbers are invented.
+   Demo mode only ever announced itself in a toast when you clicked something, so
+   a page of synthetic figures was indistinguishable from a page of real ones —
+   8678 jobs found reads exactly like a real total until you check it against the
+   store. A number you might act on has to carry its own provenance. */
+function markDemo() {
+  const pill = $("#demo-pill");
+  if (pill) pill.hidden = !DEMO;
+  if (DEMO) document.title = "AppliedIn (sample data)";
+}
+
 function demoGuard() {
   if (DEMO) { toast("Demo mode — run the local backend to use actions."); return true; }
   return false;
@@ -3165,6 +3176,7 @@ function wire() {
     const box = e.target.closest(".vf-in");
     if (box) { e.preventDefault(); sendVerifyCode(box.dataset.vfPk); }
   });
+  markDemo();
   $("#llm-banner-x").addEventListener("click", () => {
     $("#llm-banner").hidden = true;
     if (!DEMO) post("/actions/clear-llm-error");

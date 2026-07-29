@@ -3070,3 +3070,12 @@ button.ps-head:hover { background: var(--card-2); }
   white-space: nowrap;
 }
 .hm-tip b { color: var(--fg); font-weight: 600; }
+
+/* Sample data marker. Warm neutral, not the accent and certainly not --bad:
+   nothing is wrong, the figures are simply not real. It sits beside the paused
+   pill because that is where the eye already goes for "what state am I in". */
+.demo-pill {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  color: var(--muted); background: var(--card-2);
+  border: 1px solid var(--border);
+}
