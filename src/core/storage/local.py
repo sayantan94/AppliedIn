@@ -98,6 +98,14 @@ class RedisTracking(AbstractTracking):
             from datetime import datetime, timezone
 
             row["tailored_at"] = datetime.now(timezone.utc).isoformat()
+        # And when it went out. Nothing recorded this, so "how many did I send last
+        # Tuesday" could not be answered at all: an applied row knew only when it
+        # was DISCOVERED, which for a job found in a sweep and applied to a week
+        # later is a different week.
+        if val in ("applied", "applied_manual") and not row.get("applied_at"):
+            from datetime import datetime, timezone
+
+            row["applied_at"] = datetime.now(timezone.utc).isoformat()
         row.update(attrs)
         self._write(pk, row, prev_status=prev)
 

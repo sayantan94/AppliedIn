@@ -2956,3 +2956,117 @@ button.ps-head:hover { background: var(--card-2); }
    simply not going to continue on its own and needs starting again. */
 .vf-row.vf-stale { border-color: var(--border); background: var(--card-2); }
 .vf-row.vf-stale .vf-dot { background: var(--muted); animation: none; }
+
+/* ─── Activity heatmap ───────────────────────────────────────────────────── */
+/* One grid, two channels. The cell's tint is a --scan ramp over the card
+   surface and carries jobs FOUND; a centred ink dot carries applications
+   SENT, sized against applied's own range. The two series differ by an order
+   of magnitude, so they must never share one scale — the separate channel is
+   what keeps a 3-application day as legible as a 600-find day. Level 0 stays
+   the bare card surface with no tint at all: an empty day reads as empty,
+   not as faint activity. Everything is drawn from the existing tokens, so
+   both themes come for free. */
+.hm-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  padding: 14px 16px 12px;
+}
+.hm-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.hm-tot { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.hm-tot b { font-size: 15px; font-weight: 600; color: var(--fg); margin-right: 5px; }
+.hm-when { margin-left: auto; font-size: 11px; color: var(--faint); }
+
+/* The grid scrolls inside its own container on narrow screens; the page never
+   scrolls sideways for it. */
+.hm-scroll { overflow-x: auto; scrollbar-width: thin; padding-bottom: 4px; }
+.hm-frame {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: 4px 8px;
+  width: max-content;
+}
+/* Month labels ride explicit 14px tracks (11px cell + 3px gap) set inline to
+   the week count, so each label lands over the week that starts its month. */
+.hm-months {
+  display: grid;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+.hm-months span { grid-row: 1; white-space: nowrap; overflow: hidden; }
+.hm-wdays {
+  display: grid;
+  grid-template-rows: repeat(7, 11px);
+  gap: 3px;
+  align-items: center;
+  text-align: right;
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--faint);
+}
+.hm-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 11px);
+  grid-auto-columns: 11px;
+  gap: 3px;
+}
+.hm-c {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: var(--card-2);
+  display: grid;
+  place-items: center;
+}
+.hm-pad { visibility: hidden; }
+.hm-f1 { background: color-mix(in srgb, var(--scan) 22%, var(--card-2)); }
+.hm-f2 { background: color-mix(in srgb, var(--scan) 45%, var(--card-2)); }
+.hm-f3 { background: color-mix(in srgb, var(--scan) 68%, var(--card-2)); }
+.hm-f4 { background: var(--scan); }
+.hm-c[data-hd]:hover {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 60%, transparent);
+}
+/* Ink, not accent: --fg holds its contrast on the empty cell and on the
+   deepest --scan step, in both themes. */
+.hm-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--fg); }
+.hm-dot.hm-a2 { width: 4.5px; height: 4.5px; }
+.hm-dot.hm-a3 { width: 6px; height: 6px; }
+
+.hm-legend {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.hm-lg { display: inline-flex; align-items: center; gap: 4px; }
+.hm-lgl { color: var(--muted); font-weight: 600; margin-right: 4px; }
+.hm-lgt { margin: 0 3px; }
+
+.hm-tip {
+  position: fixed;
+  z-index: 70;
+  pointer-events: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-2);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.hm-tip b { color: var(--fg); font-weight: 600; }

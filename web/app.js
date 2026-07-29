@@ -17,7 +17,7 @@ const state = {
   apps: [],
   stats: {},
   events: [],
-  tab: "pipeline",    // pipeline | apps | needs | stuck | logs
+  tab: "pipeline",    // pipeline | apps | needs | stuck | activity | logs
   filter: "all",      // status chip on the Applications table
   logKind: "all",     // kind chip on the Logs view
   liveState: "off",   // SSE connection state (off | connecting | live | demo)
@@ -49,6 +49,7 @@ const state = {
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
   page: {},           // pipeline stack: rows revealed per list key
+  heat: null,         // /activity payload for the heatmap ({days, totals})
 };
 
 // --- text helpers ----------------------------------------------------------
@@ -1301,6 +1302,142 @@ function viewLogs() {
     <div class="logview" id="log-stream">${evs.slice(0, 500).map(feedItem).join("")}</div>${empty}`;
 }
 
+// --- Activity heatmap: a year of discovery and sending, one cell per day ---
+/* Two series, one grid. Found and applied differ by an order of magnitude
+   (hundreds of finds against tens of sends), so a single shared colour ramp
+   would pin every applied day at the palest step, and a per-series toggle
+   would put the two halves of one story behind a click. Instead the ONE grid
+   carries each series on its own channel: the cell's tint is a --scan ramp
+   for jobs FOUND, stepped at the quartiles of the non-zero days so the scale
+   tracks what this pipeline actually produces rather than a fixed ceiling;
+   applications SENT are an ink dot ON the cell, sized against applied's own
+   range. A dot's presence is binary and unmissable, which is what keeps a
+   3-application day exactly as legible as a 600-find day — and the overlay
+   also shows conversion (deep cell, no dot = found plenty, sent nothing).
+   A day with no activity keeps the bare card surface: zero reads as zero,
+   never as "a little". */
+let _heatBusy = false;
+async function loadActivity() {
+  if (_heatBusy) return;
+  _heatBusy = true;
+  try {
+    state.heat = DEMO ? demoActivity()
+      : await fetch(api("/activity?days=371"), { headers: auth.header() }).then((r) => r.json());
+  } catch { if (!state.heat) state.heat = { error: true }; }
+  _heatBusy = false;
+  if (state.tab === "activity") renderPane();
+}
+
+// Demo has no /activity endpoint — synthesise a plausible, deterministic year.
+function demoActivity() {
+  const days = [];
+  const totals = { found: 0, applied: 0 };
+  for (let i = 370; i >= 0; i--) {
+    const date = dayKey(new Date(Date.now() - i * 86400000).toISOString());
+    let found = 0, applied = 0;
+    if (i < 84) {  // the tool is new: a quiet year, then twelve busy weeks
+      const h = [...date].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 9973, 7);
+      found = h % 4 ? h % 320 : 0;
+      applied = h % 3 ? h % 19 : 0;
+    }
+    totals.found += found; totals.applied += applied;
+    days.push({ date, found, applied });
+  }
+  return { days, totals };
+}
+
+const noonOf = (iso) => new Date(iso + "T12:00:00");
+
+function viewActivity() {
+  const h = state.heat;
+  if (!h) { loadActivity(); return `<div class="empty">Loading activity…</div>`; }
+  if (h.error) {
+    return `<div class="empty"><div class="empty-big">No activity to show</div>
+      Could not reach the backend. Try refresh once the daemon is running.</div>`;
+  }
+  const days = (h.days || []).map((d) => ({
+    date: d.date, found: Number(d.found) || 0, applied: Number(d.applied) || 0 }));
+  if (!days.length) return `<div class="empty">Nothing recorded yet.</div>`;
+
+  // Quantile cuts, each series against its own non-zero days, so both ramps
+  // spread over the numbers this pipeline actually produces.
+  const q = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * arr.length))] : 0;
+  const nzF = days.map((d) => d.found).filter(Boolean).sort((a, b) => a - b);
+  const nzA = days.map((d) => d.applied).filter(Boolean).sort((a, b) => a - b);
+  const fCut = [q(nzF, 0.25), q(nzF, 0.5), q(nzF, 0.75)];
+  const aCut = [q(nzA, 1 / 3), q(nzA, 2 / 3)];
+  const fLvl = (n) => !n ? 0 : n < fCut[0] ? 1 : n < fCut[1] ? 2 : n < fCut[2] ? 3 : 4;
+  const aLvl = (n) => !n ? 0 : n < aCut[0] ? 1 : n < aCut[1] ? 2 : 3;
+
+  const cell = (d) => {
+    if (!d) return `<span class="hm-c hm-pad"></span>`;
+    const label = noonOf(d.date).toLocaleDateString(undefined,
+      { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+    return `<span class="hm-c hm-f${fLvl(d.found)}" data-hd="${esc(label)}"
+      data-hf="${d.found}" data-ha="${d.applied}">${
+      d.applied ? `<i class="hm-dot hm-a${aLvl(d.applied)}"></i>` : ""}</span>`;
+  };
+
+  // GitHub layout: one column per week, Sunday at the top. Pad the first and
+  // last weeks so every column is a full seven rows.
+  const cells = [];
+  for (let i = noonOf(days[0].date).getDay(); i > 0; i--) cells.push(null);
+  cells.push(...days);
+  while (cells.length % 7) cells.push(null);
+  const nWeeks = cells.length / 7;
+
+  // A month label sits over the week that starts it; drop one that would
+  // crowd the label before it (two changes can land three columns apart).
+  const monthRow = [];
+  let lastM = -1, lastCol = -9;
+  for (let w = 0; w < nWeeks; w++) {
+    const firstDay = cells.slice(w * 7, w * 7 + 7).find(Boolean);
+    if (!firstDay) continue;
+    const m = noonOf(firstDay.date).getMonth();
+    if (m === lastM) continue;
+    lastM = m;
+    if (w - lastCol < 3) continue;
+    lastCol = w;
+    monthRow.push(`<span style="grid-column:${w + 1} / span ${Math.min(4, nWeeks - w)}">${
+      esc(noonOf(firstDay.date).toLocaleDateString(undefined, { month: "short" }))}</span>`);
+  }
+
+  const tf = Number((h.totals || {}).found ?? days.reduce((a, d) => a + d.found, 0)) || 0;
+  const ta = Number((h.totals || {}).applied ?? days.reduce((a, d) => a + d.applied, 0)) || 0;
+  const lgCell = (cls, dot) => `<span class="hm-c ${cls}">${dot || ""}</span>`;
+  return `<div class="hm-card">
+    <div class="hm-sum">
+      <span class="hm-tot"><b class="mono">${tf}</b> jobs found</span>
+      <span class="hm-tot"><b class="mono">${ta}</b> applications sent</span>
+      <span class="hm-when">one cell per day for the past year</span>
+    </div>
+    <div class="hm-scroll">
+      <div class="hm-frame">
+        <span></span>
+        <div class="hm-months mono" style="grid-template-columns:repeat(${nWeeks}, 14px)">${monthRow.join("")}</div>
+        <div class="hm-wdays mono" aria-hidden="true">
+          <span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span>
+        </div>
+        <div class="hm-grid" role="img"
+          aria-label="Daily activity for the past year: ${tf} jobs found and ${ta} applications sent">${
+          cells.map(cell).join("")}</div>
+      </div>
+    </div>
+    <div class="hm-legend">
+      <span class="hm-lg"><span class="hm-lgl">Jobs found</span>
+        <span class="hm-lgt">none</span>
+        ${lgCell("hm-f0")}${lgCell("hm-f1")}${lgCell("hm-f2")}${lgCell("hm-f3")}${lgCell("hm-f4")}
+        <span class="hm-lgt">more</span></span>
+      <span class="hm-lg"><span class="hm-lgl">Applications sent</span>
+        ${lgCell("hm-f0", '<i class="hm-dot hm-a1"></i>')}
+        ${lgCell("hm-f0", '<i class="hm-dot hm-a2"></i>')}
+        ${lgCell("hm-f0", '<i class="hm-dot hm-a3"></i>')}
+        <span class="hm-lgt">a dot marks a day that applied, bigger means more</span></span>
+    </div>
+    <div class="hm-tip mono" id="hm-tip" hidden></div>
+  </div>`;
+}
+
 function renderPane() {
   // Preserve half-typed gate answers across re-renders (SSE refreshes etc).
   const saved = {};
@@ -1313,7 +1450,8 @@ function renderPane() {
     state.tab === "apps" ? viewApps() :
     state.tab === "needs" ? viewNeeds() :
     state.tab === "stuck" ? viewStuck() :
-    state.tab === "logs" ? viewLogs() : viewPipeline();
+    state.tab === "logs" ? viewLogs() :
+    state.tab === "activity" ? viewActivity() : viewPipeline();
   for (const [pk, v] of Object.entries(saved)) {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
     if (t) t.value = v;
@@ -1322,6 +1460,10 @@ function renderPane() {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(focusPk)}"]`);
     if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; }
   }
+  // The heatmap's newest weeks matter most: when the grid overflows on a
+  // narrow screen, land on today rather than a year ago.
+  const hs = $("#pane .hm-scroll");
+  if (hs) hs.scrollLeft = hs.scrollWidth;
 }
 
 function renderFooter() {
@@ -1589,6 +1731,8 @@ async function loadApps() {
   try {
     const a = await fetch(api("/applications"), { headers: auth.header() }).then((r) => r.json());
     state.apps = (a.items || []).filter((r) => !String(r.pk || "").startsWith("meta#"));
+    // The heatmap rides the same cadence, but only while it is on screen.
+    if (state.tab === "activity") loadActivity();
     renderTabs(); renderPane(); renderFooter(); scheduleFeed();
   } catch { /* transient — next poll wins */ }
 }
@@ -2701,6 +2845,8 @@ function wire() {
     const t = e.target.closest(".tab");
     if (!t) return;
     state.tab = t.dataset.tab;
+    // Cached data renders at once; the fetch refreshes it behind the paint.
+    if (state.tab === "activity") loadActivity();
     renderTabs();
     renderPane();
   });
@@ -3035,6 +3181,7 @@ function wire() {
   $("#refresh-btn").addEventListener("click", async () => {
     if (DEMO) { renderAll(); toast("Refreshed."); return; }
     await Promise.all([loadApps(), pollStats(), loadCompanies()]);
+    if (state.tab === "activity") loadActivity();
     toast("Refreshed.");
   });
 
@@ -3130,6 +3277,28 @@ function wire() {
     if (e.key !== "Enter") return;
     const el = e.target.closest("[data-open]");
     if (el && !e.target.closest("textarea")) openDrawer(el.dataset.open);
+  });
+
+  // Heatmap tooltip: one floating tip, delegated on the pane so it survives
+  // every re-render. Fixed positioning keeps it clear of the scroll clip.
+  $("#pane").addEventListener("mouseover", (e) => {
+    const tip = $("#hm-tip");
+    if (!tip) return;
+    const c = e.target.closest(".hm-c[data-hd]");
+    if (!c) { tip.hidden = true; return; }
+    const f = Number(c.dataset.hf) || 0, a = Number(c.dataset.ha) || 0;
+    tip.innerHTML = `<b>${esc(c.dataset.hd)}</b><br>${
+      f || a ? `${f} found · ${a} applied` : "no activity"}`;
+    tip.hidden = false;
+    const r = c.getBoundingClientRect();
+    const tr = tip.getBoundingClientRect();
+    tip.style.left = Math.max(8, Math.min(window.innerWidth - tr.width - 8,
+      r.left + r.width / 2 - tr.width / 2)) + "px";
+    tip.style.top = (r.top - tr.height - 8 >= 4 ? r.top - tr.height - 8 : r.bottom + 8) + "px";
+  });
+  $("#pane").addEventListener("mouseleave", () => {
+    const tip = $("#hm-tip");
+    if (tip) tip.hidden = true;
   });
 
   $("#feed").addEventListener("click", (e) => {

@@ -1217,6 +1217,48 @@ def create_app() -> FastAPI:
              detail=f"{what} stopped by you — {killed} browser session(s) ended")
         return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
 
+    @app.get("/activity")
+    def activity(days: int = 371):
+        """Jobs found and applications sent, per day.
+
+        Two different dates on purpose. A job found in a sweep and applied to a
+        week later belongs to both weeks, in different columns: `discovered_at`
+        answers "was discovery working", `applied_at` answers "did anything go
+        out". Counting applications by their discovery date would credit the
+        sweep's day and make an idle week look busy.
+
+        Dates are bucketed in LOCAL time, because the question is about the
+        owner's days, not UTC's.
+        """
+        from collections import Counter
+        from datetime import datetime, timedelta
+
+        def day(iso: str) -> str:
+            try:
+                d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return ""
+            return (d.astimezone() if d.tzinfo else d).strftime("%Y-%m-%d")
+
+        found: Counter = Counter()
+        applied: Counter = Counter()
+        for r in make_stores(settings).tracking.all():
+            if str(r.get("pk", "")).startswith("meta#"):
+                continue
+            if (k := day(r.get("discovered_at"))):
+                found[k] += 1
+            if r.get("status") in ("applied", "applied_manual") and (
+                    k := day(r.get("applied_at"))):
+                applied[k] += 1
+
+        first = (datetime.now().astimezone() - timedelta(days=max(1, days) - 1)).date()
+        out = []
+        for i in range((datetime.now().astimezone().date() - first).days + 1):
+            k = (first + timedelta(days=i)).strftime("%Y-%m-%d")
+            out.append({"date": k, "found": found.get(k, 0), "applied": applied.get(k, 0)})
+        return {"days": out,
+                "totals": {"found": sum(found.values()), "applied": sum(applied.values())}}
+
     @app.get("/apply-queue")
     def apply_queue_state():
         """The application queue: what is waiting, per company, and what is
