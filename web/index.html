@@ -32,14 +32,14 @@
 <link
   href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
   rel="stylesheet" />
-<link rel="stylesheet" href="/landing.css?v=5" />
+<link rel="stylesheet" href="/landing.css?v=6" />
 </head>
 <body>
 
 <header class="topbar">
   <a class="brand" href="/"><img src="/logo.svg" alt="" width="24" height="24" />AppliedIn</a>
   <nav class="topnav">
-    <a href="#architecture">The graph</a>
+    <a href="#architecture">Workflow</a>
     <a href="#product">Product</a>
     <a href="#guarantees">Guardrails</a>
     <a href="#start">Get started</a>
@@ -65,9 +65,8 @@
       and let the graph complete the application in your browser.
     </p>
     <div class="hero_tags" aria-label="AppliedIn principles">
-      <span>Local-first</span>
       <span>Open source</span>
-      <span>Human-approved</span>
+      <span>Optional human-in-the-loop</span>
     </div>
     <div class="btnrow">
       <a class="btn btn_primary lg" href="https://github.com/sayantan94/AppliedIn">Explore the repository</a>
@@ -81,18 +80,21 @@
 
   <div class="hero_visual" aria-label="AppliedIn workflow and product dashboard">
     <div class="hero_frame hero_frame_back" aria-hidden="true">
-      <img src="/img/sketch-boundaries.png" width="1672" height="941"
+      <img src="/img/sketch-boundaries-v2.png" width="1672" height="941"
            decoding="async" alt="" />
     </div>
     <div class="hero_frame hero_frame_front">
       <div class="hero_chrome" aria-hidden="true"><span></span><span></span><span></span></div>
-      <img src="/img/pipeline-dashboard.png" width="1800" height="1125"
+      <img src="/img/pipeline-dashboard-v2.png"
+           data-light-src="/img/pipeline-dashboard-v2.png"
+           data-dark-src="/img/pipeline-dashboard-dark-v2.png"
+           width="1800" height="1125"
            decoding="async" fetchpriority="high"
            alt="AppliedIn dashboard showing jobs moving from discovery through resume tailoring, approval, and application" />
     </div>
     <div class="hero_signal">
       <span class="hero_signal_dot" aria-hidden="true"></span>
-      <span><strong>Human approval</strong><small>before browser action</small></span>
+      <span><strong>Human-in-the-loop</strong><small>available before browser action</small></span>
     </div>
   </div>
 </section>
@@ -102,21 +104,21 @@
   <aside class="sidebar">
     <p class="side_h">Graph engineering</p>
     <a href="#top">What it solves</a>
-    <a href="#architecture">Start with boundaries</a>
-    <a href="#workflow">The complete graph</a>
-    <a href="#patterns">Patterns in use</a>
+    <a href="#architecture">Step ownership</a>
+    <a href="#workflow">End-to-end graph</a>
+    <a href="#patterns">Agentic patterns</a>
     <p class="side_h">The product</p>
-    <a href="#product">See the workflow</a>
-    <a href="#how">How it works</a>
+    <a href="#product">Pipeline board</a>
+    <a href="#how">One application run</a>
     <a href="#tailoring">Resume tailoring</a>
-    <a href="#browser">What runs where</a>
-    <p class="side_h">Boundaries</p>
+    <a href="#browser">Local tools and accounts</a>
+    <p class="side_h">Safety</p>
     <a href="#guarantees">Guardrails</a>
-    <a href="#gates">Approval and browser</a>
+    <a href="#gates">Optional review gates</a>
     <p class="side_h">Run it</p>
     <a href="#start">Get started</a>
-    <a href="#requirements">Requirements</a>
-    <a href="#caveats">Caveats</a>
+    <a href="#requirements">What you need</a>
+    <a href="#caveats">Before auto-submit</a>
   </aside>
 
   <main class="doc">
@@ -124,13 +126,13 @@
 
       <div class="callout callout_info">
         <p>
-          <strong>The owner stays in the graph.</strong> AppliedIn pauses before
-          submission, asks rather than inventing an answer, and records success
-          only when the employer shows a confirmation.
+          <strong>You decide where the graph pauses.</strong> Use gated mode to
+          approve each application, or allow strong matches to continue. Missing
+          facts, logins, and uncertain outcomes still return to you.
         </p>
       </div>
 
-      <h2 id="architecture">Start with boundaries</h2>
+      <h2 id="architecture">Each step has a clear owner</h2>
       <p>
         AppliedIn assigns each part of an application to the actor best suited
         for it. Code handles repeatable rules. Focused agents handle judgment and
@@ -138,7 +140,7 @@
       </p>
 
       <figure class="diagram sketch">
-        <img src="/img/sketch-boundaries.png" width="1672" height="941"
+        <img src="/img/sketch-boundaries-v2.png" width="1672" height="941"
              loading="lazy" decoding="async"
              alt="Whiteboard sketch showing code handling filtering and validation, agents handling scoring and navigation, and the human handling approval and verification" />
         <figcaption>
@@ -147,11 +149,11 @@
         </figcaption>
       </figure>
 
-      <h3 id="workflow">The complete workflow</h3>
+      <h3 id="workflow">From job discovery to verified application</h3>
       <p>
-        Those boundaries compose into a stable path from discovery to verified
-        application. Every uncertain stage has a focused agent, a stopping
-        condition, and an explicit next state.
+        Every job follows explicit states. Tools discover and filter it, focused
+        agents score and tailor it, optional review gates can pause it, and the
+        browser agent verifies the final outcome.
       </p>
 
       <figure class="diagram">
@@ -168,7 +170,7 @@
         </figcaption>
       </figure>
 
-      <h2 id="patterns">Patterns in use</h2>
+      <h2 id="patterns">Agentic patterns behind the workflow</h2>
       <div class="cards cols_2">
         <div class="card">
           <h3>Sequential orchestration</h3>
@@ -216,14 +218,17 @@
 
       <hr />
 
-      <h2 id="product">The graph stays visible</h2>
+      <h2 id="product">See every job move through the graph</h2>
       <p>
         Jobs move through explicit states on a local board. A role can be found,
         tailored, waiting for you, submitting, applied, failed, or uncertain.
       </p>
 
       <figure class="diagram">
-        <img src="/img/pipeline-dashboard.png" width="1800" height="1125"
+        <img src="/img/pipeline-dashboard-v2.png"
+             data-light-src="/img/pipeline-dashboard-v2.png"
+             data-dark-src="/img/pipeline-dashboard-dark-v2.png"
+             width="1800" height="1125"
              loading="lazy" decoding="async"
              alt="AppliedIn dashboard showing jobs moving from found to tailored, waiting for approval, and applied" />
         <figcaption>
@@ -232,7 +237,7 @@
         </figcaption>
       </figure>
 
-      <h2 id="how">What one run does</h2>
+      <h2 id="how">From one job URL to a completed application</h2>
       <div class="cards cols_3">
         <div class="card">
           <p class="card_n">01</p>
@@ -260,7 +265,7 @@
         </div>
       </div>
 
-      <h3 id="tailoring">Resume tailoring stays truthful</h3>
+      <h3 id="tailoring">Tailor the resume without changing the facts</h3>
       <p>
         The tailor can adapt wording and emphasis for a role. Validation keeps
         every source fact anchored, produces a real PDF, and limits the critic
@@ -268,7 +273,7 @@
       </p>
 
       <figure class="diagram sketch">
-        <img src="/img/sketch-tailor-loop.png" width="1672" height="941"
+        <img src="/img/sketch-tailor-loop-v2.png" width="1672" height="941"
              loading="lazy" decoding="async"
              alt="Whiteboard sketch showing a resume tailoring agent, deterministic fact validation, a critic, and a two pass limit" />
         <figcaption>
@@ -277,20 +282,21 @@
         </figcaption>
       </figure>
 
-      <h2 id="gates">Approval comes before browser action</h2>
+      <h2 id="gates">Choose where the workflow pauses</h2>
       <p>
-        You review the tailored resume before the application agent can act.
-        After approval, the browser observes, fills, and verifies. Missing
-        information returns to you instead of becoming an invented answer.
+        In gated mode, you review the tailored resume before the browser acts.
+        In automatic mode, strong matches can continue without that pause.
+        Missing information, logins, CAPTCHAs, and uncertain outcomes always
+        return to you instead of becoming invented answers.
       </p>
 
       <figure class="diagram sketch">
-        <img src="/img/sketch-human-browser.png" width="1672" height="941"
+        <img src="/img/sketch-human-browser-v2.png" width="1672" height="941"
              loading="lazy" decoding="async"
              alt="Whiteboard sketch showing a tailored resume moving through human approval, browser action, and verified outcomes" />
         <figcaption>
-          Approval comes before browser action. Confirmation, human questions,
-          and uncertain outcomes remain separate paths.
+          Review can be optional. Confirmation, human questions, and uncertain
+          outcomes always remain separate paths.
         </figcaption>
       </figure>
 
@@ -299,16 +305,19 @@
       </p>
 
       <figure class="diagram">
-        <img src="/img/human-gates.png" width="1800" height="1125"
+        <img src="/img/human-gates-v2.png"
+             data-light-src="/img/human-gates-v2.png"
+             data-dark-src="/img/human-gates-dark-v2.png"
+             width="1800" height="1125"
              loading="lazy" decoding="async"
              alt="AppliedIn review queue showing approval, answer, and browser login gates" />
         <figcaption>
-          Approval, missing information, and browser handoffs use the same durable
-          gate mechanism.
+          Optional approvals, missing information, and browser handoffs use the
+          same durable gate mechanism.
         </figcaption>
       </figure>
 
-      <h2 id="browser">What runs where</h2>
+      <h2 id="browser">What runs locally, and what requires an account</h2>
       <p>
         The workflow and application history stay on your machine. Core graph
         reasoning uses your OpenAI key. Automatic form submission uses Claude
@@ -330,7 +339,7 @@
         </div>
       </div>
 
-      <h2 id="guarantees">Guardrails enforced in code</h2>
+      <h2 id="guarantees">Safety rules the model cannot bypass</h2>
       <p>
         A boundary written only in a prompt is a boundary nobody is enforcing.
         These rules also live at the tool and state layers.
@@ -356,7 +365,10 @@
       </div>
 
       <figure class="diagram">
-        <img src="/img/agent-logs.png" width="1800" height="1125"
+        <img src="/img/agent-logs-v2.png"
+             data-light-src="/img/agent-logs-v2.png"
+             data-dark-src="/img/agent-logs-dark-v2.png"
+             width="1800" height="1125"
              loading="lazy" decoding="async"
              alt="AppliedIn activity log showing agent steps, tools, human gates, failures, and confirmations" />
         <figcaption>
@@ -367,13 +379,13 @@
 
       <hr />
 
-      <h2 id="start">Get started</h2>
+      <h2 id="start">Run AppliedIn locally</h2>
       <div class="code">
 <pre><code><span class="d"># clone, configure and start</span>
 git clone https://github.com/sayantan94/AppliedIn.git
 cd AppliedIn
 cp .env.example .env
-./setup.sh
+./appliedin setup
 ./appliedin start        <span class="d">→ http://localhost:8787/</span></code></pre>
       </div>
       <p>
@@ -381,7 +393,7 @@ cp .env.example .env
         LaTeX resume at <code>resume/base.tex</code>, and start with one job URL.
       </p>
 
-      <h3 id="requirements">Requirements</h3>
+      <h3 id="requirements">What you need</h3>
       <table class="req">
         <thead><tr><th>For</th><th>You need</th></tr></thead>
         <tbody>
@@ -401,7 +413,7 @@ cp .env.example .env
         </tbody>
       </table>
 
-      <h2 id="caveats">Use it deliberately</h2>
+      <h2 id="caveats">Before you enable automatic submission</h2>
       <div class="callout callout_warn">
         <p>
           <strong>Applications go out under your name.</strong> Review the resume,
@@ -421,13 +433,14 @@ cp .env.example .env
         <a href="https://github.com/sayantan94/AppliedIn">GitHub</a>
         <a href="https://github.com/sayantan94/AppliedIn/blob/main/LICENSE">MIT licence</a>
         <a href="/demo">Demo</a>
+        <a href="https://sayantan.sh/">Contact</a>
       </p>
-      <p class="muted">appliedin.dev</p>
+      <p class="muted">For details, visit sayantan.sh</p>
     </footer>
 
   </main>
 </div>
 
-<script src="/landing.js?v=3" defer></script>
+<script src="/landing.js?v=4" defer></script>
 </body>
 </html>

@@ -11,7 +11,9 @@
   var themeButton = document.getElementById("theme-toggle");
   var themeIcon = themeButton && themeButton.querySelector(".theme_icon");
   var themeLabel = themeButton && themeButton.querySelector(".theme_label");
-  var workflowImage = document.getElementById("workflow-image");
+  var themeImages = Array.prototype.slice.call(
+    document.querySelectorAll("img[data-light-src][data-dark-src]")
+  );
   var themeColor = document.querySelector('meta[name="theme-color"]');
 
   function syncTheme() {
@@ -25,11 +27,10 @@
     if (themeIcon) themeIcon.textContent = light ? "☾" : "☀";
     if (themeLabel) themeLabel.textContent = light ? "Dark" : "Light";
     if (themeColor) themeColor.setAttribute("content", light ? "#f6f7f6" : "#101312");
-    if (workflowImage) {
-      workflowImage.src = light
-        ? workflowImage.dataset.lightSrc
-        : workflowImage.dataset.darkSrc;
-    }
+    themeImages.forEach(function (image) {
+      var src = light ? image.dataset.lightSrc : image.dataset.darkSrc;
+      if (src && image.getAttribute("src") !== src) image.src = src;
+    });
   }
 
   if (themeButton) {
