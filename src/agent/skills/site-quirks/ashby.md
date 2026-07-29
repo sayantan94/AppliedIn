@@ -30,11 +30,17 @@ success_phrases:
   carries the state — not a radio group. Clicking the input does nothing because
   it is `display:none`. Click the visible button whose text is the answer; the
   hidden input follows.
-- **Check the application-limit banner before filling anything.** Some boards show
-  "we have set up limits for applications across roles. Candidates may not apply
-  more than 5 times in any 180 day span". If the cap is already reached the submit
-  is rejected no matter how well the form is filled, so read that banner first and
-  stop rather than spending a run on a form that cannot be sent.
+- **The application-limit banner is a NOTICE, not a stop.** Some boards show "we
+  have set up limits for applications across roles. Candidates may not apply more
+  than 5 times in any 180 day span". Fill the form and submit anyway. That wording
+  is a statement of policy, not a live counter: it never says how many have been
+  used or how many are left, so it cannot tell you whether THIS submission is over
+  the line — and the board, not this agent, is the one that decides. Treating it
+  as a refusal abandons applications that would have gone through.
+  Report `application_limit` only when the site actually REFUSES the submission,
+  in words that say so after clicking Submit. Contrast Google, which shows a real
+  counter ("you can submit up to M more"); at 0 remaining that one IS a stop,
+  because it states the answer outright.
 - A rejected submit can answer "your application submission was flagged as possible
   spam… please submit your application again" **and blank every field**. Clicking
   Submit again straight away sends an EMPTY application, which looks far more like

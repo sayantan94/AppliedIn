@@ -39,7 +39,15 @@ def _discovery_running() -> bool:
     """
     from discovery import handler as _handler
 
-    return bool(_RUNNING["discover"] or _handler._RUNNING.locked())
+    return bool(_RUNNING["discover"] or _handler.scanning())
+
+
+def _scanning_company(name: str) -> bool:
+    """True while THIS company is being scanned. The question worth asking before
+    refusing a scan — that another company is being scanned is not a reason."""
+    from discovery import handler as _handler
+
+    return (name or "").strip().lower() in _handler.scanning()
 
 
 def _rescreen_company(name: str) -> int:
@@ -761,12 +769,14 @@ def create_app() -> FastAPI:
         name = ((body or {}).get("name") or "").strip()
         if not name:
             return {"ok": False, "error": "name required"}
-        if _discovery_running() or _RUNNING["process"]:
-            # Say WHICH guard refused. Without this the dashboard offered to stop
-            # "the run", stopped discovery, retried, was refused by the process
-            # guard, and asked again — a confirm dialog that never ends.
+        # Refuse only if THIS company is already being scanned. It used to refuse
+        # whenever any discovery OR any backlog processing was running, which meant
+        # a scan of one employer blocked every other one, and scoring the backlog —
+        # which touches no company's careers page at all — blocked scanning
+        # entirely. Neither shares anything with a scan of a different company.
+        if _scanning_company(name):
             return {"ok": False, "status": "already_running",
-                    "blocked_by": "discover" if _discovery_running() else "process"}
+                    "blocked_by": "discover", "company": name}
         careers_url = ((body or {}).get("careers_url") or "").strip()
         profile_id = str((body or {}).get("profile_id") or "")
         from discovery.handler import add_watchlist_company, list_watchlist_companies
@@ -1026,12 +1036,16 @@ def create_app() -> FastAPI:
         Body may carry `{"companies": ["Ramp", ...]}` to scope the run to the
         picked companies; omit/empty = the whole watchlist. Discover-only: it does
         not score, tailor, or apply (that's /actions/process)."""
-        # Asks the lock, not just this module's flag, so a scan the daemon started
-        # on its schedule is refused honestly here instead of reporting success and
-        # then being dropped silently one call deeper.
-        if _discovery_running():
-            return {"ok": False, "status": "already_running", "blocked_by": "discover"}
         only = [c for c in ((body or {}).get("companies") or []) if isinstance(c, str)]
+        # Refuse only when there is genuinely nothing to do: every company asked
+        # for is already being scanned. A scan of some OTHER company is not a
+        # reason to refuse this one, and an un-scoped run is never refused here —
+        # run_discovery claims whatever is free and gets on with it.
+        from discovery import handler as _h
+
+        if only and {c.strip().lower() for c in only} <= _h.scanning():
+            return {"ok": False, "status": "already_running", "blocked_by": "discover",
+                    "companies": only}
         # Everything this run finds is stamped with the chosen identity, so a whole
         # batch applies from one address without touching each job afterwards.
         profile_id = str((body or {}).get("profile_id") or "")
@@ -1134,12 +1148,10 @@ def create_app() -> FastAPI:
             # The crawl and the posting reads it spawns. Never "apply".
             killed += kill_live_sessions("crawl") + kill_live_sessions("jd")
             _RUNNING["discover"] = False
-            # Only held while a run is in flight, and releasing an unheld lock
-            # raises, so this is best effort by design.
-            try:
-                _handler._RUNNING.release()
-            except RuntimeError:
-                pass
+            # Clear every company claim. The runs themselves release in a finally,
+            # so this only matters when one died without unwinding — but a claim
+            # left behind would refuse that company for good.
+            _handler._release(_handler.scanning())
         if what in ("process", "all"):
             _RUNNING["process"] = False
         if what in ("apply", "all"):

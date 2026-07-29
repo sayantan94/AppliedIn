@@ -682,12 +682,36 @@ def _apply_outcome(resp: Any) -> dict:
     return {}
 
 
+# Reason codes whose plain meaning is "the board said no", not "something broke".
+# Without this they surfaced as a bare code next to red FAILED styling and read as
+# a bug in the pipeline, which sent the owner looking for a fault that was not
+# there. Nothing was submitted in any of these; the run stopped where it should.
+_BOARD_SAID_NO = {
+    "application_limit": (
+        "The board refused the submission under its own application cap (Ashby "
+        "boards allow 5 applications per 180 days across roles; Google allows 3 "
+        "per 30 days). Nothing was submitted and nothing is wrong here — this is "
+        "the safety stop doing its job. The cap is the employer's, so it clears "
+        "on their schedule, not by retrying."),
+    "duplicate_application": (
+        "The board already has an application from you for this role, so it "
+        "refused a second one. Nothing was submitted — this is the duplicate "
+        "guard working, not a failure."),
+    "already_applied": (
+        "You have already applied to this role. Nothing was submitted; a second "
+        "application under your name is the one thing this must never do."),
+}
+
+
 def _fail_reason(outcome: dict) -> str:
     """A plain sentence for why the apply didn't complete — shown on the card."""
     if not outcome:
         return ("The apply step didn't run a browser submission — no application was "
                 "completed. Try again, or check that the posting is still live.")
     status, detail = outcome.get("status"), (outcome.get("detail") or "").strip()
+    reason = str(outcome.get("reason") or "")
+    if reason in _BOARD_SAID_NO:
+        return _BOARD_SAID_NO[reason] + (f" The board said: {detail}" if detail else "")
     if status == "uncertain":
         return ("The form was filled and submit was clicked, but NO confirmation "
                 "appeared (the page redirected). The application may not have gone "

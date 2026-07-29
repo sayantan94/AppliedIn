@@ -215,7 +215,35 @@ def add_watchlist_company(name: str, careers_url: str = "") -> dict:
 # dashboard's Discover button both land here, and they were able to run at once:
 # a single-company run the owner had just started would be interleaved with a
 # full watchlist sweep, so the log they were reading described neither.
-_RUNNING = threading.Lock()
+# Which companies are being scanned RIGHT NOW, and the lock guarding that set.
+#
+# This used to be one global lock, so a scan of any company refused a scan of every
+# other one. Two crawls of DIFFERENT employers share nothing — separate sites,
+# separate feeds, separate browser sessions, and their findings land under
+# different keys — so the only thing worth preventing is two scans of the SAME
+# company, which would duplicate the work and race each other's writes.
+_LOCK = threading.Lock()
+_SCANNING: set[str] = set()
+
+
+def scanning() -> set[str]:
+    """The companies being scanned right now, lowercased."""
+    with _LOCK:
+        return set(_SCANNING)
+
+
+def _claim(names: set[str]) -> set[str]:
+    """Take the ones nobody else is scanning. Atomic, so two requests arriving
+    together cannot both claim the same company."""
+    with _LOCK:
+        free = names - _SCANNING
+        _SCANNING.update(free)
+        return free
+
+
+def _release(names: set[str]) -> None:
+    with _LOCK:
+        _SCANNING.difference_update(names)
 
 
 def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
@@ -233,14 +261,42 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
     a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
     Lambda (cloud).
     """
-    if not _RUNNING.acquire(blocking=False):
-        scope = ", ".join(only) if only else "the whole watchlist"
-        log.info("discovery already running — skipping this request (%s)", scope)
-        return {"enqueued": 0, "crawled": 0, "skipped": "another discovery is running"}
+    targets = _targets(only)
+    if not targets:
+        return {"enqueued": 0, "crawled": 0, "skipped": "no companies matched"}
+    claimed = _claim(targets)
+    if not claimed:
+        busy = ", ".join(sorted(targets))
+        log.info("already scanning %s — skipping this request", busy)
+        return {"enqueued": 0, "crawled": 0,
+                "skipped": f"already scanning {busy}"}
+    if len(claimed) < len(targets):
+        # Partial overlap: get on with the rest rather than refusing everything.
+        log.info("already scanning %s — running the other %d",
+                 ", ".join(sorted(targets - claimed)), len(claimed))
     try:
-        return _run_discovery(only, profile_id)
+        return _run_discovery(sorted(claimed), profile_id)
     finally:
-        _RUNNING.release()
+        _release(claimed)
+
+
+def _targets(only: list[str] | None) -> set[str]:
+    """The companies a request would scan, lowercased, before anything is claimed.
+
+    Resolved here rather than inside the run so the claim can be per company: to
+    know a request does not collide with a running one, you have to know which
+    companies it covers.
+    """
+    settings = get_settings()
+    names = {c.name.strip().lower()
+             for c in load_watchlist(Path(settings.config_dir) / "watchlist.yaml")}
+    if only:
+        wanted = {n.strip().lower() for n in only if n and n.strip()}
+        return names & wanted
+    # An un-scoped run honours the skip toggles; an explicit pick overrides them.
+    from core import flags as _flags
+
+    return names - set(_flags.skipped_companies() or ())
 
 
 def _run_discovery(only: list[str] | None, profile_id: str) -> dict:

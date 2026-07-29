@@ -47,26 +47,34 @@ def test_happy_path_matches():
     assert stage1_match(_job(), prefs) is True
 
 
-def test_only_one_discovery_runs_at_a_time():
+def test_a_company_is_never_scanned_by_two_runs_at_once():
     """A scheduled sweep and a Discover click both call run_discovery().
 
     They were able to run together, so a single-company run the owner had just
     started got interleaved with a full watchlist sweep and the log they were
     watching described neither.
-    """
-    from discovery.handler import _RUNNING, run_discovery
 
-    assert _RUNNING.acquire(blocking=False)
+    The guard is per COMPANY, not global. Two crawls of different employers share
+    nothing — different sites, different feeds, different browser sessions — and
+    refusing them wholesale meant a scan of one company blocked every other one.
+    What must not happen is two runs scanning the SAME company, duplicating the
+    work and racing each other's writes.
+    """
+    from discovery.handler import _claim, _release, run_discovery, scanning
+
+    assert _claim({"nvidia"}) == {"nvidia"}
     try:
         result = run_discovery(only=["NVIDIA"])
         assert result["enqueued"] == 0
-        assert "another discovery is running" in result["skipped"]
-    finally:
-        _RUNNING.release()
+        assert "already scanning" in result["skipped"]
 
-    # and the lock is free again afterwards
-    assert _RUNNING.acquire(blocking=False)
-    _RUNNING.release()
+        # A DIFFERENT company is not blocked by it.
+        assert _claim({"waymo"}) == {"waymo"}
+        _release({"waymo"})
+    finally:
+        _release({"nvidia"})
+
+    assert scanning() == set(), "claims are released afterwards"
 
 
 def test_a_reset_voids_work_that_was_already_running():
