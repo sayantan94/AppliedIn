@@ -125,6 +125,54 @@ def _throttle_state() -> dict:
     return state()
 
 
+def _company_from_url(url: str) -> str:
+    """A usable employer name from a job URL, when nothing better is known.
+
+    Boards put the employer in different places, and taking the wrong one names
+    the row after the software: `oracle.wd5.myworkdayjobs.com` became "Myworkdayjobs"
+    and `boards.greenhouse.io/stripe` would become "Greenhouse". A row named after
+    the ATS cannot be filtered, queued per company, or matched to per-company
+    preferences — it is effectively lost on the board.
+
+      greenhouse / lever / ashby   first path segment    /stripe/jobs/1  -> Stripe
+      workday                      FIRST subdomain       oracle.wd5.…    -> Oracle
+      anything else                the registered name   careers.acme.com -> Acme
+    """
+    from urllib.parse import urlparse
+
+    u = urlparse(url if "://" in url else "https://" + url)
+    host = (u.hostname or "").lower()
+    parts = [p for p in (u.path or "").split("/") if p]
+
+    if any(b in host for b in ("greenhouse.io", "lever.co", "ashbyhq.com")):
+        # The embed form carries the employer in ?for=, and its path is all board
+        # words — without this it reads the software's name off the host instead.
+        from urllib.parse import parse_qs
+
+        if (for_ := parse_qs(u.query or "").get("for", [""])[0].strip()):
+            return for_.replace("-", " ").replace("_", " ").title()
+        for p in parts:
+            if p not in ("embed", "job_app", "jobs", "job", "en", "careers"):
+                return p.replace("-", " ").replace("_", " ").title()
+    if "myworkdayjobs.com" in host or "workday.com" in host:
+        first = host.split(".")[0]
+        if first not in ("www", "jobs", "careers"):
+            return first.replace("-", " ").title()
+    # A vendor host names the employer nowhere useful: eeho.fa.us2.oraclecloud.com
+    # is Oracle's own portal, and "Oraclecloud" is the product, not the employer.
+    for vendor, name in (("oraclecloud.com", "Oracle"), ("myworkday", ""),
+                         ("icims.com", ""), ("smartrecruiters.com", "")):
+        if vendor in host and name:
+            return name
+    bits = [b for b in host.split(".") if b not in ("www", "jobs", "careers", "apply", "boards")]
+    # Drop the public suffix: acme.co.uk -> Acme, careers.acme.com -> Acme.
+    if len(bits) >= 2 and bits[-2] in ("co", "com", "org", "net", "ac"):
+        bits = bits[:-2]
+    elif len(bits) >= 1:
+        bits = bits[:-1]
+    return (bits[-1].replace("-", " ").title() if bits else "Company")
+
+
 def _closed_reason(row: dict) -> str | None:
     """A plain sentence for why a job is in a terminal state — so the UI can say
     WHY something closed instead of just showing a grey tag."""
@@ -176,6 +224,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "gate_reason": row.get("gate_reason"),
         "fail_kind": row.get("fail_kind") or "",
         "fail_reason": row.get("fail_reason") or "",
+        "tailored_at": row.get("tailored_at") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
         "closed_reason": _closed_reason(row),
@@ -976,11 +1025,7 @@ def create_app() -> FastAPI:
         # Proper company: a watchlist match by ATS host beats the ugly URL slug.
         company = ((body or {}).get("company") or "").strip() or company_for_url(url)
         if not company:
-            host = urlparse(url).hostname or ""
-            parts = [p for p in urlparse(url).path.split("/") if p]
-            slug = (parts[0] if "ashbyhq" in host or "greenhouse" in host or "lever" in host
-                    else host.split(".")[-2] if "." in host else host) or "Company"
-            company = slug.replace("-", " ").replace(".", " ").title()
+            company = _company_from_url(url)
         title = ((body or {}).get("title") or "").strip() or "Role from URL"
 
         job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
@@ -1311,10 +1356,169 @@ def create_app() -> FastAPI:
              url=row.get("jd_url", ""))
         return {"ok": True, "status": "queued"}
 
+    # --- verification codes -------------------------------------------------
+    # A browser session cannot read a file: its tools are the browser plus Write,
+    # so an unattended run cannot reach anything on disk. It CAN read a page, so
+    # the code is handed over as one. The session opens this and reloads until the
+    # code shows up; the owner types it into the dashboard meanwhile.
+    @app.get("/verify/{pk}", include_in_schema=False)
+    async def verify_page(pk: str, company: str = ""):
+        """The page a waiting session reads. It HOLDS rather than answering at once.
+
+        The first version answered immediately and asked the session to reload every
+        twenty seconds. It did not work, and the log said why: the session exited
+        cleanly (`exit=0`, `stop_reason: end_turn`) after seven reads and about two
+        minutes. A model will not sit in a twenty-seven iteration poll loop because
+        a prompt told it to — it decides it is finished.
+
+        So one read costs time instead. The request is held open until the code
+        arrives or HOLD_S passes, which turns nine minutes of waiting into a handful
+        of reads rather than dozens. The page also refreshes itself, so the tab
+        keeps advancing even between the session's own looks at it.
+        """
+        import asyncio
+
+        from fastapi.responses import HTMLResponse
+
+        from core.verification import Verification
+
+        HOLD_S, TICK_S = 25, 0.5   # under a typical 30s navigation timeout
+        v = Verification(make_stores(settings).tracking.r)
+        code = v.code_for(pk)
+        if not code:
+            v.start_waiting(pk, company)
+            waited = 0.0
+            while waited < HOLD_S and not v.waited_too_long(pk):
+                await asyncio.sleep(TICK_S)
+                waited += TICK_S
+                if (code := v.code_for(pk)):
+                    break
+        if not code:
+            # Opening the page IS the announcement. Asking the session to report
+            # its wait separately would mean a run that forgot to could sit there
+            # with nobody knowing it was blocked.
+            v.start_waiting(pk, company)
+        state = "READY" if code else ("EXPIRED" if v.waited_too_long(pk) else "WAITING")
+        # Self refresh, so the tab keeps advancing between the session's own looks.
+        refresh = "" if code else '<meta http-equiv="refresh" content="5">'
+        # Deliberately plain: the session reads this with a page read, so the words
+        # it must match are the only thing on it.
+        return HTMLResponse(
+            f"<!doctype html><meta charset=utf-8>{refresh}"
+            f"<title>Verification {state}</title>"
+            f"<body style='font:16px system-ui;padding:2rem'>"
+            f"<h1>VERIFICATION {state}</h1>"
+            f"<p>job: {pk}</p>"
+            + (f"<p>CODE: <b style='font-size:2rem'>{code}</b></p>"
+               if code else "<p>No code yet. Reload this page.</p>")
+            + "</body>")
+
+    @app.post("/actions/verify-code")
+    def verify_code(body: dict):
+        """Hand a verification code to the session waiting on that job."""
+        from core.verification import Verification
+
+        pk = str((body or {}).get("pk") or "").strip()
+        code = str((body or {}).get("code") or "").strip()
+        if not pk or not code:
+            return {"ok": False, "error": "need both a job and a code"}
+        v = Verification(make_stores(settings).tracking.r)
+        v.give(pk, code)
+        return {"ok": True, "pk": pk}
+
+    @app.get("/verify-pending")
+    def verify_pending():
+        """Jobs whose browser session is sitting waiting for a code."""
+        from core.verification import Verification
+
+        return {"waiting": Verification(make_stores(settings).tracking.r).pending()}
+
     @app.post("/actions/skip/{pk}")
     def skip(pk: str):
-        make_stores(settings).tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
-        return {"ok": True}
+        """Decline a job: mark it skipped AND take it out of the apply queue.
+
+        Skipping used to only set the status, leaving the pk queued — so a job the
+        owner had explicitly declined was still dispatched later. The applier
+        refuses it now, but a job that cannot run should not hold a place in the
+        queue either: it makes the depth lie and spends that company's turn.
+        """
+        from core.apply_queue import ApplyQueue
+
+        stores = make_stores(settings)
+        stores.tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
+        q = ApplyQueue(stores.tracking.r)
+        removed = q.remove(pk)
+        q.drop_dead_letter(pk)
+        return {"ok": True, "dequeued": removed,
+                "note": ("It is being applied to right now — use Stop applying to "
+                         "end that.") if pk in q.in_flight() else ""}
+
+    @app.post("/actions/apply-now/{pk}")
+    def apply_now(pk: str, background: BackgroundTasks):
+        """Run ONE queued job immediately, ahead of its turn.
+
+        Every tailored job is queued now, so a card's button no longer means "add
+        this" — it means "do this one first". Still through the same lease, so it
+        cannot open a second session against a company that already has one.
+        """
+        import logging
+
+        from agent.run import run_queued
+        from core.apply_queue import ApplyQueue
+
+        log = logging.getLogger("server")
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+        row = stores.tracking.get(pk)
+        if not row:
+            # No such job. Without this the endpoint happily leased a company and
+            # dispatched a run for a pk that does not exist, which then sat in the
+            # in-flight set holding that company's turn against nothing.
+            return {"ok": False, "error": "No such job."}
+        if row.get("status") in ("applied", "applied_manual"):
+            return {"ok": False, "error": f"Already {row['status']} — not reapplying."}
+        company = row.get("company") or ""
+        if pk in q.in_flight():
+            return {"ok": False, "error": "This one is already being filled."}
+        if (company or "").strip().lower() in q.depth()["running"]:
+            return {"ok": False,
+                    "error": f"{company} already has an application running."}
+        if not q.remove(pk):
+            # Not waiting — queue it, so a job that never made it in still works.
+            q.put(pk, company)
+        item = {"pk": pk, "company": company, "attempts": 0, "history": []}
+        q.r.sadd("applyq:inflight", (company or "").strip().lower() or "unknown")
+        q.r.sadd("applyq:inflight:pks", pk)
+        background.add_task(run_queued, item, q)
+        log.info("apply-now: %s", pk)
+        return {"ok": True, "started": pk}
+
+    @app.post("/actions/queue-remove/{pk}")
+    def queue_remove(pk: str):
+        """Take a job OUT of the apply queue without judging it.
+
+        Different from skip: the row keeps its status, so it stays on the board and
+        can be queued again later. This is "not now", where skip is "not at all".
+        """
+        from core.apply_queue import ApplyQueue
+
+        stores = make_stores(settings)
+        if not stores.tracking.get(pk):
+            # set_status writes `self.get(pk) or {"pk": pk}`, so calling it for an
+            # unknown pk INVENTS a row. A typo'd id would quietly add a job to the
+            # board that no posting corresponds to.
+            return {"ok": False, "error": "No such job."}
+        q = ApplyQueue(stores.tracking.r)
+        if pk in q.in_flight():
+            return {"ok": False,
+                    "error": "This one is being filled in the browser right now. "
+                             "Use Stop applying to end it."}
+        if not q.remove(pk):
+            return {"ok": False, "error": "It is not in the queue."}
+        # Back to needing your go-ahead, so it reappears under Ready to apply
+        # instead of vanishing from the board entirely.
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval")
+        return {"ok": True, "removed": pk}
 
     @app.post("/actions/retry/{pk}")
     def retry(pk: str, background: BackgroundTasks):

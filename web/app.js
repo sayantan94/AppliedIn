@@ -28,6 +28,7 @@ const state = {
   profiles: [],       // identities an application can go out under
   profileDefault: "", // the one used by any job that has not chosen
   collapsed: null,    // folded location buckets (null = pick the default once)
+  dayShut: null,      // folded tailoring-date groups in Ready to apply
   companies: [],      // watchlist names for the discovery picker
   picked: new Set(),  // companies picked for the next discovery ("" empty = all)
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
@@ -41,10 +42,12 @@ const state = {
   headless: false,
   paused: false,
   autoMin: 8,
-  queue: null,        // /apply-queue snapshot: who runs, who waits, the limit
+  queue: null,
+  verifying: [],     // sessions waiting on a one-time code        // /apply-queue snapshot: who runs, who waits, the limit
   dead: [],           // /apply-queue/dead: jobs that used every attempt
   secOpen: { closed: false }, // pipeline stack: which foldable sections are open
   openCos: new Set(), // pipeline stack: companies expanded inside Found
+  openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
   page: {},           // pipeline stack: rows revealed per list key
 };
 
@@ -208,6 +211,40 @@ function renderDiscoverLabel() {
   else pl.textContent = pickedAll()
     ? "Process applications"
     : `Process · ${state.picked.size} selected`;
+}
+
+/* The company picker for a pasted role. A dropdown of what is already tracked,
+   because the name is a KEY — the queue, the per-company preferences and the board
+   filter all match on it, so "Waymo" typed slightly differently is a second
+   company that inherits none of the first one's settings. Free text stays
+   available for a genuinely new employer, behind an explicit choice. */
+function renderCompanyOptions() {
+  const sel = $("#rp-url-company");
+  if (!sel) return;
+  const keep = sel.value;
+  const names = (state.companies || []).map((c) => (c && c.name) || c).filter(Boolean);
+  sel.innerHTML = `<option value="">Guess it from the URL</option>`
+    + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
+    + `<option value="__new__">＋ Add a new company…</option>`;
+  if (keep) sel.value = keep;
+  toggleNewCompany();
+}
+
+function toggleNewCompany() {
+  const sel = $("#rp-url-company"), box = $("#rp-url-newco");
+  if (!sel || !box) return;
+  const adding = sel.value === "__new__";
+  box.hidden = !adding;
+  if (adding) box.focus();
+}
+
+/* What the role should be filed under: the typed name when adding one, the
+   selection otherwise, and empty to let the server derive it. */
+function chosenCompany() {
+  const sel = $("#rp-url-company"), box = $("#rp-url-newco");
+  if (!sel) return "";
+  if (sel.value === "__new__") return (box?.value || "").trim();
+  return sel.value;
 }
 
 function renderPicker() {
@@ -586,13 +623,12 @@ function laneCard(r) {
     retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
        title="Opens the filled application in Chrome again. Solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`;
   } else if (canApply(r)) {
-    // ONE control. Apply and Queue were two buttons doing two different things:
-    // Apply ran the browser immediately, straight past the per company rule, so
-    // approving three roles at one employer opened three sessions against it.
-    // Approving now means "put it in line", which is the only thing it can mean,
-    // so there is nothing left for a second button to say.
-    retry = `<button class="kc-retry kc-apply" data-act="answer" data-pk="${esc(r.pk)}"
-       title="Approve and join the apply queue. It starts when this company is free">▶ Apply</button>`;
+    // Everything tailored is already queued, so Apply no longer means "add this"
+    // — it means "do this one first". Remove and Skip are the other two things
+    // you can decide about a queued job, and they went missing when the separate
+    // queue section was folded into this one; they belong on the card now.
+    retry = `<button class="kc-retry kc-apply" data-act="apply-now" data-pk="${esc(r.pk)}"
+       title="Run this one now rather than waiting for its turn">▶ Apply now</button>`;
   } else if (r.status === "found") {
     retry = `<button class="kc-retry kc-run" data-act="run-now" data-pk="${esc(r.pk)}"
        title="Score and tailor this job now. It stops before applying">▶ Run now</button>`;
@@ -601,6 +637,9 @@ function laneCard(r) {
     retry = `<button class="kc-retry kc-queue" data-act="queue-apply" data-pk="${esc(r.pk)}"
        title="Clear the failure and put this job back on the apply queue">↻ Requeue</button>`;
   }
+  const aged = r.tailored_at && canApply(r)
+    ? `<span class="kc-age" title="résumé written ${esc(new Date(r.tailored_at).toLocaleString())}">${esc(ageLabel(r.tailored_at))}</span>`
+    : "";
   const act = state.activity[r.pk];
   const live = (["tailoring", "submitting"].includes(r.status) && act && act.detail)
     ? `<div class="kc-live"><span class="kc-live-dot"></span>${esc(act.detail.replace(/^[^\w]+/, "").slice(0, 70))}</div>` : "";
@@ -611,12 +650,85 @@ function laneCard(r) {
     ${locHtml(r.location)}
     ${profHtml(r.profile_id)}
     ${live}
-    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${retry}</div>
+    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${aged}${retry}</div>
   </div>`;
 }
-/* Group the Tailored lane by location tier, best tier first, with a heading that
-   says how many are in it. A tier the owner has filtered out is dropped entirely
-   rather than shown empty. */
+/* Group the approval queue by the DAY the résumé was written.
+
+   A tailored résumé is a snapshot taken against the posting as it read that day,
+   so its age is the thing worth seeing before approving: today's batch is fresh,
+   last week's was written against a posting that may have changed and a base
+   résumé that has since been edited. Location stays available as a filter — it
+   ranks WHICH to approve, where the date says whether to approve at all. */
+function dayKey(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? "" : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+    + `-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/* "Today" alone makes you work out what today is to compare two groups, and it
+   goes stale on a page left open overnight. So the actual date is always shown,
+   with the relative word in front of it only where that word helps. */
+function dayLabel(key) {
+  if (!key) return "No date recorded";
+  const d = new Date(key + "T12:00:00");
+  if (isNaN(d)) return "No date recorded";
+  const exact = d.toLocaleDateString(undefined,
+    { weekday: "short", day: "numeric", month: "short" });
+  const today = dayKey(new Date().toISOString());
+  if (key === today) return `Today · ${exact}`;
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  if (key === dayKey(y.toISOString())) return `Yesterday · ${exact}`;
+  return exact;
+}
+
+/* "3 days ago" on the card itself, because inside a folded group the heading is
+   out of sight and the age is the point. */
+function ageLabel(iso) {
+  if (!iso) return "";
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  if (isNaN(days)) return "";
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days}d ago`;
+}
+
+function bucketedByDate(rows) {
+  if (state.locFilter) rows = rows.filter((r) => locTier(r.location).key === state.locFilter);
+  if (!rows.length) return `<div class="kl-empty">none</div>`;
+  const groups = new Map();
+  for (const r of rows) {
+    const k = dayKey(r.tailored_at);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  // Newest first, and undated last: an unknown date is the least useful thing to
+  // lead with, not the most.
+  const keys = [...groups.keys()].sort((a, b) => (b || "").localeCompare(a || ""))
+    .sort((a, b) => (a ? 0 : 1) - (b ? 0 : 1));
+
+  if (state.dayShut === null) {
+    // Newest day open, the rest folded. Otherwise 75 approvals is a wall.
+    state.dayShut = new Set(keys.slice(1));
+  }
+  let html = "";
+  for (const k of keys) {
+    const inDay = groups.get(k).slice()
+      .sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+    const shut = state.dayShut.has(k);
+    html += `<div class="bucket bk-day${shut ? " shut" : ""}">
+      <button class="bk-head" data-day="${esc(k)}">
+        <span class="bk-caret">${shut ? "▸" : "▾"}</span>
+        <span class="bk-name">${esc(dayLabel(k))}</span>
+        <span class="bk-n mono">${inDay.length}</span>
+      </button>
+      ${shut ? "" : `<div class="ps-grid">${inDay.map(laneCard).join("")}</div>`}
+    </div>`;
+  }
+  return html;
+}
+
+/* Group by location tier, best tier first. Still used by the lanes that have no
+   tailoring date to group by. */
 function bucketed(rows) {
   if (!rows.length) return `<div class="kl-empty">none</div>`;
   const groups = new Map(LOC_TIERS.map((t) => [t.key, []]));
@@ -773,7 +885,7 @@ function readySec(rows) {
       ${nApprove ? `<button class="ps-link on" data-approve-all="1"
         title="Approve all ${nApprove} and put them in the apply queue, one at a time per company">Approve all ${nApprove}</button>` : ""}
     </div>
-    ${n ? `<div class="ps-ready-body">${locBar}${bucketed(rows)}</div>` : ""}
+    ${n ? `<div class="ps-ready-body">${locBar}${bucketedByDate(rows)}</div>` : ""}
   </section>`;
 }
 
@@ -791,11 +903,17 @@ function flightSec(rows) {
   </section>`;
 }
 
-/* Queued: approved, waiting its turn. Its own section because "Ready to apply"
-   means "you have not decided yet" and In flight means "a browser is on it right
-   now" — a queued job is neither, and putting it in either one makes a button
-   press look like it did nothing. Rendered in DISPATCH order from the queue
-   rather than in board order, because the order is the useful part. */
+/* Queued to apply: approved work waiting its turn, grouped by COMPANY because
+   the company is the unit the queue actually runs on — one application at a
+   time per company, several companies in parallel up to the limit. Each group
+   head is what the old flat list could not be: the company's own Process
+   control at readable width, its place in line, and a fold that opens to
+   every one of its jobs, so nothing hides behind an "and N more".
+
+   Positions and "starts next" are worked out on the FULL queue BEFORE any
+   filtering: hiding NVIDIA must not move a Microsoft job up the line, and
+   renumbering it to 1 would claim it did. Groups keep first appearance order,
+   which IS dispatch order of each company's next job. */
 function queuedSec(rows) {
   const q = state.queue || {};
   const cap = q.concurrency || 1;
@@ -803,43 +921,68 @@ function queuedSec(rows) {
   rows.forEach((r) => { byPk[r.pk] = r; });
   // `rows` has already been through the board's filters, so intersecting with it
   // is what makes "filter to Microsoft" show Microsoft's queue and not everyone's.
-  // Position and "starts next" are worked out on the FULL queue BEFORE that
-  // filter: hiding NVIDIA does not move a Microsoft job up the line, and
-  // renumbering it to 1 would claim it did.
   const pend = (q.pending || [])
     .map((it, gi) => ({ ...it, pos: gi + 1, first: gi < cap && !it.blocked }))
     .filter((it) => byPk[it.pk]);
   if (!pend.length) return "";
 
-  const list = pend.slice(0, 14).map((it) => {
+  const running = new Set(q.running || []);
+  const groups = new Map();
+  for (const it of pend) {
+    if (!groups.has(it.company)) groups.set(it.company, []);
+    groups.get(it.company).push(it);
+  }
+
+  const row = (it) => {
     const r = byPk[it.pk] || {};
-    const why = it.blocked === "company_busy" ? `${esc(it.company)} is busy`
+    const why = it.blocked === "company_busy" ? "waiting for the one running"
       : it.blocked === "backoff" ? `retry in ${Math.ceil(it.ready_in / 60)}m`
       : it.first ? "starts next" : "waiting for a slot";
-    return `<li class="un-row${it.first ? " un-next" : ""}"
-        data-open="${esc(it.pk)}" role="button" tabindex="0">
-      <span class="un-pos mono">${it.pos}</span>
-      <span class="un-co">${esc(it.company)}</span>
-      <span class="un-title">${esc(r.title || it.pk)}</span>
+    return `<li class="un-row${it.first ? " un-next" : ""}">
+      <span class="un-pos mono" title="position in the whole queue">${it.pos}</span>
+      <span class="un-title" data-open="${esc(it.pk)}" role="button" tabindex="0">${esc(r.title || it.pk)}</span>
       <span class="un-rank mono" title="position within ${esc(it.company)}">#${it.company_rank}</span>
+      <span class="un-aged mono" title="${r.tailored_at
+        ? `résumé written ${esc(new Date(r.tailored_at).toLocaleString())}`
+        : "no tailoring date recorded"}">${esc(ageLabel(r.tailored_at) || "")}</span>
       <span class="un-why">${why}</span>
+      <span class="un-acts">
+        <button class="un-x" data-act="apply-now" data-pk="${esc(it.pk)}"
+          title="Run this one now, ahead of its turn">Now</button>
+        <button class="un-x" data-act="queue-remove" data-pk="${esc(it.pk)}"
+          title="Take it out of the queue. It stays on the board">Remove</button>
+        <button class="un-x un-skip" data-act="queue-skip" data-pk="${esc(it.pk)}"
+          title="Skip this job for good. It leaves the queue and moves to closed">Skip</button>
+      </span>
     </li>`;
-  }).join("");
+  };
 
-  // One run control per company. The point of "just this company" is that you work
-  // through an employer deliberately while automatic applying is off, so the
-  // control belongs beside that company's jobs rather than on one global button.
-  const running = new Set(q.running || []);
-  const cos = [];
-  pend.forEach((it) => { if (!cos.includes(it.company)) cos.push(it.company); });
-  const runners = cos.map((co) => {
+  const single = groups.size === 1;
+  const body = [...groups.entries()].map(([co, list]) => {
     const busy = running.has((co || "").trim().toLowerCase());
-    const n = pend.filter((it) => it.company === co).length;
-    return `<button class="ps-link${busy ? "" : " on"}" data-act="drain-co"
-       data-company="${esc(co)}"${busy ? " disabled" : ""}
-       title="${busy ? `${esc(co)} already has one running`
-                     : `Work through ${esc(co)}'s ${n} queued job(s) now, one after another`}"
-      >${busy ? "● " : "▶ "}Process ${esc(co)}${busy ? "" : ` (${n})`}</button>`;
+    const open = single || state.coFilter === co || state.openQCos.has(co);
+    const head = list[0];
+    const stateTxt = busy ? "one in flight now"
+      : head.first ? "starts next"
+      : head.blocked === "backoff" ? `retry in ${Math.ceil(head.ready_in / 60)}m`
+      : `in line at ${head.pos}`;
+    return `<div class="ung${open ? " open" : ""}">
+      <div class="ung-head">
+        <button class="ung-fold" data-qco-fold="${esc(co)}" aria-expanded="${open}"
+          title="${open ? "Hide" : "Show"} the ${list.length} queued at ${esc(co)}">
+          <span class="ps-caret" aria-hidden="true"></span>
+          <span class="un-co">${esc(co)}</span>
+          <span class="un-gn mono" title="${list.length} job${list.length === 1 ? "" : "s"} queued">${list.length}</span>
+          <span class="un-gstate${busy ? "" : head.first ? " next" : ""}">${stateTxt}</span>
+        </button>
+        <button class="ps-link un-go${busy ? "" : " on"}" data-act="drain-co"
+          data-company="${esc(co)}"${busy ? " disabled" : ""}
+          title="${busy ? `${esc(co)} already has one running`
+                        : `Work through ${esc(co)}'s ${list.length} queued job${list.length === 1 ? "" : "s"}, one after another`}"
+        >${busy ? "● Running" : "▶ Process"}</button>
+      </div>
+      ${open ? `<ol class="un-list">${list.map(row).join("")}</ol>` : ""}
+    </div>`;
   }).join("");
 
   return `<section class="psec ps-queued has">
@@ -847,11 +990,10 @@ function queuedSec(rows) {
       <span class="ps-dot on"></span>
       <span class="ps-name">Queued to apply</span>
       <span class="ps-n mono">${pend.length}</span>
-      <span class="ps-hint">In dispatch order. ${cap} at a time, never two to one company.</span>
+      <span class="ps-chip">${groups.size} compan${groups.size === 1 ? "y" : "ies"}</span>
+      <span class="ps-hint">By company, in dispatch order. Runs ${cap} at a time, one per company.</span>
     </div>
-    <div class="un-runners">${runners}</div>
-    <ol class="un-list">${list}</ol>
-    ${pend.length > 14 ? `<div class="un-more">and ${pend.length - 14} more</div>` : ""}
+    <div class="un-groups">${body}</div>
   </section>`;
 }
 
@@ -882,18 +1024,18 @@ function foundGroup(co, rows, forceOpen) {
   const scored = rows.filter((r) => r.match_score != null).length;
   const key = `co:${co}`;
   const shown = state.page[key] || REVEAL;
-  return `<div class="fgroup">
+  return `<div class="fgroup${open ? " open" : ""}">
     <button class="fg-head" data-co-fold="${esc(co)}" aria-expanded="${open}"
       title="${open ? "Hide" : "Show"} the postings found at ${esc(co)}">
-      <span class="ps-caret">${open ? "▾" : "▸"}</span>
+      <span class="ps-caret" aria-hidden="true"></span>
       <span class="fg-co">${esc(co)}</span>
-      <span class="fg-n mono">${rows.length}</span>
+      <span class="fg-n mono" title="${rows.length} posting${rows.length === 1 ? "" : "s"}">${rows.length}</span>
       ${best >= 0
         ? `<span class="fg-best mono">best ${scoreHtml(best)} · ${scored} scored</span>`
         : `<span class="fg-best mono">not scored yet</span>`}
     </button>
-    ${open ? `<div class="jrows fg-rows">${rows.slice(0, shown).map(foundRow).join("")}</div>
-      ${rows.length > shown ? moreBtn(key, shown, rows.length) : ""}` : ""}
+    ${open ? `<div class="jrows fg-rows">${rows.slice(0, shown).map(foundRow).join("")}
+      ${rows.length > shown ? moreBtn(key, shown, rows.length) : ""}</div>` : ""}
   </div>`;
 }
 function foundSec(rows) {
@@ -1439,6 +1581,7 @@ async function loadCompanies() {
   renderPicker();
   renderSkipPicker();
   renderDiscoverLabel();
+  renderCompanyOptions();   // keep the custom-role datalist in step
 }
 
 async function loadApps() {
@@ -1506,7 +1649,17 @@ async function post(path, body) {
       headers: { ...auth.header(), "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     });
-    return await r.json().catch(() => ({}));
+    // A 404/405 means the running daemon predates this route — the page has been
+    // reloaded but the server has not been restarted. Saying so beats a generic
+    // failure: it is the difference between "restart the daemon" and an hour
+    // spent debugging a button that is fine.
+    if (r.status === 404 || r.status === 405) {
+      return { ok: false, error: "That action needs a daemon restart "
+                               + "(./appliedin stop && ./appliedin start)." };
+    }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && !data.error) data.error = `The server returned ${r.status}.`;
+    return data;
   } catch {
     toast("Request failed — is the backend running?");
     return null;
@@ -1630,6 +1783,19 @@ async function runProcess(again = false) {
 // Optimistically flip a card to a working state so a click is acknowledged in the
 // same frame. The server's own status/event overwrites this as soon as it lands;
 // if the request fails, the next loadApps() puts the real status back.
+/* A job the owner just sent to be scored and tailored. "tailoring" is a real
+   pipeline status that the board already files under Ready to apply, so the card
+   leaves Found the instant it is clicked and cannot be started twice. The server
+   overwrites this on its next poll, so a failed start corrects itself. */
+function markTailoring(pk) {
+  const row = state.apps.find((a) => a.pk === pk);
+  if (row) row.status = "tailoring";
+  state.activity[pk] = { detail: "scoring and tailoring…", at: Date.now() / 1000,
+                         kind: "running" };
+  renderPane();
+  scheduleLive(pk);
+}
+
 function markBusy(pk, detail) {
   const row = state.apps.find((a) => a.pk === pk);
   if (row) row.status = "submitting";
@@ -1663,6 +1829,26 @@ function paneAction(act, pk, el) {
         ? `Working through ${co} — ${r.queued} queued, one at a time.`
         : (r && r.error) || "Could not start it.");
       loadQueue();
+    });
+  } else if (act === "apply-now") {
+    markBusy(pk, "starting…");
+    post(`/actions/apply-now/${encodeURIComponent(pk)}`).then((r) => {
+      toast(r && r.ok ? "Applying to this one now."
+                      : (r && r.error) || "Could not start it.");
+      loadQueue(); loadApps();
+    });
+  } else if (act === "queue-remove") {
+    post(`/actions/queue-remove/${encodeURIComponent(pk)}`).then((r) => {
+      toast(r && r.ok ? "Out of the queue — still on the board under Ready to apply."
+                      : (r && r.error) || "Could not remove it.");
+      loadQueue(); loadApps();
+    });
+  } else if (act === "queue-skip") {
+    // Confirmed because it is the one that closes the job, not just unqueues it.
+    if (!confirm("Skip this job? It leaves the queue and moves to closed.")) return;
+    post(`/actions/skip/${encodeURIComponent(pk)}`).then((r) => {
+      toast(r && r.note ? r.note : "Skipped and removed from the queue.");
+      loadQueue(); loadApps();
     });
   } else if (act === "skip") {
     if (!confirm("Skip this job? It moves to closed.")) return;
@@ -2055,7 +2241,64 @@ async function loadQueue() {
     state.dead = (d && d.dead) || [];
     renderQueueBadge();
     renderQueuePanel();
+    loadVerify();
   } catch { /* backend briefly away — keep last known state */ }
+}
+
+/* A session is sitting in a browser waiting for a one-time code, and it can only
+   wait about nine minutes. That makes this the one prompt that cannot live in a
+   list to be noticed later — it goes at the top of the board, with the box to
+   answer it right there. */
+function sendVerifyCode(pk) {
+  if (!pk) return;
+  const box = $(`#verify-bar .vf-in[data-vf-pk="${CSS.escape(pk)}"]`);
+  const code = (box?.value || "").trim();
+  if (!code) { toast("Type the code first."); return; }
+  post("/actions/verify-code", { pk, code }).then((r) => {
+    toast(r && r.ok ? "Sent — the browser picks it up on its next look."
+                    : (r && r.error) || "Could not send it.");
+    if (box) box.value = "";
+    loadVerify();
+  });
+}
+
+async function loadVerify() {
+  if (DEMO) return;
+  try {
+    const r = await fetch(api("/verify-pending"), { headers: auth.header() })
+      .then((x) => x.json());
+    state.verifying = (r && r.waiting) || [];
+  } catch { return; }
+  renderVerify();
+}
+
+function renderVerify() {
+  const host = $("#verify-bar");
+  if (!host) return;
+  // Answered waits stay visible while the session has not collected the code:
+  // "I typed it and nothing happened" is exactly the state worth showing.
+  const rows = (state.verifying || []).filter((v) => !v.answered || v.unseen_s > 90);
+  if (!rows.length) { host.hidden = true; host.innerHTML = ""; return; }
+  host.innerHTML = rows.map((v) => {
+    const left = Math.max(0, 9 - Math.floor(v.waiting_s / 60));
+    // Say whether the session is still LOOKING. A code that is ready but never
+    // collected is the failure that reads as "I entered it and nothing happened",
+    // and it needs the opposite response to waiting: start the job again.
+    const gone = v.unseen_s > 90;
+    const state = v.answered
+      ? (gone ? "The code is ready but the browser has stopped checking for it."
+              : "Code sent. The browser picks it up on its next look.")
+      : (gone ? `No sign of the browser for ${Math.round(v.unseen_s)}s. It may have given up.`
+              : `is waiting for the verification code it was emailed. About ${left} min left.`);
+    return `<div class="vf-row${gone ? " vf-stale" : ""}">
+      <span class="vf-dot"></span>
+      <span class="vf-msg">${v.answered || gone ? "" : `<b>${esc(v.company || "An application")}</b> `}${state}</span>
+      <input class="vf-in" type="text" inputmode="numeric" autocomplete="one-time-code"
+        placeholder="code" data-vf-pk="${esc(v.pk)}" />
+      <button class="vf-go" data-act="verify-send" data-pk="${esc(v.pk)}">Send</button>
+    </div>`;
+  }).join("");
+  host.hidden = false;
 }
 
 function renderQueueBadge() {
@@ -2468,9 +2711,17 @@ function wire() {
     if (demoGuard()) return;
     const url = $("#rp-url").value.trim();
     if (!url) { toast("Paste the job URL first."); return; }
-    const d = await post("/actions/apply-role", { url });
+    // Naming the company matters beyond tidiness: it is the key the queue, the
+    // per-company preferences and the board filter all work from. Guessed from
+    // the URL when left blank, which is right for the big boards and wrong for
+    // a vendor host that names the software rather than the employer.
+    const company = chosenCompany();
+    const d = await post("/actions/apply-role", { url, company });
     if (d && d.ok) {
-      $("#rp-url").value = ""; closeRp();
+      $("#rp-url").value = "";
+      if ($("#rp-url-company")) $("#rp-url-company").value = "";
+      if ($("#rp-url-newco")) { $("#rp-url-newco").value = ""; $("#rp-url-newco").hidden = true; }
+      closeRp();
       toast("▶ Tailoring your résumé to that role — it'll land in Tailored when ready.");
       pollStats();
     } else if (d) toast(d.error || "Couldn't start — check the URL.");
@@ -2523,6 +2774,7 @@ function wire() {
   });
   rp.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => { if (!rp.hidden && !e.target.closest(".rolemgr")) closeRp(); });
+  $("#rp-url-company")?.addEventListener("change", toggleNewCompany);
   $("#rp-go").addEventListener("click", runRole);
   $("#rp-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
 
@@ -2758,6 +3010,15 @@ function wire() {
     if (!qp.hidden && !e.target.closest(".qmgr")) closeQp();
   });
 
+  $("#verify-bar").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-act='verify-send']");
+    if (btn) sendVerifyCode(btn.dataset.pk);
+  });
+  $("#verify-bar").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const box = e.target.closest(".vf-in");
+    if (box) { e.preventDefault(); sendVerifyCode(box.dataset.vfPk); }
+  });
   $("#llm-banner-x").addEventListener("click", () => {
     $("#llm-banner").hidden = true;
     if (!DEMO) post("/actions/clear-llm-error");
@@ -2807,6 +3068,13 @@ function wire() {
       renderPane();
       return;
     }
+    const qcoFold = e.target.closest("[data-qco-fold]");
+    if (qcoFold) {
+      const co = qcoFold.dataset.qcoFold;
+      state.openQCos.has(co) ? state.openQCos.delete(co) : state.openQCos.add(co);
+      renderPane();
+      return;
+    }
     const reveal = e.target.closest("[data-more]");
     if (reveal) {
       state.page[reveal.dataset.more] = Number(reveal.dataset.next);
@@ -2833,14 +3101,26 @@ function wire() {
     if (runNow) {
       e.stopPropagation();
       if (!demoGuard()) {
-        post(`/actions/run-job/${encodeURIComponent(runNow.dataset.pk)}`);
-        toast("Running — scoring + tailoring this job now.");
+        const pk = runNow.dataset.pk;
+        // Move the card OUT of Found straight away. Scoring and tailoring take a
+        // minute or more, and until this the row sat in Found with its button
+        // still inviting a second click — which starts the whole job again.
+        markTailoring(pk);
+        post(`/actions/run-job/${encodeURIComponent(pk)}`);
+        toast("Scoring and tailoring — it moves to Ready to apply when done.");
         pollStats();
       }
       return;
     }
     const act = e.target.closest("[data-act]");
     if (act) { paneAction(act.dataset.act, act.dataset.pk, act); return; }
+    const day = e.target.closest("[data-day]");
+    if (day) {
+      const k = day.dataset.day;
+      state.dayShut.has(k) ? state.dayShut.delete(k) : state.dayShut.add(k);
+      renderPane();
+      return;
+    }
     const open = e.target.closest("[data-open]");
     if (open) { openDrawer(open.dataset.open); return; }
     const row = e.target.closest("tr[data-pk]");

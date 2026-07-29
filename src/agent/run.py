@@ -402,6 +402,16 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # already applied (by the pipeline or by the owner's own hand) is refused
     # loudly, and its applied status is never overwritten. The tool layer checks
     # again right before the submit click; this is the cheap early exit.
+    # SKIPPED belongs here too. Skipping only set the tracking status and left the
+    # pk sitting in the apply queue, so a job the owner had explicitly declined was
+    # still dispatched and applied to. "I do not want this one" has to mean it.
+    if row.get("status") == Status.SKIPPED.value:
+        detail = ("Refusing to apply: you skipped this job. Removing it from the "
+                  "queue rather than sending it.")
+        emit("response", pk=pk, agent="applier", detail=f"🛑 {detail}", url=jd_url)
+        log.warning("skipped job reached the applier, refused: pk=%s", pk)
+        return {"result": "skipped", "pk": pk, "reason": "user_skipped"}
+
     if row.get("status") in ("applied", "applied_manual"):
         detail = (f"Refusing to apply: this job is already '{row.get('status')}'"
                   " — a duplicate application under your name is worse than a missed one.")
@@ -818,6 +828,21 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
                                                gate_call_id=call.id,
                                                gate_source=author)
                     row = stores.tracking.get(pk) or {}
+                    # A finished tailor goes straight into the apply queue. Before
+                    # the queue existed, approving each card WAS the throttle —
+                    # there was nowhere else to hold work, so the gate had to. Now
+                    # the queue holds it: one application per company at a time,
+                    # under a concurrency you set, with Remove and Skip on every
+                    # row. So the tailor feeds it and the queue becomes the place
+                    # you decide from.
+                    #
+                    # This does NOT apply anything. In gated mode the apply worker
+                    # leaves the queue alone and nothing is submitted until you
+                    # press Process for a company. The rule that an application
+                    # only goes out when you say so is unchanged; what moved is
+                    # where you say it — once per company, not once per card.
+                    if reason == "approval":
+                        _enqueue_apply(pk, stores)
                     emit("gate", pk=pk, agent=author, detail=question, url=row.get("jd_url"),
                          screenshot=_art_url(row.get("screenshot_s3_key")))
                     log.info("gated pk=%s: %s", pk, question)

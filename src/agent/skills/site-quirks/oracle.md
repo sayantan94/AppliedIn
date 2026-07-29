@@ -58,3 +58,26 @@ success_phrases:
   dedicated "thank you" page), with a transient toast reading "Thank you for your
   job application." and the role listed under Active Job Applications with a
   status like "Under Consideration" and an Applied-on date.
+
+## The one-time validation code
+
+The FIRST application from an account triggers an emailed "validation code" (Oracle
+also calls it a verification code) and the form will not continue without it.
+
+**This site is one that uses the ONE-TIME CODE CALLBACK described in the task.**
+That permission is granted here, per site, rather than in code: which portals email
+a code is a fact about the portal, and it belongs with the rest of what we know
+about this one. Open the callback in a new tab, reload until it reads READY, type
+the code into the form, and carry on. This is not a block and not a reason to stop.
+
+Two things make this fail if rushed:
+
+- **Stay in the same session.** The half filled form and the signed-in account live
+  in this browser. Ending the run to ask for the code and starting another to answer
+  loses both, and the code expires before the second run reaches the field.
+- **The code is good for about ten minutes.** If it has not arrived after nine,
+  report `needs_owner` rather than waiting on: a fresh run gets a fresh code, and a
+  stale code typed into the form reads as the form failing rather than the code
+  being old.
+
+Later applications from the same account do not ask again.

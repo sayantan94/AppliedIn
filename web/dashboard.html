@@ -19,6 +19,7 @@
   </head>
   <body>
     <div class="shell">
+      <div id="verify-bar" class="verify-bar" hidden></div>
       <div id="llm-banner" class="llm-banner" hidden>
         <span class="lb-ico">⚠</span>
         <span id="llm-banner-msg" class="lb-msg"></span>
@@ -242,6 +243,12 @@
                       <input id="rp-url" class="cp-search" type="text"
                         placeholder="paste a job URL (Greenhouse / Lever / Ashby / Workday…)"
                         autocomplete="off" spellcheck="false" />
+                      <div class="rp-row">
+                        <select id="rp-url-company" class="cp-search rp-select"></select>
+                        <input id="rp-url-newco" class="cp-search" type="text" hidden
+                          autocomplete="off" spellcheck="false"
+                          placeholder="New company name" />
+                      </div>
                     </div>
                     <div class="cp-role-foot">
                       <span>Fetches the JD, tailors a résumé, and stops at <b>ready to apply</b>.</span>

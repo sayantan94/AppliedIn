@@ -275,3 +275,72 @@ def test_claiming_a_flush_is_atomic(q):
     assert q.start_flush("Microsoft") is False, "already claimed"
     q.stop_flush("Microsoft")
     assert q.start_flush("Microsoft") is True, "claimable again once released"
+
+
+def test_a_job_can_be_taken_out_of_the_queue(q):
+    """"Not now" has to be possible without applying. Otherwise the only way out of
+    the queue is to let it run."""
+    q.put("acme#1", "Acme")
+    q.put("acme#2", "Acme")
+    assert q.remove("acme#1") is True
+    assert q.depth()["queued"].get("acme") == 1
+    assert q.next()["pk"] == "acme#2", "the survivor is untouched"
+
+
+def test_removing_something_that_is_not_queued_says_so(q):
+    assert q.remove("ghost#1") is False
+
+
+def test_removing_the_last_job_forgets_the_company(q):
+    """Otherwise the company lingers in the set and every dispatch scans an empty
+    list for it."""
+    q.put("acme#1", "Acme")
+    q.remove("acme#1")
+    assert "acme" not in q.depth()["queued"]
+
+
+def test_a_running_job_cannot_be_removed_from_the_queue(q):
+    """It is already leased and being filled in a browser. Deleting a queue entry
+    would not stop that — it would only lose the record of what is running."""
+    q.put("acme#1", "Acme")
+    item = q.next()
+    assert q.remove("acme#1") is False, "not pending any more"
+    assert q.in_flight() == {"acme#1"}, "and still tracked as running"
+    q.done(item)
+
+
+def test_a_skipped_job_is_never_retried():
+    """The owner said no. Retrying would argue with them."""
+    again, _ = is_retryable({"status": "skipped", "reason": "user_skipped"})
+    assert not again
+
+
+def test_a_dead_lettered_job_can_be_forgotten_instead_of_revived(q, monkeypatch):
+    monkeypatch.setattr(aq, "BACKOFF_S", (0, 0, 0))
+    q.put("acme#1", "Acme")
+    item = q.next()
+    while q.retry(item, "browser_conflict"):
+        q.done(item); item = q.next()
+    q.done(item)
+    assert len(q.dead_letters()) == 1
+    assert q.drop_dead_letter("acme#1") == 1
+    assert q.dead_letters() == []
+
+
+def test_pending_returns_the_whole_queue(q):
+    """The board decides a job is queued by looking for its pk in pending(). A cap
+    small enough to truncate therefore does not merely hide rows: everything past
+    it renders as UNQUEUED and reappears under "Ready to apply", so a company late
+    in the order vanishes from the queue and looks like it was never approved.
+    """
+    # From 1, not 0: put() reads `queued_at or time.time()`, so a literal 0.0 is
+    # taken as "not supplied" and stamped with now. No real timestamp is 0, but a
+    # test that relies on it is testing the idiom rather than the queue.
+    for i in range(1, 121):
+        q.put(f"acme#{i}", "Acme", queued_at=float(i))
+    q.put("zeta#1", "Zeta", queued_at=999.0)      # last in line
+
+    pend = q.pending()
+    assert len(pend) == 121, "every queued job must be listed"
+    assert any(p["company"] == "Zeta" for p in pend), "the last company must survive"
+    assert pend[-1]["pk"] == "zeta#1", "and stay last, in dispatch order"

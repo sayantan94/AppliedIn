@@ -70,6 +70,7 @@ TERMINAL = frozenset({
     "no_sponsorship",
     "application_limit",    # the employer said no more, and that is not a fault
     "uncertain",            # may already have submitted — the owner must check
+    "user_skipped",         # the owner said no; retrying would argue with them
     "stale_resume",         # handled by re-tailoring, not by re-applying
 })
 
@@ -225,6 +226,47 @@ class ApplyQueue:
         self.r.delete(_FLUSH)
         return n
 
+    def remove(self, pk: str) -> bool:
+        """Take a job out of the queue. False when it was not waiting.
+
+        Only PENDING work can be removed. A job already leased is being filled in a
+        browser right now and deleting its queue entry would not stop that — it
+        would only lose the record of what is running. Stopping a live application
+        is Stop applying, which is a different and more costly decision.
+        """
+        for co in list(self.r.smembers(f"{_KEY}:companies") or []):
+            key = f"{_KEY}:co:{co}"
+            for raw in (self.r.lrange(key, 0, -1) or []):
+                try:
+                    if json.loads(raw).get("pk") != pk:
+                        continue
+                except ValueError:
+                    continue
+                self.r.lrem(key, 1, raw)
+                if not self.r.llen(key):
+                    self.r.srem(f"{_KEY}:companies", co)
+                log.info("removed %s from the %s queue", pk, co)
+                return True
+        return False
+
+    def drop_dead_letter(self, pk: str) -> int:
+        """Forget a dead lettered job instead of reviving it."""
+        kept, dropped = [], 0
+        for raw in (self.r.lrange(_DLQ, 0, -1) or []):
+            try:
+                match = json.loads(raw).get("pk") == pk
+            except ValueError:
+                match = False
+            if match:
+                dropped += 1
+            else:
+                kept.append(raw)
+        if dropped:
+            self.r.delete(_DLQ)
+            for raw in kept:
+                self.r.rpush(_DLQ, raw)
+        return dropped
+
     def in_flight(self) -> set:
         """The pks being applied right now. Anything the store calls `submitting`
         that is NOT in here has lost its worker."""
@@ -257,7 +299,7 @@ class ApplyQueue:
                 "running": running, "flushing": sorted(self.flushing()),
                 "dlq": self.r.llen(_DLQ)}
 
-    def pending(self, limit: int = 60) -> list[dict]:
+    def pending(self, limit: int = 5000) -> list[dict]:
         """Everything waiting, in the order it will actually start.
 
         `depth()` answers "how many"; this answers "when is mine". Dispatch is
@@ -270,6 +312,13 @@ class ApplyQueue:
         An estimate, not a promise: real order also depends on how long each
         application takes. It is ordered by the same key dispatch uses, so the next
         job to start is always the first one listed.
+
+        `limit` is a runaway guard, NOT a display limit, which is why it is large.
+        It was 60 while the board showed a flat list of the first few, and that
+        quietly broke the board: the board decides a job is queued by looking for
+        its pk in here, so everything past the cap rendered as UNQUEUED and sat in
+        "Ready to apply" instead. With 79 waiting, Oracle disappeared from the
+        queue entirely and its jobs looked like they had never been approved.
         """
         now = time.time()
         busy = set(self.r.smembers(_BUSY) or [])

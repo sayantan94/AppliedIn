@@ -2644,13 +2644,18 @@ button.ps-head:hover { background: var(--card-2); }
   font-size: 11px;
 }
 
-/* Found: one row per company until opened. */
+/* Found: a company index, not a nested list. Each row is a grid on the same
+   columns as the section header above it: the fold chevron sits in the 8px
+   status-dot column, the company name shares the section title's left edge,
+   and the posting count and best score hold fixed columns on the right so 39
+   companies read as a table. */
 .fgroups { padding: 2px 0 6px; }
 .fg-head {
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) max-content minmax(180px, max-content);
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   padding: 7px 14px;
   background: none;
   border: 0;
@@ -2662,29 +2667,63 @@ button.ps-head:hover { background: var(--card-2); }
 }
 .fgroup:first-child .fg-head { border-top: 0; }
 .fg-head:hover { background: var(--card-2); }
-.fg-co { font-size: 12.5px; font-weight: 600; }
+.fgroup.open > .fg-head { background: color-mix(in srgb, var(--card-2) 60%, transparent); }
+.fgroup.open > .fg-head:hover { background: var(--card-2); }
+/* The fold affordance: a drawn chevron, not a text bullet. It lives in the
+   dot column, turns to point down when the group is open, and firms up on
+   hover so it reads as a control. */
+.fg-head .ps-caret {
+  width: 6px;
+  height: 6px;
+  justify-self: center;
+  border-right: 1.5px solid var(--faint);
+  border-bottom: 1.5px solid var(--faint);
+  transform: translateX(-1px) rotate(-45deg);
+  transition: transform 0.13s ease, border-color 0.13s ease;
+}
+.fg-head:hover .ps-caret { border-color: var(--muted); }
+.fg-head[aria-expanded="true"] .ps-caret { transform: translateY(-1px) rotate(45deg); }
+.fg-co {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .fg-n {
-  font-size: 10.5px;
+  min-width: 4ch;
+  text-align: right;
+  font-size: 11px;
   color: var(--muted);
-  background: var(--card-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0 7px;
 }
 .fg-best {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   font-size: 10.5px;
   color: var(--faint);
   white-space: nowrap;
 }
-.fg-rows .jrow { padding-left: 34px; }
+/* Open postings sit on a quiet inset panel; their score column starts on the
+   same text edge as the company names, so the hierarchy is carried by tone
+   and a shared grid rather than by indentation. */
+.fg-rows {
+  padding: 2px 0 4px;
+  background: color-mix(in srgb, var(--card-2) 35%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.fg-rows .jrow { padding-left: 32px; }
+.fg-rows .ps-more { align-self: flex-start; margin: 4px 14px 8px 32px; }
 
 @media (max-width: 700px) {
   .jr-loc, .jr-why, .fg-best { display: none; }
   .jr-co { max-width: 110px; }
+  .fg-head { grid-template-columns: 8px minmax(0, 1fr) max-content; }
+  .fg-rows .jrow { padding-left: 14px; }
 }
 .q-revive:hover { background: color-mix(in srgb, var(--scan) 20%, transparent); }
 
@@ -2725,59 +2764,195 @@ button.ps-head:hover { background: var(--card-2); }
 }
 .llm-banner.soft .lb-ico { color: var(--scan); }
 
-/* "Queued to apply" — approved work waiting its turn, in dispatch order.
-   Deliberately a list rather than cards: it is a schedule you read top to bottom,
-   and cards would compete with the applications actually running below it. */
-.un-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.un-row {
-  display: grid; gap: 10px; align-items: center;
-  grid-template-columns: 22px 96px 1fr auto auto;
-  padding: 6px 8px; border-radius: 6px; font-size: 13px;
-  border: 1px solid transparent; cursor: pointer;
+/* "Queued to apply" — approved work waiting its turn, grouped by company.
+   The company is the unit the queue runs on (one application at a time per
+   company, several companies in parallel), so it follows the Found rollup's
+   shape: a fold head per company on the section's own grid, jobs on an inset
+   panel beneath it. The head carries the company's Process control at full
+   label width — ten companies read as ten labelled rows, not ten slivers —
+   and every job is one fold away, with no truncation notice anywhere. */
+.un-groups { padding: 2px 0 6px; }
+.ung-head {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
-.un-row:nth-child(odd) { background: color-mix(in srgb, var(--card-2) 55%, transparent); }
-.un-row:hover { border-color: var(--line); }
+.ung:first-child > .ung-head { border-top: 0; }
+.ung-head:hover { background: var(--card-2); }
+.ung.open > .ung-head { background: color-mix(in srgb, var(--card-2) 60%, transparent); }
+.ung.open > .ung-head:hover { background: var(--card-2); }
+.ung-fold {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+/* Same drawn chevron as the Found rollup: lives in the dot column, points
+   down when the group is open, firms up on hover so it reads as a control. */
+.ung-fold .ps-caret {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--faint);
+  border-bottom: 1.5px solid var(--faint);
+  transform: translateX(-1px) rotate(-45deg);
+  transition: transform 0.13s ease, border-color 0.13s ease;
+}
+.ung-fold:hover .ps-caret { border-color: var(--muted); }
+.ung-fold[aria-expanded="true"] .ps-caret { transform: translateY(-1px) rotate(45deg); }
+.un-co {
+  flex: none;
+  min-width: 0;
+  max-width: 45%;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.un-gn { flex: none; font-size: 11px; color: var(--muted); }
+.un-gstate {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.un-gstate.next { color: var(--scan); }
+/* The one accent-worthy state on a head is "starts next"; a running company
+   already glows in the In flight section below, so its head stays quiet. */
+.ung-head .un-go { flex: none; margin: 0 14px 0 4px; }
+.un-go[disabled] { opacity: 0.55; cursor: not-allowed; }
+
+/* Open jobs sit on the same quiet inset panel as Found's postings. */
+.un-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 4px;
+  background: color-mix(in srgb, var(--card-2) 35%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.un-row {
+  display: grid;
+  gap: 10px;
+  align-items: center;
+  grid-template-columns: 26px minmax(0, 1fr) max-content max-content max-content auto;
+  padding: 5px 14px 5px 30px;
+  font-size: 13px;
+}
+.un-row:hover { background: var(--card-2); }
 /* Only the ones that start the moment a slot frees are marked. Highlighting
    every row would say nothing. */
 .un-row.un-next {
-  border-color: color-mix(in srgb, var(--scan) 35%, transparent);
   background: color-mix(in srgb, var(--scan) 8%, transparent);
+  box-shadow: inset 2px 0 0 var(--scan);
 }
-.un-pos { color: var(--muted); font-size: 11px; text-align: right; }
-.un-co { color: var(--fg); font-weight: 600; }
+.un-row.un-next:hover { background: color-mix(in srgb, var(--scan) 14%, transparent); }
+.un-pos { color: var(--faint); font-size: 11px; text-align: right; }
 .un-title {
-  color: var(--muted); overflow: hidden;
+  color: var(--fg); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .un-rank { color: var(--muted); font-size: 11px; }
-.un-why { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.un-why { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 .un-row.un-next .un-why { color: var(--scan); }
-.un-more { margin-top: 6px; font-size: 12px; color: var(--muted); }
+
+/* The row actions stay hidden until the row is hovered or focused within. Three
+   buttons on every line turns a schedule you scan into a wall of controls, and
+   Skip closes a job — it should take a deliberate move to reach, not sit under
+   the cursor's path down the list. Always visible on touch, where there is no
+   hover to reveal them. */
+/* Always visible. Hiding these until hover twice left the owner thinking they
+   had been removed, which is the worst thing a control can do: a button you
+   cannot see is indistinguishable from one that does not exist. They are muted
+   rather than hidden, so the list still reads as a schedule and not a toolbar. */
+.un-acts { display: flex; gap: 4px; opacity: .55; transition: opacity .12s ease; }
+.un-row:hover .un-acts, .un-row:focus-within .un-acts { opacity: 1; }
+.un-x {
+  border: 1px solid var(--border); background: var(--card);
+  color: var(--muted); border-radius: 5px;
+  padding: 2px 8px; font-size: 11px; cursor: pointer;
+}
+.un-x:hover { color: var(--fg); border-color: var(--border-2); }
+.un-x.un-skip:hover { color: var(--bad); border-color: var(--bad); }
+.un-title[data-open] { cursor: pointer; }
+
 
 @media (max-width: 720px) {
-  .un-row { grid-template-columns: 20px 1fr auto; }
-  .un-title, .un-rank { display: none; }
+  .un-gstate, .un-rank, .un-why, .un-aged { display: none; }
+  .un-row { grid-template-columns: 22px minmax(0, 1fr) auto; padding-left: 14px; }
 }
 
-/* Per company run controls. Flush across the full width of the section, equal
-   widths, so they read as one row of choices rather than a ragged line of chips
-   trailing off after a label. */
-.un-runners {
-  display: flex; gap: 6px; align-items: stretch;
-  margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line);
-}
-.un-runners .ps-link {
-  flex: 1 1 0; min-width: 0; text-align: center;
-  padding: 7px 10px; border-radius: 6px;
-  border: 1px solid var(--line); background: var(--card-2);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.un-runners .ps-link.on {
-  border-color: color-mix(in srgb, var(--scan) 40%, transparent);
+/* A session is holding a browser open waiting for this, and it can only wait
+   about nine minutes — so it sits at the top with its input in reach, rather
+   than in a list to be found later. Uses --scan, not --bad: nothing is wrong,
+   something is needed. */
+.verify-bar { display: grid; gap: 6px; margin: 0 0 10px; }
+.vf-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--scan) 45%, transparent);
   background: color-mix(in srgb, var(--scan) 10%, transparent);
-  color: var(--scan);
 }
-.un-runners .ps-link.on:hover { background: color-mix(in srgb, var(--scan) 18%, transparent); }
-.un-runners .ps-link[disabled] { opacity: .5; cursor: not-allowed; }
+.vf-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--scan);
+  animation: vf-pulse 1.6s ease-in-out infinite; flex: none;
+}
+@keyframes vf-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+.vf-msg { flex: 1 1 320px; font-size: 13px; color: var(--fg); }
+.vf-in {
+  width: 130px; padding: 6px 10px; font-size: 14px; letter-spacing: .08em;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: var(--card); color: var(--fg);
+}
+.vf-go {
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--scan); background: var(--scan); color: var(--scan-ink);
+  font-weight: 600;
+}
+.vf-go:hover { background: var(--scan-deep); border-color: var(--scan-deep); }
 
-@media (max-width: 720px) { .un-runners { flex-wrap: wrap; } }
+@media (prefers-reduced-motion: reduce) { .vf-dot { animation: none } }
+
+/* The company select on the add-a-role panel. Matches the text inputs beside it
+   so the row reads as one control group rather than a form field next to a
+   browser widget. */
+.rp-select {
+  appearance: none; cursor: pointer; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+/* Tailoring date. On the card because a folded day heading is out of sight, and
+   the age is exactly what a stale approval hides. Muted: it informs a decision,
+   it is not the decision. */
+.kc-age { font-size: 11px; color: var(--muted); margin-left: auto; padding-right: 6px; }
+.bucket.bk-day .bk-name { font-variant-numeric: tabular-nums; }
+
+/* Skip closes a job, so it reads as the destructive one of the three without
+   shouting: --bad only on hover, when the cursor is already committed to it. */
+.kc-retry.kc-skip:hover { color: var(--bad); border-color: var(--bad); }
+
+/* How old the résumé is, on the queue row. A queued job may have been tailored
+   days ago against a posting that has since changed, and that is worth seeing
+   before it goes out, not after. */
+.un-aged { color: var(--faint); font-size: 11px; white-space: nowrap; }
+.un-row:hover .un-aged { color: var(--muted); }
+
+/* A wait nothing is collecting. Not an error, so not --bad: the application is
+   simply not going to continue on its own and needs starting again. */
+.vf-row.vf-stale { border-color: var(--border); background: var(--card-2); }
+.vf-row.vf-stale .vf-dot { background: var(--muted); animation: none; }

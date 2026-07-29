@@ -88,7 +88,16 @@ class RedisTracking(AbstractTracking):
     def set_status(self, pk: str, status: Status, **attrs: Any) -> None:
         row = self.get(pk) or {"pk": pk}
         prev = row.get("status")
-        row["status"] = status.value if hasattr(status, "value") else status
+        val = status.value if hasattr(status, "value") else status
+        row["status"] = val
+        # When the résumé was written. The board groups the approval queue by this,
+        # because "tailored on Monday" is the difference between a fresh document
+        # and one written against a posting that has since changed. Stamped on the
+        # TRANSITION so a later edit to the row does not move the date.
+        if val == "tailored" and prev != "tailored" and not row.get("tailored_at"):
+            from datetime import datetime, timezone
+
+            row["tailored_at"] = datetime.now(timezone.utc).isoformat()
         row.update(attrs)
         self._write(pk, row, prev_status=prev)
 

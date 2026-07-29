@@ -128,6 +128,7 @@ INFRA_OPENINGS = (
     "Rate limited by the model API",
     "The model API returned",
     "The session was cut off",
+    "The daemon was restarted",
 )
 
 
@@ -776,9 +777,42 @@ def _resume_skills(resume_tex: str) -> str:
     return "\n".join(ln.strip() for ln in body.splitlines() if ln.strip())[:1200]
 
 
+def verify_url(pk: str, company: str = "") -> str:
+    """Where a session waits for a one-time code for THIS job.
+
+    A page rather than a file: the session's tools are the browser plus Write, so
+    it cannot read from disk, but it can read a page. Same port the dashboard is
+    served on, since it is the same process.
+    """
+    import os
+    from urllib.parse import quote
+
+    port = os.environ.get("APPLIEDIN_WEB_PORT", "8787")
+    q = f"?company={quote(company)}" if company else ""
+    return f"http://127.0.0.1:{port}/verify/{quote(pk, safe='')}{q}"
+
+
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str,
-          resume_skills: str = "", resume_history: str = "") -> str:
+          resume_skills: str = "", resume_history: str = "", wait_url: str = "") -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
+    wait_block = (f"""
+ONE-TIME CODE CALLBACK — available, but only when this site's rules say to use it
+Some portals email a code before they will continue. Nothing here can read that
+email, so there is a callback the owner answers:
+
+  {wait_url}
+
+Open it in a NEW tab (leave the application tab alone) and reload it. It reads
+WAITING until the owner supplies the code, then READY with `CODE: <value>`, or
+EXPIRED. Reading the page is what tells them you are waiting, so keep reloading.
+Take the value back to the application tab and type it in. Never type a code into
+any page other than the employer's own form.
+
+DO NOT use this because a page merely looks like it wants a code. Use it only
+where the rules below for this specific site tell you to, and otherwise report a
+block as usual. Waiting costs the owner minutes of a browser doing nothing, so
+waiting for something nobody will send is worse than stopping.
+""" if wait_url else "")
     resume_line = (f"""
 RÉSUMÉ — attach {resume_path}
 
@@ -823,7 +857,7 @@ deliberating and spend your attention on the rest of the form:
 
 EVERY APPROVED ANSWER — the only facts you may use:
 {json.dumps(facts, indent=1)[:9000]}
-{resume_line}{site_rules}
+{resume_line}{wait_block}{site_rules}
 {_skills_block(resume_skills)}{_history_block(resume_history)}
 
 RULES — these are not style preferences, they decide whether this application is
@@ -938,7 +972,13 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
 
     report, problem = await run_task(
         _task(url, company, facts, resume_path, _site_rules(url, company),
-              _resume_skills(resume_tex), _resume_history(resume_tex)),
+              _resume_skills(resume_tex), _resume_history(resume_tex),
+              # Only for the sites that actually ask. Handing every run a "wait
+              # for a code" procedure invites it to be used where no code exists,
+              # and a session that decides to wait for something nobody will send
+              # burns the whole timeout doing nothing.
+              # Always offered; the site's own rules decide whether it is used.
+              wait_url=verify_url(pk, company) if pk else ""),
         report_key="outcome",
         model=(getattr(get_settings(), "chrome_model", "") or ""),
         timeout_s=TIMEOUT_S, kind="apply",

@@ -172,6 +172,20 @@ def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
                     "worker running them", n)
 
 
+def auto_dispatch_allowed(mode: str) -> bool:
+    """Whether the apply worker may take work off the queue by itself.
+
+    The tailor now puts every finished job in the queue, so draining it
+    automatically in GATED mode would submit applications nobody approved — the
+    queue would have quietly become an auto-apply pipeline. In gated mode it is a
+    waiting room the owner empties with Process, per company.
+
+    `assisted` is excluded for a different reason: those applications are finished
+    by hand in the owner's own browser, so there is nothing for the worker to do.
+    """
+    return mode == "auto"
+
+
 def _apply_loop() -> None:
     """APPLY worker — its own thread, so a slow browser apply never blocks the
     evaluate worker.
@@ -218,12 +232,20 @@ def _apply_loop() -> None:
                 if (pk := it.get("pk")):
                     q.put(pk, (stores.tracking.get(pk) or {}).get("company", ""))
 
+            # Recovery runs FIRST and in every mode. It used to sit after the
+            # dispatch checks, so adding the gated guard above it stranded every
+            # orphan in gated mode: a job whose worker was killed stayed leased,
+            # left the queue, and nothing ever put it back. That is the failure
+            # that looks like a company quietly disappearing from the queue.
+            _reclaim_orphans(stores, q)
+            if not auto_dispatch_allowed(flags.apply_mode()):
+                time.sleep(POLL_INTERVAL)
+                continue
             if len(running) >= flags.apply_concurrency():
                 time.sleep(POLL_INTERVAL)      # at the limit; let one finish
                 continue
             item = q.next()
             if not item:
-                _reclaim_orphans(stores, q)   # cheap, and only when otherwise idle
                 time.sleep(POLL_INTERVAL)
                 continue
             running.add(pool.submit(_run_one, item))
