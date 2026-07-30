@@ -39,6 +39,10 @@ class GreenhouseAdapter:
                     jd_text=_strip_html(j.get("content", "")),
                     location=(j.get("location") or {}).get("name", ""),
                     ats=self.ats,
+                    # first_published, not updated_at: an old role re-saved today
+                    # is not a new opening, and treating it as one is how a "last
+                    # 48 hours" filter fills up with month old listings.
+                    posted_at=str(j.get("first_published") or ""),
                 )
             )
         return jobs

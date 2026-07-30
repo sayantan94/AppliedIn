@@ -81,6 +81,10 @@ class RedisTracking(AbstractTracking):
             "company": job.company, "job_id": job.job_id, "title": job.title,
             "jd_url": job.jd_url, "location": job.location, "ats": job.ats, "attempts": 0,
             "discovered_at": datetime.now(UTC).isoformat(),
+            # When the EMPLOYER published it, when the source said. Distinct from
+            # discovered_at, which only records when we looked: on a first sweep
+            # every job was discovered seconds ago and none of them are new.
+            "posted_at": getattr(job, "posted_at", "") or "",
         }
         self._write(job.pk, row, prev_status=None)
         return True

@@ -540,11 +540,17 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.info("browser conflict for pk=%s — re-queued rather than failed", pk)
         return {"result": "requeued", "pk": pk, "reason": "browser_conflict"}
 
-    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason,
-                               fail_kind=result.get("reason") or "")
+    code = str(result.get("reason") or "failed")
+    stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason, fail_kind=code)
     emit("error", pk=pk, agent="applier", detail=reason, url=jd_url)
-    log.info("failed pk=%s: %s", pk, reason)
-    return {"result": "failed", "pk": pk, "reason": reason}
+    log.info("failed pk=%s [%s]: %s", pk, code, reason)
+    # `reason` is the CODE, because that is what the queue matches against TERMINAL.
+    # It used to be the human sentence, so `application_limit` never matched and a
+    # refusal that can never succeed was retried to the attempt limit: four browser
+    # sessions spent on one Ramp job the board had already declined. Every terminal
+    # outcome had the same fault — a duplicate, a guardrail refusal and a
+    # no-sponsorship close were all retried too. The sentence moves to `detail`.
+    return {"result": "failed", "pk": pk, "reason": code, "detail": reason}
 
 
 def _resume_pdf_path(row: dict) -> str:
@@ -698,11 +704,11 @@ def _apply_outcome(resp: Any) -> dict:
 # there. Nothing was submitted in any of these; the run stopped where it should.
 _BOARD_SAID_NO = {
     "application_limit": (
-        "The board refused the submission under its own application cap (Ashby "
-        "boards allow 5 applications per 180 days across roles; Google allows 3 "
-        "per 30 days). Nothing was submitted and nothing is wrong here — this is "
-        "the safety stop doing its job. The cap is the employer's, so it clears "
-        "on their schedule, not by retrying."),
+        "This EMPLOYER refused the submission under its own application cap. "
+        "Nothing was submitted and nothing is wrong here: the cap belongs to this "
+        "one company and clears on their schedule, not by retrying. It says "
+        "nothing about any other employer, including others using the same job "
+        "board, since each configures its own limit or none at all."),
     "duplicate_application": (
         "The board already has an application from you for this role, so it "
         "refused a second one. Nothing was submitted — this is the duplicate "

@@ -84,6 +84,11 @@ class JobRecord(BaseModel):
     # scorer still has to run.
     crawl_score: int | None = None
     crawl_why: str = ""
+    # When the EMPLOYER first published the role, from the board's own feed or read
+    # off the posting. Not when we found it: a sweep discovers a two year old
+    # listing and a one hour old one in the same second, and only one of those is
+    # worth being early to. Empty when the source does not say.
+    posted_at: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -344,3 +344,27 @@ def test_pending_returns_the_whole_queue(q):
     assert len(pend) == 121, "every queued job must be listed"
     assert any(p["company"] == "Zeta" for p in pend), "the last company must survive"
     assert pend[-1]["pk"] == "zeta#1", "and stay last, in dispatch order"
+
+
+def test_a_terminal_refusal_is_matched_by_its_CODE_not_its_prose(q):
+    """The applier returns a human sentence for the card and a code for the queue.
+    They were the same field, so `application_limit` never matched TERMINAL and a
+    refusal that can never succeed was retried to the attempt limit: four browser
+    sessions on one job the board had already declined. Every terminal outcome had
+    the same fault, including duplicates and guardrail refusals.
+    """
+    prose = ("This EMPLOYER refused the submission under its own application cap. "
+             "Nothing was submitted and nothing is wrong here")
+    assert is_retryable({"status": "failed", "reason": prose})[0] is True, \
+        "prose cannot be matched, which is why it must not be sent as the reason"
+    assert is_retryable({"status": "failed", "reason": "application_limit"})[0] is False
+
+
+def test_the_applier_returns_the_code_as_reason():
+    """Pins the contract between _apply_direct and the queue."""
+    import inspect
+
+    from agent import run as _run
+
+    src = inspect.getsource(_run._apply_direct)
+    assert 'return {"result": "failed", "pk": pk, "reason": code, "detail": reason}' in src

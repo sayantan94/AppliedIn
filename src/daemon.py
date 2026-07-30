@@ -251,7 +251,8 @@ def _apply_loop() -> None:
             running.add(pool.submit(_run_one, item))
 
 
-def run_discovery_once(only: list[str] | None = None, profile_id: str = "") -> dict:
+def run_discovery_once(only: list[str] | None = None, profile_id: str = "",
+                       max_age_hours: float | int | None = None) -> dict:
     """ONE discovery cycle on demand (the UI 'Start discovery' button). `only`
     scopes it to the companies the user picked (None/empty = the whole
     watchlist). `profile_id` stamps every job this run finds with the identity it
@@ -264,7 +265,8 @@ def run_discovery_once(only: list[str] | None = None, profile_id: str = "") -> d
 
     log.info("manual discovery requested (companies=%s, profile=%s)",
              only or "all", profile_id or "default")
-    result = run_discovery(only=only, profile_id=profile_id)
+    result = run_discovery(only=only, profile_id=profile_id,
+                           max_age_hours=max_age_hours)
     log.info("manual discovery: %s", result)
     return result
 

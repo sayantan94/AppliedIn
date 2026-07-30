@@ -100,13 +100,56 @@ def _queries(prefs: object) -> str:
             f"{lines}\n")
 
 
-def _task(company: str, url: str, brief: str, site_rules: str = "") -> str:
+def _window_block(hours: float) -> str:
+    """The instruction that makes a bounded scan cheap as well as correct.
+
+    Two separate things are being asked for. Correctness: report only roles the
+    employer published inside the window. Cost: nearly every board sorts newest
+    first, so once a listing is older than the window everything below it is too,
+    and the scan can stop instead of reading the whole board. That turns a sweep
+    from the cost of all postings into the cost of new ones, which is what makes
+    scanning forty companies feasible at all.
+
+    It is deliberately explicit that an undated listing is REPORTED rather than
+    dropped: the alternative is a model silently discarding roles because a page
+    happened not to print a date, which looks identical to a company having posted
+    nothing.
+    """
+    if hours <= 0:
+        return ""
+    label = (f"{int(hours)} hours" if hours < 48
+             else f"{int(hours / 24)} days" if hours % 24 == 0
+             else f"{hours:g} hours")
+    return f"""
+ONLY ROLES POSTED IN THE LAST {label}
+This scan is looking for what is NEW, so a role published outside that window is
+not wanted however well it fits.
+
+  1. Find how the board shows age: a date, "Posted 3 days ago", "New". Sort by
+     newest first if the page offers it.
+  2. Read down the list and STOP once you reach roles older than {label}. Boards
+     almost always order newest first, so everything below the first stale one is
+     stale too. Do not page through the rest to be thorough: reading the whole
+     board is the cost this instruction exists to avoid.
+  3. Report the age of every role you do return, in "posted", exactly as the page
+     phrased it.
+  4. If a listing shows NO age, report it with "posted" empty. It is kept and
+     judged elsewhere. Never drop a role for lacking a date, and never guess one
+     from its position in the list.
+  5. If the board offers no age anywhere, say so in the note and return what fits.
+     That is a fact about the board, not an empty result.
+"""
+
+
+def _task(company: str, url: str, brief: str, site_rules: str = "",
+          max_age_hours: float = 0.0) -> str:
     return f"""Find the open jobs on this company's careers page that fit this owner.
 
 COMPANY: {company}
 CAREERS PAGE: {url}
 
 {brief}
+{_window_block(max_age_hours)}
 {site_rules}
 
 Open the page and actually look for postings. Many careers pages need work before
@@ -146,13 +189,59 @@ Stop at {MAX_JOBS} postings. If there were clearly more, say so in the note and
 include how you would narrow it — a URL with search or location parameters is
 worth more than a truncated list.
 
+WHEN EACH ROLE WAS POSTED, in the "posted" field
+Boards say this in different ways: an explicit date, "Posted 3 days ago", "New",
+or a date only on the posting itself. Report what the LISTING says, verbatim and
+untranslated: "2026-07-27", "3 days ago", "yesterday", "New" are all fine. Leave
+it empty rather than guessing, and never infer a date from where a role sits in
+the list. An empty field is read as unknown and the role is kept; a wrong date
+gets a fresh role discarded or an old one treated as new.
+
 Close the tabs you opened, then write your result as JSON to the file you are told
 about and repeat it in your reply:
 
 {{"jobs": [{{"title": "...", "url": "...", "location": "...", "summary": "...",
-            "score": 0-10, "why": "..."}}],
+            "score": 0-10, "why": "...", "posted": "..."}}],
   "board": "greenhouse|ashby|lever|workday|none — if this page is a wrapper",
   "note": "<anything the owner should know: no openings, a login wall, a CAPTCHA>"}}"""
+
+
+def _posted_iso(raw: object) -> str:
+    """An ISO date from whatever a careers page said about age.
+
+    Career pages phrase this every way there is: "2026-07-27", "Posted 3 days ago",
+    "yesterday", "New", "27 Jul 2026". Demanding one format from a model reading a
+    page would mean throwing away most of what it correctly saw, so this accepts
+    the common shapes and returns empty for anything it cannot place. Empty means
+    unknown, and an unknown date keeps the posting.
+    """
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    now = datetime.now(timezone.utc)
+    if text in ("new", "just posted", "today", "just now"):
+        return now.isoformat()
+    if text in ("yesterday",):
+        return (now - timedelta(days=1)).isoformat()
+    if (m := re.search(r"(\d+)\s*(hour|hr|h|day|d|week|w|month|mo)", text)):
+        n = int(m.group(1))
+        unit = m.group(2)
+        hours = (n if unit in ("hour", "hr", "h")
+                 else n * 24 if unit in ("day", "d")
+                 else n * 24 * 7 if unit in ("week", "w")
+                 else n * 24 * 30)
+        return (now - timedelta(hours=hours)).isoformat()
+    for fmt in ("%Y-%m-%d", "%d %b %Y", "%b %d, %Y", "%d/%m/%Y", "%m/%d/%Y",
+                "%B %d, %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(str(raw).strip(), fmt).replace(
+                tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            continue
+    return ""
 
 
 async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
@@ -182,8 +271,11 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
         emit("running", agent="finder", company=company,
              detail=f"{company}: waiting for {n} application(s) to finish before scanning")
 
+    from .freshness import run_window
+
     report, problem = await run_task(
-        _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules),
+        _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules,
+              max_age_hours=run_window()),
         report_key="jobs", model=model, timeout_s=TIMEOUT_S, kind="crawl")
     if problem:
         log.warning("chrome crawl of %s failed: %s", company, problem)
@@ -211,6 +303,10 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
             crawl_score=_as_score(row.get("score")),
             crawl_why=str(row.get("why") or "").strip()[:200],
             location=str(row.get("location") or "").strip(),
+            # Whatever the listing said, normalised. Relative phrases ("3 days
+            # ago") are as common as dates on career pages, so the parser takes
+            # both rather than demanding ISO from a model reading a web page.
+            posted_at=_posted_iso(row.get("posted")),
             ats="crawl",
         ))
 

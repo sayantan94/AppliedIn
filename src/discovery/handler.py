@@ -246,7 +246,8 @@ def _release(names: set[str]) -> None:
         _SCANNING.difference_update(names)
 
 
-def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
+def run_discovery(only: list[str] | None = None, profile_id: str = "",
+                  max_age_hours: float | int | None = None) -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
 
     `only` scopes the run to specific companies (case-insensitive names, matched
@@ -261,6 +262,13 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "") -> dict:
     a Mac (Redis) or on AWS (DynamoDB/SQS). Callable from a CLI (local) or a
     Lambda (cloud).
     """
+    # Scope this run to recently published roles, when asked. Run scoped: it is a
+    # question about this scan, so it neither reads nor writes the companies' own
+    # settings.
+    from .freshness import set_run_window
+
+    set_run_window(max_age_hours)
+
     targets = _targets(only)
     if not targets:
         return {"enqueued": 0, "crawled": 0, "skipped": "no companies matched"}

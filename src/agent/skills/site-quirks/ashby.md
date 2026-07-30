@@ -30,6 +30,15 @@ success_phrases:
   carries the state — not a radio group. Clicking the input does nothing because
   it is `display:none`. Click the visible button whose text is the answer; the
   hidden input follows.
+- **A cap belongs to ONE employer, never to the board.** Ashby is software that
+  hundreds of companies use. Each configures its own limit, or none at all, and
+  the great majority set none. So a refusal at Ramp says nothing whatsoever about
+  Snowflake, OpenAI or Perplexity, and a cap you hit earlier today says nothing
+  about the company in front of you now.
+  Do not carry a limit across companies, across roles at a different company, or
+  across sessions. Do not reason from "this happened on an Ashby board before" to
+  "it will happen here". ALWAYS fill the form and submit. Only what THIS
+  employer's board says, in response to THIS submission, counts.
 - **The application-limit banner is a NOTICE, not a stop.** Some boards show "we
   have set up limits for applications across roles. Candidates may not apply more
   than 5 times in any 180 day span". Fill the form and submit anyway. That wording

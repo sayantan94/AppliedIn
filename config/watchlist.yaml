@@ -172,3 +172,7 @@ companies:
   - name: Thinking Machine
     careers_url: https://job-boards.greenhouse.io/thinkingmachines
     mode: gated
+
+  - name: Snap
+    careers_url: https://careers.snap.com/
+    mode: gated

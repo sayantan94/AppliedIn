@@ -225,6 +225,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "fail_kind": row.get("fail_kind") or "",
         "fail_reason": row.get("fail_reason") or "",
         "tailored_at": row.get("tailored_at") or "",
+        "posted_at": row.get("posted_at") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
         "closed_reason": _closed_reason(row),
@@ -1094,12 +1095,20 @@ def create_app() -> FastAPI:
         # Everything this run finds is stamped with the chosen identity, so a whole
         # batch applies from one address without touching each job afterwards.
         profile_id = str((body or {}).get("profile_id") or "")
+        # Run-scoped freshness window: bound THIS scan to roles the employer
+        # published within `hours`; 0/absent = no age limit. It never edits any
+        # company's saved preferences — the next un-windowed run is back to normal.
+        try:
+            hours = float((body or {}).get("hours") or 0)
+        except (TypeError, ValueError):
+            hours = 0.0
 
         def _run() -> None:
             from daemon import run_discovery_once
             _RUNNING["discover"] = True
             try:
-                run_discovery_once(only=only or None, profile_id=profile_id)
+                run_discovery_once(only=only or None, profile_id=profile_id,
+                                   max_age_hours=hours)
             except Exception:  # noqa: BLE001
                 import logging
                 logging.getLogger("server").exception("manual discovery failed")
@@ -1216,6 +1225,45 @@ def create_app() -> FastAPI:
         emit("running", agent="daemon",
              detail=f"{what} stopped by you — {killed} browser session(s) ended")
         return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
+
+    @app.get("/fresh")
+    def fresh(hours: int = 48):
+        """Roles the EMPLOYER published within `hours`, across every company.
+
+        The question this answers is "what appeared while I was not looking", which
+        no existing view could: the board groups by company and sorts by score, so
+        a role posted an hour ago sits below a stronger one from three weeks back.
+        Being early matters more than being thorough on a job that went up today.
+
+        Undated postings are reported separately rather than mixed in. Many boards
+        publish no date, and silently listing those as fresh would turn this into
+        "roles from boards that timestamp", which is a different claim.
+        """
+        from discovery.freshness import age_hours, describe
+
+        rows, undated = [], 0
+        for r in make_stores(settings).tracking.all():
+            if str(r.get("pk", "")).startswith("meta#"):
+                continue
+            posted = r.get("posted_at") or ""
+            if not posted:
+                undated += 1
+                continue
+            age = age_hours(posted)
+            if age is None or age > max(1, hours):
+                continue
+            rows.append({
+                "pk": r["pk"], "company": r.get("company") or "",
+                "title": r.get("title") or "", "location": r.get("location") or "",
+                "jd_url": r.get("jd_url") or "", "status": r.get("status") or "",
+                "match_score": r.get("match_score"),
+                "posted_at": posted, "age_hours": round(age, 1),
+                "posted_label": describe(posted),
+            })
+        rows.sort(key=lambda d: d["age_hours"])
+        return {"hours": hours, "jobs": rows, "count": len(rows),
+                "undated": undated,
+                "companies": len({r["company"] for r in rows})}
 
     @app.get("/activity")
     def activity(days: int = 371):

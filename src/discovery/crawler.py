@@ -118,10 +118,56 @@ def _default_extractor(html: str, company: str) -> list[JobRecord]:
     ]
 
 
+def _age_limit(company_name: str) -> float:
+    """Hours of freshness to apply, 0 meaning no limit.
+
+    The run's own window wins. Asking for the last 24 hours at four companies is a
+    question about this scan, not a change to what those companies always want, so
+    it must not fall through to or overwrite their saved preference.
+    """
+    from core import flags as _flags
+
+    from .freshness import run_window
+
+    if (w := run_window()) > 0:
+        return w
+    try:
+        over = _flags.company_pref(company_name) or {}
+        raw = over.get("max_age_hours")
+        if raw in (None, ""):
+            raw = _flags.get_flag("max_age_hours", "0")
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
-    """Dedup against past runs and queue what is genuinely new."""
+    """Drop anything too old, dedup against past runs, queue what is genuinely new.
+
+    The age check lives HERE because every path arrives here: the feed adapters, the
+    page extractor and the browser crawl. Putting it in any one of them would have
+    left the others unfiltered, and the browser path is the one most likely to
+    surface an ancient listing.
+    """
+    from core import flags as _flags
     from core.events import emit
     from tools import seen
+
+    from .freshness import describe, is_fresh
+
+    limit = _age_limit(company.name)
+    if limit:
+        before = len(jobs)
+        jobs = [j for j in jobs if is_fresh(getattr(j, "posted_at", ""), limit)]
+        if before != len(jobs):
+            log.info("%s: %d of %d posting(s) were newer than %gh",
+                     company.name, len(jobs), before, limit)
+        undated = sum(1 for j in jobs if not getattr(j, "posted_at", ""))
+        if undated:
+            # Say it, because it is the difference between "nothing new was posted"
+            # and "this board does not publish dates so the filter did nothing".
+            log.info("%s: %d kept posting(s) carry no publish date, so the age "
+                     "limit could not judge them", company.name, undated)
 
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]
@@ -130,7 +176,10 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     for job in jobs:
         if stores.tracking.put_new(job):
             stores.queue.enqueue(stores.tailor_queue, {"pk": job.pk})
-            emit("discovered", pk=job.pk, detail=f"{job.title} @ {job.company}", url=job.jd_url)
+            emit("discovered", pk=job.pk, detail=(
+                f"{job.title} @ {job.company}"
+                + (f" (posted {d})" if (d := describe(getattr(job, "posted_at", ""))) else "")),
+                url=job.jd_url)
             new_jobs.append(job)
             enqueued += 1
     seen.mark(new_jobs)

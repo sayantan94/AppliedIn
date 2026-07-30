@@ -12,6 +12,23 @@ from core.models import JobRecord
 from ..watchlist import CompanyConfig
 
 
+def _iso(v: object) -> str:
+    """A date string from whatever the feed used. Epoch milliseconds, epoch
+    seconds and an ISO string all appear across these boards; anything else
+    becomes empty rather than a wrong date."""
+    from datetime import datetime, timezone
+
+    if v in (None, ""):
+        return ""
+    if isinstance(v, (int, float)):
+        secs = float(v) / 1000 if float(v) > 1e11 else float(v)
+        try:
+            return datetime.fromtimestamp(secs, timezone.utc).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return ""
+    return str(v)
+
+
 class AshbyAdapter:
     ats = "ashby"
 
@@ -30,6 +47,8 @@ class AshbyAdapter:
                     jd_text=j.get("descriptionPlain", "") or j.get("description", ""),
                     location=j.get("location", ""),
                     ats=self.ats,
+                    # Ashby publishes publishedAt and leaves updatedAt null on the board feed.
+                    posted_at=_iso(j.get("publishedAt")),
                 )
             )
         return jobs

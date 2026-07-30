@@ -88,24 +88,39 @@
                   <label for="cp-profile">apply as</label>
                   <select id="cp-profile" class="cp-profsel"><option value="">default profile</option></select>
                 </div>
-                <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
-                <div class="cp-add">
-                  <div class="cp-add-hd">Track a new company</div>
-                  <input id="cp-add-name" class="cp-search" type="text"
-                    placeholder="Company name, e.g. Anthropic" autocomplete="off" spellcheck="false" />
-                  <input id="cp-add-url" class="cp-search" type="text"
-                    placeholder="Careers page URL (optional)" autocomplete="off" spellcheck="false" />
-                  <p class="cp-add-hint">
-                    Leave the URL blank and discovery finds the job board itself from the name.
-                    Paste one only if it picks the wrong board, or the company hosts its own.
-                  </p>
-                  <div class="cp-add-row">
-                    <button class="cp-lk cp-add-btn" id="cp-add-btn" type="button"
-                      title="Add to the watchlist only. It gets scanned on the next discovery run.">Add to watchlist</button>
-                    <button class="cp-lk cp-add-btn cp-add-go" id="cp-add-run" type="button"
-                      title="Add it, scan for postings, and tailor a résumé for each match. Stops before applying.">Add and scan now</button>
-                  </div>
+                <!-- The run window. Run-scoped on purpose: it bounds the next
+                     scan only and never touches a company's saved preferences. -->
+                <div class="cp-window" id="cp-window" role="group" aria-label="Only scan postings this recent">
+                  <span class="cp-window-l">posted within</span>
+                  <button class="chip" type="button" data-scan-w="0"
+                    title="Scan postings of any age. The original behaviour.">Any age</button>
+                  <button class="chip" type="button" data-scan-w="24"
+                    title="Scan only postings published in the last 24 hours.">24 hours</button>
+                  <button class="chip" type="button" data-scan-w="48"
+                    title="Scan only postings published in the last 48 hours.">48 hours</button>
+                  <button class="chip" type="button" data-scan-w="168"
+                    title="Scan only postings published in the last 7 days.">7 days</button>
                 </div>
+                <div class="cp-foot" id="cp-foot">Next discovery scans the whole watchlist.</div>
+                <details class="cp-add">
+                  <summary class="cp-add-hd">Track a new company</summary>
+                  <div class="cp-add-body">
+                    <input id="cp-add-name" class="cp-search" type="text"
+                      placeholder="Company name, e.g. Anthropic" autocomplete="off" spellcheck="false" />
+                    <input id="cp-add-url" class="cp-search" type="text"
+                      placeholder="Careers page URL (optional)" autocomplete="off" spellcheck="false" />
+                    <p class="cp-add-hint">
+                      Leave the URL blank and discovery finds the job board itself from the name.
+                      Paste one only if it picks the wrong board, or the company hosts its own.
+                    </p>
+                    <div class="cp-add-row">
+                      <button class="cp-lk cp-add-btn" id="cp-add-btn" type="button"
+                        title="Add to the watchlist only. It gets scanned on the next discovery run.">Add to watchlist</button>
+                      <button class="cp-lk cp-add-btn cp-add-go" id="cp-add-run" type="button"
+                        title="Add it, scan for postings, and tailor a résumé for each match. Stops before applying.">Add and scan now</button>
+                    </div>
+                  </div>
+                </details>
               </div>
             </div>
 
@@ -216,6 +231,7 @@
           <div class="workbar">
             <nav class="tabs" id="tabs" aria-label="Views">
               <button class="tab active" data-tab="pipeline">Pipeline</button>
+              <button class="tab" data-tab="fresh">Fresh</button>
               <button class="tab" data-tab="apps">Applications
                 <span class="tab-n mono" id="tab-n-apps">0</span></button>
               <button class="tab" data-tab="needs">Needs you

@@ -183,7 +183,12 @@ COMPANY_PREF_FIELDS = ("titles", "include_keywords", "exclude_keywords",
                        # Not part of the global Preferences object — it is a
                        # per-run choice there — but per company it is exactly a
                        # preference: "anything at Adobe uses my personal 2 address".
-                       "profile_id")
+                       "profile_id",
+                       # Only consider roles the employer published within this many
+                       # hours. 0 or absent means no age limit, which is the old
+                       # behaviour and stays the default: a company whose board
+                       # publishes no dates would otherwise return nothing at all.
+                       "max_age_hours")
 
 
 def company_prefs() -> dict:
