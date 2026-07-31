@@ -52,11 +52,13 @@ const state = {
   heat: null,         // /activity payload for the heatmap ({days, totals})
   fresh: null,        // /fresh payload, fetched once at the widest window
   freshHours: 48,     // the Fresh tab's selected window, in hours
+  passed: null,
+  passedOpen: new Set(), // companies unfolded in the passed over trail          // /passed-over: what recent scans rejected, and why
   freshPicked: new Set(), // companies picked for a scan run FROM the Fresh tab.
                       // The tab's own selection: state.picked belongs to the
                       // Discover picker and is never touched from here.
   freshCoQuery: "",   // search inside the Fresh tab's company list
-  freshScanOpen: true, // the Fresh tab's scan panel, folded or not
+  freshStatus: "",    // the Fresh tab's status facet ("" = any status)
   freshNote: "",      // a refused scan explains itself here, next to the button
   scanHours: 0,       // Discover's run window in hours (0 = any posting age).
                       // Run-scoped: bounds the next scan only, never saved prefs.
@@ -231,8 +233,11 @@ function renderDiscoverLabel() {
   // A windowed scan says so on the button itself — the press is bounded, and
   // that should be readable before pressing, not only in the picker.
   const wtag = state.scanHours ? ` · ${scanTag(state.scanHours)}` : "";
-  if (state.stats.discovering) el.textContent = "Discovering…";
-  else el.textContent = pickedAll()
+  // No "Discovering…" takeover: scans are per company, the button stays
+  // pressable while one runs, and the scanning-now strip below the deck is
+  // what says which crawls are in flight. A label that reads as a status
+  // would claim the button is busy when it is not.
+  el.textContent = pickedAll()
     ? `Discover · All${wtag}`
     : `Discover · ${state.picked.size} selected${wtag}`;
   const pl = $("#process-label");
@@ -515,8 +520,19 @@ function renderDeck() {
     .join("") || `<span class="bd dim">no jobs tracked yet</span>`;
 
   const disc = $("#btn-discover"), proc = $("#btn-process");
-  disc.disabled = !!s.discovering;
+  // Per company, not global. Scans claim one company at a time on the server,
+  // so another company's crawl is no reason to kill this button: it goes dead
+  // only when every company the press would cover is already being scanned.
+  // (Process below keeps its global gate on purpose — the server runs one
+  // process pass at a time, so there its flag and its reach agree.)
+  const busyScan = new Set((s.scanning || []).map((c) => String(c).toLowerCase()));
+  const discScope = pickedAll()
+    ? state.companies.filter((c) => !state.skipped.has(String(c).toLowerCase()))
+    : [...state.picked];
+  disc.disabled = !!discScope.length && busyScan.size > 0
+    && discScope.every((c) => busyScan.has(String(c).toLowerCase()));
   disc.classList.toggle("running", !!s.discovering);
+  renderScanNow();
   const stopBtn = $("#btn-stop");
   if (stopBtn) stopBtn.hidden = !s.discovering;   // scan only
   const stopApply = $("#btn-stop-apply");
@@ -546,6 +562,32 @@ function renderMenuState() {
     hl.className = "menu-state mono " + (state.headless ? "warn" : "on");
   }
   $("#m-theme-state").textContent = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+}
+
+/* The scanning-now strip: WHICH companies are being crawled, right in the
+   deck, on every tab. "Discovering…" said only that something, somewhere, was
+   busy; with per company scans the name is the information. Elapsed time rides
+   along when this page saw the scan start (see trackScanning) and is omitted,
+   not guessed, when it did not. Lives outside the pane, holds no inputs, and
+   is redrawn wholesale on every poll tick so the clocks count. */
+function scanElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+function renderScanNow() {
+  const host = $("#scan-now");
+  if (!host) return;
+  const names = state.stats.scanning || [];
+  if (!names.length) { host.hidden = true; host.innerHTML = ""; return; }
+  // /stats lowercases names; show the watchlist's own casing where it has one.
+  const disp = new Map(state.companies.map((c) => [String(c).toLowerCase(), c]));
+  host.innerHTML = `<span class="sn-label">Scanning now</span>` + names.map((n) => {
+    const lc = String(n).toLowerCase();
+    const t = _scanSeen.get(lc);
+    return `<span class="sn-chip"><span class="sn-dot"></span>${esc(disp.get(lc) || n)}${
+      t ? `<span class="sn-t mono">${scanElapsed(Date.now() - t)}</span>` : ""}</span>`;
+  }).join("");
+  host.hidden = false;
 }
 
 // --- tabs + company filter -------------------------------------------------
@@ -1211,7 +1253,13 @@ function viewApps() {
     `<button class="chip" data-filter="${k}" aria-selected="${state.filter === k}">
       ${label}<span class="n">${counts[k]}</span></button>`).join("");
   const pred = FILTERS.find(([k]) => k === state.filter)[2];
-  const rows = visible(state.apps.filter(pred));
+  const allRows = visible(state.apps.filter(pred));
+  // Paginate. All 1737 rows at once produced 1.1MB of DOM and blocked the main
+  // thread for 145ms on every switch to this tab and every re-render after it,
+  // which is exactly what makes a click feel dead. Every other lane on this board
+  // already pages; this table was the exception.
+  const shownN = state.page.appsTable || 50;
+  const rows = allRows.slice(0, shownN);
   const body = rows.map((r) => {
     const cv = (r.resume_url || r.resume_version)
       ? `<button class="rowlk" data-resume="${esc(r.pk)}" title="View tailored résumé">cv</button>`
@@ -1240,7 +1288,10 @@ function viewApps() {
   return `<div class="chips">${chips}</div>
     <div class="tablewrap"><table class="data"><thead><tr>
       <th>status</th><th>company</th><th>role</th><th>match</th><th>links</th><th>updated</th>
-    </tr></thead><tbody>${body}</tbody></table>${empty}</div>`;
+      </tr></thead><tbody>${body}</tbody></table>${empty}
+      ${allRows.length > rows.length
+        ? moreBtn("appsTable", rows.length, allRows.length, 50)
+        : ""}</div>`;
 }
 
 // --- Needs-you cards -------------------------------------------------------
@@ -1404,7 +1455,7 @@ async function loadActivity() {
       : await fetch(api("/activity?days=371"), { headers: auth.header() }).then((r) => r.json());
   } catch { if (!state.heat) state.heat = { error: true }; }
   _heatBusy = false;
-  if (state.tab === "activity") renderPane();
+  if (state.tab === "activity") refreshPane();
 }
 
 // Demo has no /activity endpoint — synthesise a plausible, deterministic year.
@@ -1533,16 +1584,28 @@ const freshWindowText = () =>
     .replace(/^Last/, "last");
 
 let _freshBusy = false;
+/* What the last scans decided NOT to keep. Fetched with the fresh view because
+   it answers the question the fresh view provokes: a role you can see on the
+   careers page is missing, and the three reasons need three different fixes. */
+async function loadPassedOver() {
+  if (DEMO) { state.passed = { jobs: [], by_reason: {} }; return; }
+  try {
+    state.passed = await fetch(api("/passed-over?limit=200"), { headers: auth.header() })
+      .then((r) => r.json());
+  } catch { state.passed = null; }
+}
+
 async function loadFresh() {
   if (_freshBusy) return;
   _freshBusy = true;
   try {
+    await loadPassedOver();
     state.fresh = DEMO ? demoFresh()
       : await fetch(api(`/fresh?hours=${FRESH_MAX_HOURS}`), { headers: auth.header() })
           .then((r) => r.json());
   } catch { if (!state.fresh) state.fresh = { error: true }; }
   _freshBusy = false;
-  if (state.tab === "fresh") renderPane();
+  if (state.tab === "fresh") refreshPane();
 }
 
 // Demo has no /fresh endpoint — stamp a plausible, deterministic recent week
@@ -1605,21 +1668,61 @@ function freshEmpty(windowed, undated, winTxt) {
   </div>`;
 }
 
-/* ── The scan controls, on the same surface as the results. ──
-   The tab stops being read only here: pick companies, keep the window chips as
-   the scan's bound, press Run, read what lands below — the log-insights loop of
-   choose, run, read, narrow, run again, without leaving the tab. The selection
-   is the tab's own (state.freshPicked); state.picked belongs to the Discover
-   picker and is never touched from here. */
+/* ── The facet rail: window, status, companies, scan — one column. ──
+   The three blocks this tab used to be (scan slab, chip bar, results) become
+   facets of one browse surface. Every facet option carries a count, and every
+   count is computed against the OTHER active facets, so the number beside an
+   option answers "what would the list show if I chose this". A zero stays
+   visible and greyed rather than hidden: the absence is the information.
+
+   DELIBERATE UNIFICATION: the company facet IS the scan picker. A tick does
+   two jobs at once — it narrows the visible list to the ticked companies, and
+   it chooses what the next Run will crawl. The two readings agree: "the
+   companies this page is about right now". An empty set means "about
+   everything": it filters nothing and leaves Run disabled, so neither
+   behaviour is lost. The selection is the tab's own (state.freshPicked);
+   state.picked belongs to the Discover picker and is never touched here. */
+function freshByPk() { return new Map(state.apps.map((a) => [a.pk, a])); }
+// The board's record wins over the scan snapshot — same rule as freshRow, so a
+// job run from this tab counts under its new status without a refetch.
+function freshStatusOf(j, byPk) { return (byPk.get(j.pk) || j).status || "found"; }
+function freshFacetFilters(byPk) {
+  const q = state.query.trim().toLowerCase();
+  return {
+    win: (j) => (Number(j.age_hours) || 0) <= state.freshHours,
+    co: (j) => !state.freshPicked.size || state.freshPicked.has(j.company),
+    st: (j) => !state.freshStatus || freshStatusOf(j, byPk) === state.freshStatus,
+    // The workbar's company dropdown and the search box apply to every tab, so
+    // here they sit under every facet count rather than being facets themselves.
+    q: (j) => (!state.coFilter || j.company === state.coFilter)
+           && (!q || `${j.company} ${j.title}`.toLowerCase().includes(q)),
+  };
+}
 function freshScanCos() {
   const q = state.freshCoQuery.trim().toLowerCase();
   return state.companies.filter((c) => !q || c.toLowerCase().includes(q));
 }
+/* The company facet's rows: every watchlist name, plus any company the payload
+   still remembers that has since left the watchlist. Zero counts are greyed,
+   never hidden — "this board published nothing dated in this window" is
+   exactly the fact that tells you where a scan is worth pointing, and the
+   checkbox stays live because scanning a quiet board is the point of a scan. */
 function freshScanList() {
-  const rows = freshScanCos().map((c) => `<label class="fs-item">
+  const f = state.fresh || {};
+  const jobs = f.jobs || [];
+  const F = freshFacetFilters(freshByPk());
+  const q = state.freshCoQuery.trim().toLowerCase();
+  const names = [...new Set([...state.companies, ...jobs.map((j) => j.company)])]
+    .filter((c) => !q || String(c).toLowerCase().includes(q))
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base" }));
+  const rows = names.map((c) => {
+    const n = jobs.filter((j) => j.company === c && F.win(j) && F.st(j) && F.q(j)).length;
+    return `<label class="fs-item${n ? "" : " zero"}">
       <input type="checkbox" data-fresh-co="1" value="${esc(c)}"
         ${state.freshPicked.has(c) ? "checked" : ""}>
-      <span>${esc(c)}</span></label>`).join("");
+      <span class="fs-nm">${esc(c)}</span>
+      <span class="facet-n mono">${n}</span></label>`;
+  }).join("");
   return rows || `<div class="cp-none">No companies match “${esc(state.freshCoQuery)}”.</div>`;
 }
 /* Honest about the cost before the press: a scan is a live browser crawl of
@@ -1627,67 +1730,336 @@ function freshScanList() {
 const freshEta = (n) => n === 1 ? "about a minute of browser work"
   : n <= 3 ? "a few minutes of browser work"
   : `about ${n} minutes of browser work`;
-// The foot re-renders alone on every checkbox tick (see syncFreshScan), so the
-// list keeps its DOM — and its scroll — while the sentence stays current.
 function freshScanFoot() {
-  const n = state.freshPicked.size;
+  // Only names still on the watchlist can be crawled, so the promise on the
+  // button never exceeds what Run would actually post.
+  // Only the companies YOU picked matter. Scans run per company now, so another
+  // company being read is not a reason you cannot start yours. This used to gate
+  // on state.stats.discovering, which is true whenever anything anywhere is
+  // scanning, so starting one company locked out all the others — exactly what
+  // the per company claims were built to allow.
+  const busy = new Set((state.stats.scanning || []).map((c) => String(c).toLowerCase()));
+  const picked = [...state.freshPicked].filter((c) => state.companies.includes(c));
+  const mine = picked.filter((c) => busy.has(c.toLowerCase()));
+  const free = picked.filter((c) => !busy.has(c.toLowerCase()));
+  const n = free.length;
   const winTxt = freshWindowText();
-  if (state.stats.discovering) {
-    return `<span class="fs-sum"><span class="fs-live-dot"></span>Scanning now.
-        New postings land below the moment it finishes.</span>
+
+  if (busy.size && !picked.length) {
+    return `<span class="fs-sum"><span class="fs-live-dot"></span>Scanning
+        ${esc([...busy].join(", "))} now. Tick other companies to start them
+        alongside it.</span>
+      <button class="cp-add-btn fs-run" disabled>Pick companies</button>`;
+  }
+  if (picked.length && !n) {
+    return `<span class="fs-sum"><span class="fs-live-dot"></span>
+        ${esc(mine.join(", "))} ${mine.length === 1 ? "is" : "are"} already scanning.
+        New postings land in the list the moment it finishes.</span>
       <button class="cp-add-btn fs-run" disabled>Scanning…</button>`;
   }
   const sum = n
     ? `A live crawl of <b class="mono">${n}</b> job board${n === 1 ? "" : "s"},
        ${esc(freshEta(n))}. Only roles the employer published in the
        <b>${esc(winTxt)}</b> count; the crawler stops once it reaches older listings.`
-    : `Pick companies above. The window chips below set both what the scan
-       fetches and what the list shows.`;
+    : `Tick companies above. The window facet sets both what a scan fetches
+       and what the list shows.`;
   const label = n
     ? `▶ Scan ${n} ${n === 1 ? "company" : "companies"} · ${esc(winTxt)}`
     : `▶ Run scan`;
   return `<span class="fs-sum">${sum}</span>
     <button class="cp-add-btn fs-run" data-fs-run="1" type="button" ${n ? "" : "disabled"}
-      title="${n ? `Scan the ${n} picked ${n === 1 ? "company" : "companies"} now, ${esc(freshEta(n))}`
-                 : "Pick at least one company first"}">${label}</button>`;
+      title="${n ? `Scan the ${n} ticked ${n === 1 ? "company" : "companies"} now, ${esc(freshEta(n))}`
+                 : "Tick at least one company first"}">${label}</button>`;
 }
-function freshScanPanel() {
-  const total = state.companies.length;
-  const n = state.freshPicked.size;
-  const open = state.freshScanOpen;
-  const head = `<button class="fs-head" data-fs-fold="1" aria-expanded="${open}"
-      title="${open ? "Hide" : "Show"} the scan controls">
-      <span class="fs-caret" aria-hidden="true">${open ? "▾" : "▸"}</span>
-      <span class="fs-title">Run a scan</span>
-      <span class="fs-hint">crawl the boards you pick for freshly published roles</span>
-      <span class="fs-state mono" id="fs-state">${n ? `${n} of ${total} picked` : "none picked"}</span>
-    </button>`;
-  if (!open) return `<div class="fs-panel">${head}</div>`;
-  return `<div class="fs-panel">${head}
-    <div class="fs-body">
-      <div class="fs-tools">
-        <input id="fs-search" class="cp-search fs-search" type="search"
-          placeholder="Filter companies…" value="${esc(state.freshCoQuery)}"
-          autocomplete="off" spellcheck="false" aria-label="Filter companies">
-        <button class="cp-lk" data-fs-all="1" type="button"
-          title="Pick every company the filter shows">Select all</button>
-        <button class="cp-lk" data-fs-none="1" type="button"
-          title="Unpick every company">Clear</button>
-      </div>
-      <div class="fs-list" id="fs-list" aria-label="Companies to scan">${freshScanList()}</div>
-      ${state.freshNote ? `<div class="fs-note">${esc(state.freshNote)}</div>` : ""}
-      <div class="fs-foot" id="fs-foot">${freshScanFoot()}</div>
+/* The rail's data regions, each buildable on its own so a tick or a typed
+   query can refresh COUNTS in place (freshRefresh below) without tearing down
+   the checkboxes or the inputs around them. */
+const facetRowHtml = (attr, val, label, n, sel) =>
+  `<button class="facet-row${n ? "" : " zero"}" ${attr}="${esc(String(val))}"
+    aria-selected="${sel}">
+    <span class="facet-l">${esc(label)}</span>
+    <span class="facet-n mono">${n}</span></button>`;
+
+// WINDOW — cumulative by construction, so the counts only grow downwards.
+function freshWinRows(f, byPk) {
+  const jobs = f.jobs || [];
+  const F = freshFacetFilters(byPk);
+  return FRESH_WINDOWS.map(([h, label]) =>
+    facetRowHtml("data-fresh-w", h,
+      label,
+      jobs.filter((j) => (Number(j.age_hours) || 0) <= h && F.co(j) && F.st(j) && F.q(j)).length,
+      state.freshHours === h)).join("");
+}
+
+// STATUS — every status the payload actually holds, in pipeline order. One
+// filtered down to nothing stays visible at zero: the absence is the news.
+function freshStRows(f, byPk) {
+  const jobs = f.jobs || [];
+  const F = freshFacetFilters(byPk);
+  const order = Object.keys(STATUS_META);
+  const known = [...new Set(jobs.map((j) => freshStatusOf(j, byPk)))]
+    .sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+  const stBase = (j) => F.win(j) && F.co(j) && F.q(j);
+  return [
+    facetRowHtml("data-fresh-st", "", "Any status", jobs.filter(stBase).length, !state.freshStatus),
+    ...known.map((s) => {
+      const m = STATUS_META[s];
+      return facetRowHtml("data-fresh-st", s,
+        m ? m.label : String(s).replace(/_/g, " "),
+        jobs.filter((j) => stBase(j) && freshStatusOf(j, byPk) === s).length,
+        state.freshStatus === s);
+    }),
+  ].join("");
+}
+
+function freshTickSum() {
+  const picked = [...state.freshPicked].filter((c) => state.companies.includes(c)).length;
+  return picked ? `${picked} of ${state.companies.length} ticked` : "all shown";
+}
+
+function freshRail(f, byPk) {
+  return `<div class="frail-group">
+      <div class="frail-h">Window</div>
+      <div id="frail-win">${freshWinRows(f, byPk)}</div>
     </div>
+    <div class="frail-group">
+      <div class="frail-h">Status</div>
+      <div id="frail-st">${freshStRows(f, byPk)}</div>
+    </div>
+    <div class="frail-group">
+      <div class="frail-h">Companies
+        <span class="frail-hn mono" id="frail-hn">${freshTickSum()}</span></div>
+      <div class="frail-cos">
+        <div class="fs-tools">
+          <input id="fs-search" class="cp-search fs-search" type="search"
+            placeholder="Filter companies…" value="${esc(state.freshCoQuery)}"
+            autocomplete="off" spellcheck="false" aria-label="Filter companies">
+          <button class="cp-lk" data-fs-all="1" type="button"
+            title="Tick every company the filter shows">All</button>
+          <button class="cp-lk" data-fs-none="1" type="button"
+            title="Untick every company">Clear</button>
+        </div>
+        <div class="fs-list" id="fs-list" aria-label="Companies">${freshScanList()}</div>
+        <div class="frail-note">A tick narrows the list and points the next scan
+          at that company.</div>
+      </div>
+    </div>
+    <div class="frail-group frail-scan">
+      <div class="frail-h">Scan</div>
+      <div class="frail-scanbody">
+        ${state.freshNote ? `<div class="fs-note">${esc(state.freshNote)}</div>` : ""}
+        <div class="fs-foot" id="fs-foot">${freshScanFoot()}</div>
+      </div>
+    </div>`;
+}
+
+/* The headline row above everything: the same facts the rail carries, as
+   numbers readable before touching anything. The two quiet tiles are the
+   honesty figures — how much this view cannot judge, and how much the scans
+   chose to drop. */
+function freshStats(f) {
+  const jobs = f.jobs || [];
+  const inWin = jobs.filter((j) => (Number(j.age_hours) || 0) <= state.freshHours);
+  const nCos = new Set(inWin.map((j) => j.company)).size;
+  const tile = (v, l, dim) => `<div class="fstat${dim ? " dim" : ""}">
+    <div class="fstat-v">${Number(v) || 0}</div>
+    <div class="fstat-l">${esc(l)}</div></div>`;
+  return `<div class="fresh-stats">
+    ${tile(inWin.length, `New in the ${freshWindowText()}`)}
+    ${tile(nCos, "Companies with something new")}
+    ${tile(Number(f.undated) || 0, "Carry no publish date", true)}
+    ${tile((state.passed && state.passed.count) || 0, "Passed over by recent scans", true)}
   </div>`;
 }
-// Checkbox ticks land here: count and foot follow the selection while the list
-// DOM (and its scroll position) stays put — same trick as renderPickerState.
-function syncFreshScan() {
-  const n = state.freshPicked.size, total = state.companies.length;
-  const st = $("#fs-state");
-  if (st) st.textContent = n ? `${n} of ${total} picked` : "none picked";
-  const ft = $("#fs-foot");
-  if (ft) ft.innerHTML = freshScanFoot();
+
+/* "Passed over": the roles a recent scan saw and did not keep.
+
+   Grouped by company, like Found and the queue, because that is the unit the
+   owner scans in and because one noisy board can otherwise fill the whole list:
+   a single careers page with two hundred old postings would bury every other
+   company's two.
+
+   The three outcomes stay distinct because they need different fixes. Too old
+   means widen the window. Not a match means change the preferences. Missing from
+   here as well means the scan never read the posting, which is a reading problem
+   and is stated in the footer rather than left to be inferred from an absence. */
+const PASSED_LABEL = { too_old: "too old", not_relevant: "not a match" };
+
+function passedOverPanel() {
+  const p = state.passed;
+  const all = (p && p.companies) || [];
+  if (!all.length) return "";
+
+  /* NOT scoped by the company facet, though it used to be.
+
+     That facet chooses what a scan will COVER. This panel is a record of what
+     already happened, and the two are different questions. Scoping one by the
+     other meant a single tick on a company with nothing dropped collapsed the
+     whole trail to "0 of 30 companies, nothing was passed over" while 2034
+     records sat behind it — and because the tick persists across reloads, the
+     panel then looked permanently broken.
+
+     Ticked companies are floated to the top instead, so the connection survives
+     without anything being hidden. */
+  const pickedLc = new Set([...state.freshPicked].map((c) => String(c).toLowerCase()));
+  const groups = pickedLc.size
+    ? [...all].sort((a, b) =>
+        (pickedLc.has(String(b.company || "").toLowerCase()) ? 1 : 0)
+        - (pickedLc.has(String(a.company || "").toLowerCase()) ? 1 : 0))
+    : all;
+
+  const body = groups.map((g) => {
+    const co = g.company || "unknown";
+    const open = state.passedOpen.has(co);
+    const why = Object.entries(g.by_reason || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${PASSED_LABEL[k] || k}`).join(", ");
+    const rows = g.jobs || [];
+    // The count is the TRUTH; the list is a sample. Saying so beats letting a
+    // company that rejected sixty roles look as though it rejected twenty five.
+    // g.total is how many were rejected; g.kept is how many rows were stored.
+    // Saying both keeps the header honest without pretending the list is whole.
+    const more = g.total > rows.length
+      ? `<li class="po-row po-note">showing the ${rows.length} most recent
+           ${g.kept && g.kept < g.total ? `of ${g.kept} kept, out of ${g.total} rejected`
+                                        : `of ${g.total}`}</li>`
+      : "";
+    const list = open ? `<ol class="po-list">${rows.map((j) => {
+      const when = j.posted_label || "no publish date";
+      const title = j.url
+        ? `<a class="po-t" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>`
+        : `<span class="po-t">${esc(j.title)}</span>`;
+      return `<li class="po-row">
+        ${title}
+        <span class="po-when mono">${esc(when)}</span>
+        <span class="po-why">${esc(PASSED_LABEL[j.reason] || j.reason || "skipped")}</span>
+      </li>`;
+    }).join("")}${more}</ol>` : "";
+    return `<div class="pog${open ? " open" : ""}">
+      <button class="pog-head${pickedLc.has(co.toLowerCase()) ? " pog-picked" : ""}"
+        data-passed-co="${esc(co)}" aria-expanded="${open}">
+        <span class="ps-caret">${open ? "▾" : "▸"}</span>
+        <span class="pog-co">${esc(co)}</span>
+        <span class="pog-n mono">${g.total}</span>
+        <span class="pog-why">${esc(why)}</span>
+      </button>
+      ${list}
+    </div>`;
+  }).join("");
+
+  // Reasons and counts are summed over the SCOPED groups, so a narrowed panel
+  // never quotes the whole store's numbers as its own.
+  const byReason = {};
+  for (const g of groups)
+    for (const [k, n] of Object.entries(g.by_reason || {}))
+      byReason[k] = (byReason[k] || 0) + (Number(n) || 0);
+  const totals = Object.entries(byReason)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${n} ${PASSED_LABEL[k] || k}`).join(" · ");
+  const nAll = groups.reduce((s, g) => s + (Number(g.total) || 0), 0);
+
+  const none = `<div class="po-none">Nothing was passed over at the ticked
+    companies. Recent scans dropped roles only at the ${all.length} others.</div>`;
+
+  return `<section class="psec ps-passed">
+    <div class="ps-head">
+      <span class="ps-dot"></span>
+      <span class="ps-name">Passed over</span>
+      <span class="ps-n mono">${nAll}</span>
+      <span class="ps-chip">${pickedLc.size
+        ? `${groups.length} of ${all.length} companies`
+        : `${groups.length} compan${groups.length === 1 ? "y" : "ies"}`}</span>
+      <span class="ps-hint">Seen by a recent scan and not kept${totals
+        ? `. ${esc(totals)}` : ""}.</span>
+    </div>
+    ${groups.length ? body : none}
+    <div class="po-foot">A company missing from here had nothing rejected, or was
+      not scanned. A role missing from its list was never read by the scan, which is
+      a reading problem rather than a filtering one.</div>
+  </section>`;
+}
+
+/* The results column: a persistent search box, the honest showing line, then
+   the day groups — the same dayLabel voice the approval queue uses, so "what
+   appeared today" is answerable in one glance. */
+// "Showing N of M" over DATED roles only: M is every dated role the payload
+// holds at the widest window, so the line owns up to what the facets hid.
+function freshShowingHtml(f, byPk) {
+  const F = freshFacetFilters(byPk);
+  const all = f.jobs || [];
+  const jobs = all.filter((j) => F.win(j) && F.co(j) && F.st(j) && F.q(j));
+  return `Showing <b class="mono">${jobs.length}</b> of
+    <b class="mono">${all.length}</b> dated roles`;
+}
+
+function freshDaysHtml(f, byPk) {
+  const F = freshFacetFilters(byPk);
+  const all = f.jobs || [];
+  const windowed = all.filter(F.win);
+  const jobs = windowed.filter((j) => F.co(j) && F.st(j) && F.q(j));
+  if (!jobs.length) return freshEmpty(windowed, Number(f.undated) || 0, freshWindowText());
+  const groups = new Map();
+  for (const j of jobs) {
+    const k = dayKey(j.posted_at);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(j);
+  }
+  return [...groups.entries()].map(([k, list]) => `<div class="fresh-day">
+    <div class="fd-head"><span class="fd-name">${esc(dayLabel(k))}</span>
+      <span class="fd-n mono">${list.length}</span></div>
+    <div class="jrows">${list.map((j) => freshRow(j, byPk)).join("")}</div>
+  </div>`).join("");
+}
+
+function freshResults(f, byPk) {
+  const undated = Number(f.undated) || 0;
+  // The far larger undated number gets the standing footer below, because it
+  // needs a sentence of reasoning, not a figure in passing.
+  const head = `<div class="fr-head">
+    <input id="fr-search" class="search fr-search" type="search"
+      placeholder="Search company or title…" value="${esc(state.query)}"
+      autocomplete="off" spellcheck="false" aria-label="Search fresh roles">
+    <span class="fr-showing" id="fr-showing">${freshShowingHtml(f, byPk)}</span>
+  </div>`;
+
+  return `<div class="fresh-card">
+    ${head}
+    <div id="fr-days">${freshDaysHtml(f, byPk)}</div>
+    ${undated ? `<div class="fresh-foot">Freshness is judged by the date the employer's own
+      board publishes. <b>${undated}</b> postings carry no such date, because many boards
+      never state one, so this view cannot judge them. They are never shown as new and
+      stay under Found on the Pipeline board.</div>` : ""}
+  </div>`;
+}
+
+/* Refresh the Fresh view's DATA regions in place — counts, results, the scan
+   slab, the passed over trail — leaving the inputs and the company checkbox
+   list untouched. This is what a tick or a typed query calls instead of a
+   full renderPane(): the element under the pointer is never destroyed, so a
+   click can never be lost to its own consequences, and the caret never needs
+   "restoring" because nothing happened to it. */
+function freshRefresh(withList = false) {
+  if (state.tab !== "fresh" || !state.fresh || state.fresh.error) return;
+  const f = state.fresh;
+  const byPk = freshByPk();
+  const win = $("#frail-win");
+  if (win) win.innerHTML = freshWinRows(f, byPk);
+  const st = $("#frail-st");
+  if (st) st.innerHTML = freshStRows(f, byPk);
+  const hn = $("#frail-hn");
+  if (hn) hn.textContent = freshTickSum();
+  if (withList) {  // company counts follow the results search; ticks don't move them
+    const fl = $("#fs-list");
+    if (fl) { const keep = fl.scrollTop; fl.innerHTML = freshScanList(); fl.scrollTop = keep; }
+  }
+  const foot = $("#fs-foot");
+  if (foot) foot.innerHTML = freshScanFoot();
+  const sh = $("#fr-showing");
+  if (sh) sh.innerHTML = freshShowingHtml(f, byPk);
+  const days = $("#fr-days");
+  if (days) days.innerHTML = freshDaysHtml(f, byPk);
+  const po = $("#po-host");
+  if (po) po.innerHTML = passedOverPanel();
 }
 
 function viewFresh() {
@@ -1697,68 +2069,102 @@ function viewFresh() {
     return `<div class="empty"><div class="empty-big">No fresh view to show</div>
       Could not reach the backend. Try refresh once the daemon is running.</div>`;
   }
-  const chips = FRESH_WINDOWS.map(([h, label]) =>
-    `<button class="chip" data-fresh-w="${h}" aria-selected="${state.freshHours === h}">${label}</button>`)
-    .join("");
+  const byPk = freshByPk();
+  return `${freshStats(f)}
+    <div class="fresh-layout">
+      <aside class="fresh-rail">${freshRail(f, byPk)}</aside>
+      <div class="fresh-main">
+        ${freshResults(f, byPk)}
+        <div id="po-host">${passedOverPanel()}</div>
+      </div>
+    </div>`;
+}
 
-  const windowed = (f.jobs || []).filter((j) => (Number(j.age_hours) || 0) <= state.freshHours);
-  let jobs = byCompany(windowed);
-  const q = state.query.trim().toLowerCase();
-  if (q) jobs = jobs.filter((j) => `${j.company} ${j.title}`.toLowerCase().includes(q));
+/* ── Repaint discipline ─────────────────────────────────────────────────────
+   renderPane() rebuilds the pane's DOM wholesale and is for USER actions —
+   a tab switch, a facet click, a search — where state just changed and the
+   immediate repaint is the point of the click.
 
-  const undated = Number(f.undated) || 0;
-  const nCos = new Set(jobs.map((j) => j.company)).size;
-  const winTxt = freshWindowText();
+   Background work (the stats poll, SSE driven reloads, the 30s safety
+   refresh) goes through refreshPane() instead. It compares a cheap signature
+   of the DATA the current tab renders against the last render and does
+   NOTHING when they match. That is the fix for the lost-click bug: between
+   genuine data changes the pane DOM is never torn down, so a checkbox, a
+   caret or a scroll position cannot be destroyed by a timer. UI-only state
+   (facets, folds, queries) stays out of the signature because changing it
+   always arrives through a direct renderPane() call. The live activity lines
+   are out too: renderLiveLine() updates them in place. */
 
-  // The standing ledger: what qualified, and how much the view cannot judge.
-  // On a young store the second number is the important one.
-  const sum = `<span class="fresh-sum"><b class="mono">${jobs.length}</b>
-      new in the ${esc(winTxt)}${jobs.length
-        ? ` · <b class="mono">${nCos}</b> compan${nCos === 1 ? "y" : "ies"}` : ""}${undated
-        ? ` · <b class="mono">${undated}</b> undated postings excluded` : ""}</span>`;
-
-  let body;
-  if (!jobs.length) {
-    body = freshEmpty(windowed, undated, winTxt);
-  } else {
-    // Day groups, newest first — the same dayLabel voice the approval queue
-    // uses, so "what appeared today" is answerable in one glance.
-    const byPk = new Map(state.apps.map((a) => [a.pk, a]));
-    const groups = new Map();
-    for (const j of jobs) {
-      const k = dayKey(j.posted_at);
-      if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push(j);
-    }
-    body = [...groups.entries()].map(([k, list]) => `<div class="fresh-day">
-      <div class="fd-head"><span class="fd-name">${esc(dayLabel(k))}</span>
-        <span class="fd-n mono">${list.length}</span></div>
-      <div class="jrows">${list.map((j) => freshRow(j, byPk)).join("")}</div>
-    </div>`).join("");
+function appsSig() {
+  let s = "";
+  for (const a of state.apps) {
+    s += a.pk + "\u0001" + a.status + "\u0001" + (a.updated_at || "") + "\u0001"
+       + (a.gate_reason || "") + (a.gate_question ? "?" : "") + "\u0001"
+       + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001"
+       + (a.profile_id || "") + "\n";
   }
+  return s;
+}
 
-  return `${freshScanPanel()}<div class="fresh-card">
-    <div class="fresh-bar"><div class="chips">${chips}</div>${sum}</div>
-    ${body}
-    ${undated ? `<div class="fresh-foot">Freshness is judged by the date the employer's own
-      board publishes. <b>${undated}</b> postings carry no such date, because many boards
-      never state one, so this view cannot judge them. They are never shown as new and
-      stay under Found on the Pipeline board.</div>` : ""}
-  </div>`;
+function paneSig() {
+  // A coarse clock so relative ages ("3m ago") refresh eventually even when
+  // nothing else moves: at most one background repaint every five minutes.
+  const parts = [state.tab, Math.floor(Date.now() / 300000), appsSig()];
+  if (state.tab === "logs") {
+    const e0 = state.events[0] || {};
+    parts.push(state.events.length, e0.at || "", e0.kind || "");
+  } else if (state.tab === "activity") {
+    const h = state.heat || {};
+    parts.push((h.days || []).length, JSON.stringify(h.totals || null), h.error ? "e" : "");
+  } else if (state.tab === "fresh") {
+    const f = state.fresh || {};
+    parts.push((f.jobs || []).map((j) => j.pk).join(","), f.undated ?? "",
+      f.error ? "e" : "", state.freshNote,
+      (state.passed && state.passed.count) || 0,
+      ((state.passed && state.passed.companies) || [])
+        .map((g) => (g.company || "") + (g.total || 0)).join(","),
+      state.companies.join(","));
+  } else {
+    // The pipeline stack renders the apply queue inline. The plain app tables
+    // ride on appsSig; these extra parts simply never differ for them.
+    const q = state.queue || {};
+    parts.push((q.pending || []).map((it) => it.pk + (it.blocked ? "b" : "")).join(","),
+      (q.running || []).join(","), q.concurrency || 0);
+  }
+  return parts.join("\u0002");
+}
+
+let _paneSig = null;      // signature of the data behind the last pane render
+let _paneDirty = false;   // a background repaint arrived while a press was down
+let _pressAt = 0;         // when the current pointer press began (0 = none)
+
+function refreshPane() {
+  // A press in flight: pointerdown has landed on an element and its click has
+  // not been delivered yet. Rebuilding now would destroy the press target and
+  // eat the click — the exact bug this exists to prevent — so hold the repaint
+  // until the press resolves (wire() releases it after the click lands).
+  if (_pressAt && Date.now() - _pressAt < 1500) { _paneDirty = true; return; }
+  if (paneSig() === _paneSig) return;  // nothing this tab renders has changed
+  renderPane();
 }
 
 function renderPane() {
-  // Preserve half-typed gate answers across re-renders (SSE refreshes etc).
+  // The preservation below is now RARE-PATH insurance, not a per-poll crutch:
+  // background repaints only reach here when data genuinely changed (a scan
+  // landing rows every few seconds is the common case), and that can still
+  // happen while the owner is typing an answer or a filter. Losing a
+  // half-typed gate answer to a legitimate repaint is not acceptable either,
+  // so the courtesy stays for the rebuilds that remain.
   const saved = {};
   let focusPk = null;
   $$("#pane textarea[data-answer-for]").forEach((t) => {
     if (t.value) saved[t.dataset.answerFor] = t.value;
     if (document.activeElement === t) focusPk = t.dataset.answerFor;
   });
-  // Same courtesy for the Fresh scan panel: its filter box and list live inside
-  // the pane, so a poll-driven repaint must not eat the caret or the scroll.
-  const fsHadFocus = document.activeElement && document.activeElement.id === "fs-search";
-  const fsCaret = fsHadFocus ? document.activeElement.selectionStart : 0;
+  const paneInputs = ["fs-search", "fr-search"];
+  const liveId = document.activeElement && paneInputs.includes(document.activeElement.id)
+    ? document.activeElement.id : "";
+  const liveCaret = liveId ? document.activeElement.selectionStart : 0;
   const fsListEl = $("#fs-list");
   const fsScroll = fsListEl ? fsListEl.scrollTop : 0;
   $("#pane").innerHTML =
@@ -1776,9 +2182,9 @@ function renderPane() {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(focusPk)}"]`);
     if (t) { t.focus(); t.selectionStart = t.selectionEnd = t.value.length; }
   }
-  if (fsHadFocus) {
-    const t = $("#fs-search");
-    if (t) { t.focus(); try { t.selectionStart = t.selectionEnd = fsCaret; } catch { /* search inputs vary */ } }
+  if (liveId) {
+    const t = $("#" + liveId);
+    if (t) { t.focus(); try { t.selectionStart = t.selectionEnd = liveCaret; } catch { /* search inputs vary */ } }
   }
   if (fsScroll) {
     const fl = $("#fs-list");
@@ -1788,6 +2194,7 @@ function renderPane() {
   // narrow screen, land on today rather than a year ago.
   const hs = $("#pane .hm-scroll");
   if (hs) hs.scrollLeft = hs.scrollWidth;
+  _paneSig = paneSig();
 }
 
 function renderFooter() {
@@ -1871,15 +2278,40 @@ function feedItem(e) {
 const FEED_MAX = 250;
 let _feedTimer = null;
 let _liveT = null;
+const _livePend = new Set();
 function scheduleLive(pk) {
-  // Only re-render if this pk is an actively-working card on the board.
+  // Only touch the board if this pk is an actively-working card on it.
   const a = state.apps.find((r) => r.pk === pk);
   if (!a || !["tailoring", "submitting"].includes(a.status)) return;
+  _livePend.add(pk);
   if (_liveT) return;
   _liveT = setTimeout(() => {
     _liveT = null;
-    if (!["apps", "needs", "stuck", "logs"].includes(state.tab)) renderPane();  // pipeline view
+    const pks = [..._livePend];
+    _livePend.clear();
+    // The card's own line only, updated in place. This used to be a full
+    // renderPane() — an every-half-second teardown of the whole pane during a
+    // run, which is exactly when the owner is watching and clicking.
+    if (!["apps", "needs", "stuck", "logs"].includes(state.tab)) pks.forEach(renderLiveLine);
   }, 500);
+}
+
+// Write one card's live step into its .kc-live line without rebuilding
+// anything else. Same markup kcard() produces, so a later full render agrees.
+function renderLiveLine(pk) {
+  const a = state.apps.find((r) => r.pk === pk);
+  const act = state.activity[pk];
+  if (!a || !act || !act.detail || !["tailoring", "submitting"].includes(a.status)) return;
+  const card = $(`#pane .kcard[data-open="${CSS.escape(pk)}"]`);
+  if (!card) return;
+  let el = card.querySelector(".kc-live");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "kc-live";
+    const foot = card.querySelector(".kc-foot");
+    if (foot) card.insertBefore(el, foot); else card.appendChild(el);
+  }
+  el.innerHTML = `<span class="kc-live-dot"></span>${esc(act.detail.replace(/^[^\w]+/, "").slice(0, 70))}`;
 }
 
 function scheduleFeed() {
@@ -1981,6 +2413,22 @@ function applyStats(s) {
   if (s && typeof s.headless === "boolean") state.headless = s.headless;
   if (s) state.paused = !!s.paused;
   if (s && s.auto_min_score != null) state.autoMin = s.auto_min_score;
+  trackScanning();
+}
+
+/* When each running scan was FIRST SEEN by this page. /stats says which
+   companies are being crawled but not since when, so the strip times what it
+   can honestly time: a scan observed starting gets a clock accurate to one
+   poll; a scan already running when the page loaded gets no clock at all,
+   because inventing a start it never saw would just be a lie with digits. */
+const _scanSeen = new Map();  // lowercased name → first-seen ms (0 = unknown start)
+let _scanBaselined = false;
+function trackScanning() {
+  const now = Date.now();
+  const cur = new Set((state.stats.scanning || []).map((c) => String(c).toLowerCase()));
+  for (const c of cur) if (!_scanSeen.has(c)) _scanSeen.set(c, _scanBaselined ? now : 0);
+  for (const c of [..._scanSeen.keys()]) if (!cur.has(c)) _scanSeen.delete(c);
+  _scanBaselined = true;
 }
 
 async function load() {
@@ -2018,6 +2466,25 @@ async function loadGlobalPrefs() {
   } catch { /* the pane just shows "not set" until the panel is opened */ }
 }
 
+/* The Fresh tab's company selection, kept across reloads.
+
+   A scan takes minutes, and losing the ticks partway through means no longer
+   knowing what is being scanned. It lives in localStorage rather than only in
+   memory so a reload mid scan does not erase the answer. */
+const FRESH_PICK_KEY = "appliedin.freshpicked";
+
+function saveFreshPicked() {
+  try { localStorage.setItem(FRESH_PICK_KEY, JSON.stringify([...state.freshPicked])); }
+  catch { /* private mode, or full — the selection simply does not survive */ }
+}
+
+function restoreFreshPicked() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FRESH_PICK_KEY) || "[]");
+    if (Array.isArray(raw)) state.freshPicked = new Set(raw.filter((c) => typeof c === "string"));
+  } catch { /* nothing saved, or unreadable */ }
+}
+
 async function loadCompanies() {
   if (DEMO) {
     const d = await import("./demo-data.js");
@@ -2046,7 +2513,14 @@ async function loadCompanies() {
   state.picked = new Set([...state.picked].filter((c) => state.companies.includes(c)));
   // The Fresh tab's own selection follows the same rule: names that left the
   // watchlist leave the set, so its count never promises a scan it cannot run.
-  state.freshPicked = new Set([...state.freshPicked].filter((c) => state.companies.includes(c)));
+  // Prune ONLY when we actually have a watchlist. A failed or empty /companies
+  // response would otherwise wipe the selection silently, so the boxes you ticked
+  // before a scan would clear themselves while it ran and you would lose track of
+  // what was being scanned.
+  if (state.companies.length) {
+    state.freshPicked = new Set([...state.freshPicked].filter((c) => state.companies.includes(c)));
+    saveFreshPicked();
+  }
   renderPicker();
   renderSkipPicker();
   renderDiscoverLabel();
@@ -2061,12 +2535,16 @@ async function loadApps() {
     // The heatmap and the Fresh tab ride the same cadence, but only while on screen.
     if (state.tab === "activity") loadActivity();
     if (state.tab === "fresh") loadFresh();
-    renderTabs(); renderPane(); renderFooter(); scheduleFeed();
+    renderTabs(); refreshPane(); renderFooter(); scheduleFeed();
   } catch { /* transient — next poll wins */ }
 }
 
-// Poll /stats every ~3s: drives the running-state of the two buttons and the
-// vitals. When a run finishes, refresh the board once.
+// Poll /stats every ~3s: drives the running-state of the two buttons, the
+// vitals and the scanning-now strip. When a run finishes, refresh the board
+// once. The poll NEVER rebuilds the pane itself — its few in-pane concerns
+// (the Fresh scan slab) are written in place, and anything bigger goes
+// through refreshPane(), which repaints only on a genuine data change.
+let _scanFootSig = null;
 async function pollStats() {
   if (DEMO) return;
   try {
@@ -2075,27 +2553,39 @@ async function pollStats() {
     const wasDisc = !!state.stats.discovering;
     applyStats(s);
     renderDeck();
-    // The Fresh tab's scan panel mirrors the discovering flag, and only a
-    // transition needs a repaint. A finished scan also outlives its refusal
-    // note, so the note goes with it.
+    // The Fresh tab's scan slab mirrors WHICH companies are busy. Written in
+    // place when that set changes — the slab holds no input and no scroll, so
+    // the rest of the pane need not be touched for it.
+    const scanSig = (s.scanning || []).join(",");
+    if (scanSig !== _scanFootSig) {
+      _scanFootSig = scanSig;
+      const foot = $("#fs-foot");
+      if (foot) foot.innerHTML = freshScanFoot();
+    }
+    // A finished scan outlives its refusal note, so the note goes with it;
+    // refreshPane picks the cleared note up (it is part of the pane signature).
     if (wasDisc !== !!s.discovering) {
       if (!s.discovering) state.freshNote = "";
-      if (state.tab === "fresh") renderPane();
+      if (state.tab === "fresh") refreshPane();
     }
     // Same cadence as the rest of the poll, but only while the panel is open.
     const qpEl = $("#qpicker");
     if (qpEl && !qpEl.hidden) loadQueue();
     const is = !!(s.discovering || s.processing);
     if (was && !is) { loadApps(); loadQueue(); toast("Run finished — board updated."); }
-    // A scan queued behind another one starts the moment discovery frees. Waiting
-    // on the state we already poll beats retrying blindly: a browser crawl runs
-    // for minutes, so a fixed number of retries gave up long before its turn came.
-    if (state.pendingScan && !s.discovering) {
-      const { co, url } = state.pendingScan;
-      state.pendingScan = null;
-      renderPicker();
-      toast(`Scanning ${co} with the new rules…`);
-      runCompany(co, url, false, true);
+    // A scan queued behind another one starts the moment ITS company frees.
+    // Waiting on the global discovering flag held it until every company
+    // everywhere fell silent — the same "one crawl blocks all" gate the per
+    // company claims removed. The server refuses per company, so ask per company.
+    if (state.pendingScan) {
+      const busyNow = new Set((s.scanning || []).map((c) => String(c).toLowerCase()));
+      if (!busyNow.has(String(state.pendingScan.co).toLowerCase())) {
+        const { co, url } = state.pendingScan;
+        state.pendingScan = null;
+        renderPicker();
+        toast(`Scanning ${co} with the new rules…`);
+        runCompany(co, url, false, true);
+      }
     }
   } catch { /* backend briefly away — keep last known state */ }
 }
@@ -2221,9 +2711,31 @@ async function offerRestart(label, retry, blockedBy = "discover", again = false)
 }
 
 async function runDiscover(again = false) {
-  if (demoGuard() || state.stats.discovering) return;
+  // Same reasoning as runFreshScan: `discovering` is true whenever ANY company is
+  // being scanned, and scans are per company now, so bailing here made one running
+  // crawl block every other company from being started. The server refuses only
+  // the companies genuinely mid scan, so drop those and send the rest.
+  if (demoGuard()) return;
   closeAllPickers();
-  const scope = discoverScope();
+  const busy = new Set((state.stats.scanning || []).map((c) => String(c).toLowerCase()));
+  const wanted = discoverScope();
+  const scope = Array.isArray(wanted)
+    ? wanted.filter((c) => !busy.has(String(c).toLowerCase()))
+    : wanted;
+  if (Array.isArray(wanted) && wanted.length && !scope.length) {
+    toast("Those companies are already being scanned.");
+    return;
+  }
+  // An un-scoped run claims whatever is free — but when NOTHING is free the
+  // server logs a skip and this side would still toast "Discovery started",
+  // promising a run that never happened. Refuse honestly instead.
+  if (Array.isArray(wanted) && !wanted.length && busy.size) {
+    const everyCo = state.companies.filter((c) => !state.skipped.has(String(c).toLowerCase()));
+    if (everyCo.length && everyCo.every((c) => busy.has(String(c).toLowerCase()))) {
+      toast("Every company is already being scanned.");
+      return;
+    }
+  }
   // The picker's window rides along per run: `hours` bounds this scan to roles
   // published within it, and is omitted for "Any age" so the payload — and the
   // behaviour — stay exactly what they were before the window existed.
@@ -2252,9 +2764,24 @@ async function runDiscover(again = false) {
    already) is said in the panel, next to the button that was pressed, not only
    in a toast that may already have faded. */
 async function runFreshScan() {
-  if (demoGuard() || state.stats.discovering) return;
-  const companies = [...state.freshPicked].filter((c) => state.companies.includes(c));
-  if (!companies.length) { toast("Pick at least one company first."); return; }
+  // NOT gated on state.stats.discovering. That flag is true whenever any company
+  // anywhere is being scanned, so with Apple mid crawl this returned instantly and
+  // ticking Adobe did nothing at all — while the button, which had already been
+  // fixed to gate per company, still read "Scan 1 company". A control that looks
+  // live and silently does nothing is worse than one that is visibly disabled.
+  // The per company filtering below is the real guard.
+  if (demoGuard()) return;
+  // Drop the ones already being scanned rather than sending them. The server
+  // refuses a company that is mid scan, and sending a mixed list would have the
+  // whole press read as a refusal when most of it was startable.
+  const busy = new Set((state.stats.scanning || []).map((c) => String(c).toLowerCase()));
+  const all = [...state.freshPicked].filter((c) => state.companies.includes(c));
+  const companies = all.filter((c) => !busy.has(c.toLowerCase()));
+  if (!all.length) { toast("Pick at least one company first."); return; }
+  if (!companies.length) { toast("Those companies are already being scanned."); return; }
+  if (companies.length < all.length) {
+    toast(`Starting ${companies.length}. The rest are already scanning.`);
+  }
   const hours = Number(state.freshHours) || 0;
   state.freshNote = "";
   state.stats.discovering = true;   // optimistic; poll confirms
@@ -2775,6 +3302,7 @@ async function loadQueue() {
     state.dead = (d && d.dead) || [];
     renderQueueBadge();
     renderQueuePanel();
+    refreshPane();   // the pipeline stack shows the queue inline; a real change repaints
     loadVerify();
   } catch { /* backend briefly away — keep last known state */ }
 }
@@ -3566,6 +4094,7 @@ function wire() {
     const box = e.target.closest(".vf-in");
     if (box) { e.preventDefault(); sendVerifyCode(box.dataset.vfPk); }
   });
+  restoreFreshPicked();
   markDemo();
   $("#llm-banner-x").addEventListener("click", () => {
     $("#llm-banner").hidden = true;
@@ -3588,12 +4117,34 @@ function wire() {
     toast("Refreshed.");
   });
 
+  // A press in flight (pointerdown seen, click not yet delivered) must never
+  // have the pane rebuilt under it — that is how a click dies. refreshPane()
+  // checks the hold; the release is queued a tick after pointerup so the
+  // browser has dispatched the click (and any change event) before a deferred
+  // repaint is allowed to run.
+  $("#pane").addEventListener("pointerdown", () => { _pressAt = Date.now(); }, true);
+  const releasePress = () => {
+    if (!_pressAt) return;
+    _pressAt = 0;
+    if (_paneDirty) { _paneDirty = false; refreshPane(); }
+  };
+  window.addEventListener("pointerup", () => setTimeout(releasePress, 0));
+  window.addEventListener("pointercancel", () => setTimeout(releasePress, 0));
+
   $("#pane").addEventListener("click", (e) => {
     if (e.target.closest("a")) return;                 // links behave as links
     if (e.target.closest("[data-clear-filters]")) {
       state.coFilter = ""; state.query = ""; state.logKind = "all";
       $("#co-filter").value = ""; $("#co-filter").classList.remove("on");
       $("#search").value = "";
+      // The Fresh tab's own facets clear with the rest. Unticking the company
+      // facet is part of it: the ticks and the scan scope are one control, and
+      // "show me everything" untargets the next scan by the same gesture.
+      if (state.tab === "fresh") {
+        state.freshStatus = "";
+        state.freshPicked.clear();
+        saveFreshPicked();
+      }
       renderPane();
       return;
     }
@@ -3611,7 +4162,7 @@ function wire() {
       renderTabs(); renderPane();
       return;
     }
-    // The Fresh tab's window chips: a lens over data already in hand, so the
+    // The Fresh tab's window facet: a lens over data already in hand, so the
     // switch is a pure re-render — no fetch, no flash.
     const fw = e.target.closest("[data-fresh-w]");
     if (fw) {
@@ -3620,26 +4171,29 @@ function wire() {
       renderPane();
       return;
     }
-    // The Fresh tab's scan panel: fold, select all / clear over the filtered
-    // list, and the Run itself. All but Run repaint only what changed, so the
-    // list keeps its scroll while you work through it.
-    if (e.target.closest("[data-fs-fold]")) {
-      state.freshScanOpen = !state.freshScanOpen;
+    // The status facet: single select, and a second press on the selected row
+    // clears it — the same gesture "Any status" performs explicitly.
+    const fst = e.target.closest("[data-fresh-st]");
+    if (fst) {
+      const v = fst.dataset.freshSt || "";
+      state.freshStatus = state.freshStatus === v ? "" : v;
       renderPane();
       return;
     }
+    // The company facet's bulk controls and the Run itself. Ticks are data for
+    // the counts, so refresh those in place; the list is rebuilt too (its
+    // checkboxes must flip), which is safe because the click that got here
+    // landed on a button OUTSIDE the list.
     if (e.target.closest("[data-fs-all]")) {
       freshScanCos().forEach((c) => state.freshPicked.add(c));
-      const fl = $("#fs-list");
-      if (fl) fl.innerHTML = freshScanList();
-      syncFreshScan();
+      saveFreshPicked();
+      freshRefresh(true);
       return;
     }
     if (e.target.closest("[data-fs-none]")) {
       state.freshPicked.clear();
-      const fl = $("#fs-list");
-      if (fl) fl.innerHTML = freshScanList();
-      syncFreshScan();
+      saveFreshPicked();
+      freshRefresh(true);
       return;
     }
     if (e.target.closest("[data-fs-run]")) { runFreshScan(); return; }
@@ -3703,6 +4257,13 @@ function wire() {
     }
     const act = e.target.closest("[data-act]");
     if (act) { paneAction(act.dataset.act, act.dataset.pk, act); return; }
+    const pco = e.target.closest("[data-passed-co]");
+    if (pco) {
+      const k = pco.dataset.passedCo;
+      state.passedOpen.has(k) ? state.passedOpen.delete(k) : state.passedOpen.add(k);
+      renderPane();
+      return;
+    }
     const day = e.target.closest("[data-day]");
     if (day) {
       const k = day.dataset.day;
@@ -3721,20 +4282,34 @@ function wire() {
     if (el && !e.target.closest("textarea")) openDrawer(el.dataset.open);
   });
 
-  // Fresh scan panel: typing filters the list in place (the input is never
-  // rebuilt, so focus and caret survive), and a checkbox tick updates the
-  // count and the Run sentence without touching the list DOM.
+  // Fresh rail: both search boxes repaint the DATA regions in place and never
+  // their own element, so focus and caret simply survive — nothing to save,
+  // nothing to hand back. The results search mirrors the workbar search: one
+  // query, two places to type it.
   $("#pane").addEventListener("input", (e) => {
+    if (e.target.id === "fr-search") {
+      state.query = e.target.value;
+      const g = $("#search");
+      if (g) g.value = state.query;
+      freshRefresh(true);   // the company counts follow the query too
+      return;
+    }
     if (e.target.id !== "fs-search") return;
     state.freshCoQuery = e.target.value;
     const fl = $("#fs-list");
     if (fl) fl.innerHTML = freshScanList();
   });
+  // A tick both narrows the view and arms the scan. It refreshes counts and
+  // results IN PLACE and leaves the checkbox list's DOM alone — the box just
+  // clicked keeps its focus, its scroll and its next click, however fast they
+  // come. This used to rebuild the whole pane and then hunt for the checkbox
+  // to hand focus back to, which is how mid rebuild clicks were being eaten.
   $("#pane").addEventListener("change", (e) => {
     const cb = e.target.closest("input[data-fresh-co]");
     if (!cb) return;
     if (cb.checked) state.freshPicked.add(cb.value); else state.freshPicked.delete(cb.value);
-    syncFreshScan();
+    saveFreshPicked();
+    freshRefresh();
   });
 
   // Heatmap tooltip: one floating tip, delegated on the pane so it survives

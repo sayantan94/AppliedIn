@@ -92,7 +92,56 @@ def discover_company(
     if eff is not prefs:
         log.info("%s: using company preference overrides %s",
                  company.name, sorted(_flags.company_pref(company.name)))
+
+    # AGE FIRST, before the relevance screen. This path has its own enqueue and
+    # never reaches the crawler's filter, so the window silently did not apply to
+    # feed companies at all — which are exactly the ones carrying exact publish
+    # dates. Filtering here also means a stale posting never costs a relevance
+    # call: Scale AI fetched 208 and screened all of them to find 40.
+    from .crawler import _age_limit
+    from .freshness import age_hours, describe, is_fresh
+
+    limit = _age_limit(company.name)
+    if limit:
+        kept, stale = [], []
+        for j in fetched:
+            (kept if is_fresh(getattr(j, "posted_at", ""), limit) else stale).append(j)
+        if stale:
+            for j in stale[:20]:      # a board can be mostly old; log a readable slice
+                age = age_hours(getattr(j, "posted_at", ""))
+                log.info("%s: SKIPPED %s — published %s (%s), outside the %gh window",
+                         company.name, j.title[:60],
+                         (getattr(j, "posted_at", "") or "?")[:10],
+                         f"{age:.0f}h ago" if age is not None else "unreadable date", limit)
+            from . import passed_over
+
+            passed_over.record(
+                getattr(tracking, "r", None), company.name, stale, "too_old",
+                f"published outside the {limit:g} hour window this scan asked for")
+            log.info("%s: %d of %d posting(s) were published in the last %gh",
+                     company.name, len(kept), len(fetched), limit)
+        fetched = kept
+
+    # Same for the feed path: a board with no dates yields roles that can never
+    # appear under Fresh, and silence there reads as a scan that found nothing.
+    if fetched and all(not getattr(j, "posted_at", "") for j in fetched):
+        from core.events import emit as _emit
+
+        _emit("running", agent="finder", company=company.name,
+              pk=f"meta#undated#{company.name.lower()}",
+              detail=(f"{company.name} publishes no posting dates, so its roles "
+                      f"cannot show under Fresh. They are on the Pipeline board "
+                      f"under Found."))
+
+    before_screen = list(fetched)
     matched = relevant(fetched, eff)
+    if (screened_out := [j for j in before_screen
+                         if j.jd_url not in {m.jd_url for m in matched}]):
+        from . import passed_over
+
+        passed_over.record(getattr(tracking, "r", None), company.name, screened_out,
+                           "not_relevant",
+                           "did not match your title, seniority or keyword preferences")
     # Then the title filter, which NARROWS on top rather than replacing.
     kws = _flags.company_filter(company.name)
     if kws:

@@ -755,6 +755,52 @@ button:disabled { cursor: default; }
 .bd.s-work i { background: color-mix(in srgb, var(--scan) 55%, var(--faint)); }
 .bd.dim { color: var(--faint); }
 
+/* The scanning-now strip: which companies are being crawled at this moment,
+   readable from every tab because it lives in the sticky deck. One chip per
+   company on the --scan accent, with an elapsed clock when the page saw the
+   scan start. Wraps rather than widens, so it can never push the page
+   sideways. */
+.deck-scan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 0 10px;
+}
+.sn-label {
+  font: var(--t-label);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.sn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-badge);
+  border-radius: var(--r-badge);
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--scan) 40%, transparent);
+  background: color-mix(in srgb, var(--scan) 10%, transparent);
+  color: var(--scan);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--scan);
+  animation: pausepulse 1.6s ease-in-out infinite;
+}
+.sn-t {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--scan) 65%, var(--fg));
+}
+
 /* slim indeterminate bar while a run is active */
 .runbar { height: 2px; margin: 0 calc(-1 * clamp(16px, 3vw, 32px)); overflow: hidden; }
 .runbar[data-active="true"] {
@@ -1787,6 +1833,7 @@ a.rowlk, button.rowlk { display: inline-block; }
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
   .runbar[data-active="true"] { animation: none; }
+  .sn-dot { animation: none; }
 }
 
 /* Flagged-lane retry: one click re-runs the application with human-style clicks. */
@@ -3153,28 +3200,164 @@ button.ps-head:hover { background: var(--card-2); }
 }
 
 /* ─── Fresh tab ──────────────────────────────────────────────────────────── */
-/* Roles the employer published inside a chosen window. The window chips are a
-   lens over one payload fetched at the widest window, so switching re-renders
-   in place. Day groups newest first; rows from the last 24 hours carry a thin
-   --scan keel. Only existing tokens, so both themes come for free — and --bad
-   never appears here, since nothing on this view is destructive. */
+/* One faceted browse surface: a headline row of stat tiles, a sticky facet
+   rail on the left (window / status / companies / scan), and the results with
+   the passed-over trail on the right. Facet counts are computed against the
+   other active facets; zeroes grey out rather than vanish. One payload at the
+   widest window, so every facet change is a pure re-render. Existing tokens
+   only, both themes for free — and --bad never appears here, since nothing on
+   this view is destructive. */
+.fresh-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.fstat {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  padding: 10px 12px 9px;
+  min-width: 0;
+}
+/* A stat value is a display figure: sans, semibold, proportional digits (the
+   default) — tabular would set every digit at the width of a zero and read
+   loose at this size. The label wears the label token one step down. */
+.fstat-v { font: 600 22px/28px var(--sans); color: var(--fg);   font-size: 17px;
+}
+.fstat-l { font: var(--t-label); color: var(--muted); margin-top: 2px; }
+.fstat.dim .fstat-v { color: var(--muted); }
+
+.fresh-layout {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.fresh-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fresh-main .ps-passed { margin-top: 0; }
+
+/* .work clips to its rounded corners with overflow: hidden, which quietly
+   makes it the sticky containing scroll box and kills the rail's stickiness.
+   overflow: clip gives the identical clipping without creating a scroll
+   container, and :has() scopes the change to this tab alone. */
+.work:has(.fresh-layout) { overflow: clip; }
+
+/* The rail sticks below the sticky control deck (about 125px tall on a wide
+   screen, one wrap taller once the deck folds); on short screens it scrolls
+   inside itself rather than pinning its own tail out of reach. */
+.fresh-rail {
+  position: sticky;
+  top: 138px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(100vh - 150px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+@media (max-width: 1080px) {
+  .fresh-rail { top: 170px; max-height: calc(100vh - 182px); }
+}
+.frail-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  overflow: hidden;
+  flex: none;
+}
+.frail-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 12px 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.frail-hn {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+/* A facet option: label left, count right. Selected rows take the same --scan
+   keel the hot result rows wear, so "chosen" reads the same on both sides. */
+.facet-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s;
+}
+.facet-row:hover { background: var(--card-2); color: var(--fg); }
+.facet-row[aria-selected="true"] {
+  background: var(--card-2);
+  box-shadow: inset 2px 0 0 var(--scan);
+  color: var(--fg);
+  font-weight: 600;
+}
+.facet-row:last-child { margin-bottom: 5px; }
+.facet-l {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.facet-n {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+/* Zero counts stay on the page, greyed: the absence is informative. */
+.facet-row.zero:not([aria-selected="true"]),
+.facet-row.zero:not([aria-selected="true"]) .facet-n { color: var(--faint); }
+.frail-cos { padding: 0 12px 9px; }
+.frail-note {
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+.frail-scanbody { padding: 0 12px 11px; }
+.frail-scanbody .fs-foot { margin-top: 4px; }
+
+/* The results column's header: the persistent search box and the honest
+   showing line over dated roles. */
+.fr-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.fr-search { flex: 1 1 180px; width: auto; min-width: 0; }
+.fr-showing { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.fr-showing b { color: var(--fg); font-weight: 600; }
+
 .fresh-card {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--card);
   overflow: hidden;
 }
-.fresh-bar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.fresh-bar .chips { margin-bottom: 0; }
-.fresh-sum { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.fresh-sum b { color: var(--fg); font-weight: 600; }
 .fresh-day + .fresh-day { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .fd-head {
   display: flex;
@@ -3233,68 +3416,35 @@ button.ps-head:hover { background: var(--card-2); }
 }
 .fresh-foot b { color: var(--muted); font-weight: 600; }
 
-/* ── Fresh tab: the scan panel ───
-   The query half of the surface, above the results it feeds: pick companies,
-   let the window chips bound the crawl, run, read below. Existing tokens only;
-   --scan is the sole accent and --bad never appears, since nothing here is
-   destructive. The checkbox grid wraps into 1fr columns and scrolls
-   vertically, so forty five names can never push the page sideways. */
-.fs-panel {
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--card);
-  margin-bottom: 12px;
-  overflow: hidden;
-}
-.fs-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 14px;
-  border: none;
-  background: none;
-  text-align: left;
-  transition: background 0.12s;
-}
-.fs-head:hover { background: var(--card-2); }
-.fs-caret { flex: none; font-size: 10px; color: var(--faint); }
-.fs-title { font-size: 13px; font-weight: 600; color: var(--fg); white-space: nowrap; }
-.fs-hint {
-  font-size: 11.5px;
-  color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.fs-state { margin-left: auto; flex: none; font-size: 10.5px; color: var(--muted); }
-.fs-body { border-top: 1px solid var(--border); padding: 10px 14px 12px; }
-.fs-tools { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+/* ── Fresh tab: the company facet's list and the scan's run controls, both
+   inside the rail. One name per row with its count; the list scrolls
+   vertically, so fifty names can never push the page sideways. --scan is the
+   sole accent and --bad never appears, since nothing here is destructive. */
+.fs-tools { display: flex; align-items: center; gap: 10px; }
 .fs-search {
   width: auto;
-  flex: 0 1 260px;
-  min-width: 150px;
-  font-size: 12.5px;
-  padding: 5px 10px;
+  flex: 1 1 90px;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 9px;
 }
 .fs-list {
-  margin-top: 8px;
-  padding: 5px;
+  margin-top: 7px;
+  padding: 4px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-  gap: 1px 8px;
+  grid-template-columns: 1fr;
+  gap: 1px;
   align-content: start;
-  max-height: 176px;
+  max-height: 236px;
   overflow-y: auto;
   scrollbar-width: thin;
 }
 .fs-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
   padding: 3px 7px;
   border-radius: var(--r-sm);
@@ -3312,10 +3462,13 @@ button.ps-head:hover { background: var(--card-2); }
   flex: none;
   cursor: pointer;
 }
-.fs-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Same reading rule as the Discover picker: the picked set stands out down a
-   long column, but the checkbox itself still carries the state. */
-.fs-item:has(input:not(:checked)) span { color: var(--muted); }
+.fs-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Same reading rules as the facet rows: the ticked set stands out down a long
+   column, and a zero count greys its row without disabling the tick — a quiet
+   board is precisely the one a scan is for. */
+.fs-item:has(input:not(:checked)) .fs-nm { color: var(--muted); }
+.fs-item.zero:has(input:not(:checked)) .fs-nm,
+.fs-item.zero:has(input:not(:checked)) .facet-n { color: var(--faint); }
 /* A refused run says why it was refused, where the button is. Neutral, not
    --bad: nothing broke, the answer was simply "not yet". */
 .fs-note {
@@ -3328,17 +3481,18 @@ button.ps-head:hover { background: var(--card-2); }
   line-height: 1.5;
   color: var(--fg);
 }
+/* Stacked, not rowed: inside a 224px rail the sentence sits above the button
+   and the button takes the full width, so the press target is generous. */
 .fs-foot {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  margin-top: 8px;
 }
-.fs-sum { flex: 1 1 260px; min-width: 0; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.fs-sum { min-width: 0; font-size: 11.5px; line-height: 1.55; color: var(--muted); }
 .fs-sum b { color: var(--fg); font-weight: 600; }
 .fs-run {
-  margin-left: auto;
   flex: none;
   border-color: color-mix(in srgb, var(--scan) 45%, transparent);
   background: color-mix(in srgb, var(--scan) 12%, transparent);
@@ -3360,3 +3514,169 @@ button.ps-head:hover { background: var(--card-2); }
   margin-right: 7px;
   animation: pausepulse 1.6s ease-in-out infinite;
 }
+
+/* An empty scoped panel still says something: nothing rejected HERE. */
+.po-none { padding: 12px 14px; font-size: 12.5px; color: var(--muted); }
+
+/* The rail thins first, then stacks above the results; the stat row folds to
+   two tiles a line. Nothing may push the page sideways on the way down. */
+@media (max-width: 1180px) {
+  .fresh-layout { grid-template-columns: 200px minmax(0, 1fr); }
+}
+@media (max-width: 920px) {
+  .fresh-layout { grid-template-columns: 1fr; }
+  .fresh-rail { position: static; max-height: none; overflow: visible; }
+  .fresh-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---------------------------------------------------------------------------
+   Apps design cheatsheet. The owner's spec, stated once as tokens so a control
+   is sized by naming its role rather than by repeating a number, and so the
+   sheet can be checked against the spec by reading twenty lines.
+
+     Type      Inter. Titles 16/20 Medium. Labels 13/16 Medium. Body 14 Regular.
+     Buttons   32px high, 10px radius.
+     Rows      40px data, 44px stores.
+     Badge     20px high, 6px radius, #CAFACE on #15B042 text.
+     Switch    24x14, 10px thumb, #0077E6 track.
+     Text      #333333 default, #777777 subtle.
+
+   The literal hex values are the spec's, and they are a LIGHT palette. This
+   dashboard is theme aware, so #333333 body text would be all but invisible on
+   the dark card. They are therefore bound here as the light values and given
+   dark counterparts below that preserve the same relationships: default text
+   high contrast, subtle text one clear step down, the badge a tinted chip of
+   its own text colour. The spec is honoured exactly where it applies, rather
+   than applied literally until the page stops working.
+   --------------------------------------------------------------------------- */
+:root {
+  --t-title: 600 16px/20px var(--sans);
+  --t-label: 500 13px/16px var(--sans);
+  --t-body: 400 14px/20px var(--sans);
+
+  --h-btn: 32px;
+  --r-btn: 10px;
+  --h-row: 40px;          /* data rows */
+  --h-row-store: 44px;    /* store rows, the roomier listing */
+  --h-badge: 20px;
+  --r-badge: 6px;
+  --sw-w: 24px;
+  --sw-h: 14px;
+  --sw-thumb: 10px;
+
+  /* Dark counterparts of the spec's text and control colours. */
+  --text-default: #e8ede9;
+  --text-subtle: #9fada3;
+  --badge-fill: color-mix(in srgb, #15b042 22%, transparent);
+  --badge-text: #6ee7a0;
+  --switch-on: #3b9bff;
+}
+
+:root[data-theme="light"] {
+  --text-default: #333333;
+  --text-subtle: #777777;
+  --badge-fill: #cafacE;
+  --badge-text: #15b042;
+  --switch-on: #0077e6;
+}
+
+/* The type scale, applied by role. */
+body { font: var(--t-body); color: var(--text-default); }
+h1, h2, h3, .ps-name, .kc-co, .fg-co, .un-co, .hm-total { font: var(--t-title); }
+label, .cp-lbl, .ps-hint, .un-why, .fg-best, .kc-role { font: var(--t-label); }
+.subtle, .muted, .ps-hint, .un-aged, .kc-age { color: var(--text-subtle); }
+
+/* Controls at the spec's sizes. Buttons that are deliberately smaller (inline
+   row actions) keep their own size: 32px on every one of them would turn a
+   dense list into a toolbar. */
+button, .btn, .cp-lk, .ps-link, .vf-go {
+  min-height: var(--h-btn);
+  border-radius: var(--r-btn);
+}
+.un-x, .kc-retry, .lp, .chip { min-height: auto; }
+
+.jrow, .un-row { min-height: var(--h-row); }
+.fg-head, .ung-head, .cp-row { min-height: var(--h-row-store); }
+
+.badge, .ps-n, .fg-n, .un-n, .tab-n {
+  height: var(--h-badge);
+  border-radius: var(--r-badge);
+  background: var(--badge-fill);
+  color: var(--badge-text);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+}
+
+/* Switch, at 24x14 with a 10px thumb. */
+.switch {
+  width: var(--sw-w); height: var(--sw-h);
+  border-radius: 999px; background: var(--border-2);
+  position: relative; display: inline-block; flex: none;
+  transition: background .15s ease;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: var(--sw-thumb); height: var(--sw-thumb);
+  border-radius: 50%; background: var(--panel-solid);
+  transition: transform .15s ease;
+}
+.switch[aria-checked="true"], .switch.on { background: var(--switch-on); }
+.switch[aria-checked="true"]::after, .switch.on::after {
+  transform: translateX(calc(var(--sw-w) - var(--sw-thumb) - 4px));
+}
+
+/* "Passed over": what a scan saw and did not keep, grouped by company. Muted
+   throughout, because nothing here went wrong: these are decisions, and the
+   panel exists to make them checkable rather than to raise an alarm. */
+.ps-passed { margin-top: 12px; }
+.pog { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.pog:first-of-type { border-top: 0; }
+.pog-head {
+  width: 100%; display: grid; gap: 10px; align-items: center;
+  grid-template-columns: 10px minmax(0, 1fr) max-content max-content;
+  padding: 8px 14px; background: none; border: 0; text-align: left;
+  color: inherit; font: inherit; cursor: pointer;
+}
+.pog-head:hover { background: var(--card-2); }
+.pog.open .pog-head { background: color-mix(in srgb, var(--card-2) 70%, transparent); }
+.pog-co { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pog-n { color: var(--muted); font-size: 11px; }
+.pog-why { color: var(--faint); font-size: 11px; white-space: nowrap; }
+
+.po-list { list-style: none; margin: 0; padding: 0 0 6px; display: grid; gap: 1px; }
+.po-row {
+  display: grid; gap: 10px; align-items: baseline;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  padding: 4px 14px 4px 34px; font-size: 13px;
+}
+.po-t {
+  color: var(--muted); text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+a.po-t:hover { color: var(--fg); text-decoration: underline; }
+.po-when { color: var(--faint); font-size: 11px; white-space: nowrap; }
+.po-why {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  color: var(--muted); background: var(--card-2); border: 1px solid var(--border);
+}
+.po-foot {
+  padding: 8px 14px 2px; font-size: 11px; color: var(--faint);
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+@media (max-width: 720px) {
+  .pog-why, .po-when { display: none; }
+  .po-row { padding-left: 24px; }
+}
+
+/* "showing N of M" inside an opened company. The header count is the truth; this
+   says the list under it is a sample, so a company that rejected sixty roles is
+   never mistaken for one that rejected twenty five. */
+.po-row.po-note { color: var(--faint); font-size: 11px; font-style: italic; }
+
+
+/* A ticked company in the passed over trail. Floated to the top and marked,
+   rather than the others being hidden: the facet says what to scan next, this
+   panel says what already happened, and one must not silently empty the other. */
+.pog-head.pog-picked .pog-co { color: var(--scan); }

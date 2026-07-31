@@ -12,6 +12,9 @@ relevance, dedup, the queue — cannot tell where a posting came from.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from core.logging import get_logger
 from core.models import JobRecord
 
@@ -21,6 +24,9 @@ log = get_logger(__name__)
 # now a judgement per posting. The first Apple crawl needed just over seven
 # minutes, so a seven-minute ceiling killed the next one at the finish line.
 TIMEOUT_S = 1800  # 30 minutes
+# Often enough that a watching owner sees movement, rare enough that a long
+# crawl does not fill the activity feed with its own waiting.
+HEARTBEAT_S = 45
 # A cap, not a target. Apple's board returned 274 matches for one search in one
 # city, so a low cap silently turns "what is open" into "the first few" — and the
 # owner cannot tell the difference from the outside. The session says when it
@@ -273,10 +279,33 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
 
     from .freshness import run_window
 
-    report, problem = await run_task(
-        _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules,
-              max_age_hours=run_window()),
-        report_key="jobs", model=model, timeout_s=TIMEOUT_S, kind="crawl")
+    # A browser crawl of a big careers site takes minutes: Apple's took twenty one,
+    # and in that time the run emitted nothing at all. Silence for twenty minutes
+    # is indistinguishable from a hang, so the owner is left watching a spinner
+    # wondering whether to restart something that is working perfectly well.
+    #
+    # So it reports that it is still going, with the elapsed time, which is the one
+    # fact that separates slow from stuck. Cancelled in a finally, because a
+    # heartbeat that outlives its run would be a worse lie than no heartbeat.
+    started = time.monotonic()
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_S)
+            mins = int((time.monotonic() - started) // 60)
+            emit("running", agent="finder", company=company,
+                 detail=(f"{company}: still reading the careers page"
+                         + (f", {mins} min so far" if mins else "")))
+            log.info("%s: crawl still running after %d min", company, mins)
+
+    beat = asyncio.create_task(_heartbeat())
+    try:
+        report, problem = await run_task(
+            _task(company, careers_url, _brief(prefs) + _queries(prefs), site_rules,
+                  max_age_hours=run_window()),
+            report_key="jobs", model=model, timeout_s=TIMEOUT_S, kind="crawl")
+    finally:
+        beat.cancel()
     if problem:
         log.warning("chrome crawl of %s failed: %s", company, problem)
         return [], "", problem

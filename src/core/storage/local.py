@@ -62,9 +62,14 @@ class RedisTracking(AbstractTracking):
         pipe = self.r.pipeline()
         pipe.set(f"app:{pk}", json.dumps(row, default=str))
         status = row.get("status")
+        # The status sets are an index of JOBS. Bookkeeping rows (watermarks, run
+        # markers) carry a status too, and letting them in meant any count taken
+        # from the sets was wrong by however many of them existed. Keeping them out
+        # here is what lets /stats count with SCARD instead of reading every row.
+        is_job = not str(pk).startswith("meta#")
         if prev_status and prev_status != status:
             pipe.srem(f"status:{prev_status}", pk)
-        if status:
+        if status and is_job:
             pipe.sadd(f"status:{status}", pk)
         if row.get("jd_hash"):
             pipe.hset("jdhash", row["jd_hash"], pk)
@@ -115,6 +120,25 @@ class RedisTracking(AbstractTracking):
 
     def find_by_jd_hash(self, jd_hash: str) -> str | None:
         return self.r.hget("jdhash", jd_hash)
+
+    def status_counts(self) -> dict[str, int]:
+        """How many jobs sit at each status, without reading a single row.
+
+        The obvious version walked every row: scan_iter over app:* plus a GET each,
+        which at 1737 rows took 34 SECONDS. The dashboard polls this every three
+        seconds, so the board spent its whole life waiting on a count and every
+        click felt dead. The status sets are already maintained on write, so the
+        same answer is a handful of SCARDs.
+        """
+        counts: dict[str, int] = {}
+        pipe = self.r.pipeline()
+        keys = list(self.r.scan_iter("status:*"))
+        for k in keys:
+            pipe.scard(k)
+        for k, n in zip(keys, pipe.execute()):
+            if n:
+                counts[str(k).split(":", 1)[1]] = int(n)
+        return counts
 
     def query_status(self, status: Status) -> list[dict]:
         val = status.value if hasattr(status, "value") else status

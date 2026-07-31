@@ -94,6 +94,9 @@ def test_a_run_window_outranks_the_saved_preference_without_changing_it():
     from discovery.freshness import run_window, set_run_window
 
     before = json.dumps(flags.company_prefs(), sort_keys=True)
+    # Whatever the standing limit is: a global default, a company override, or
+    # none. The invariant is that a run returns things to it, not that it is zero.
+    baseline = _age_limit("waymo")
     try:
         set_run_window(24)
         assert run_window() == 24.0
@@ -103,7 +106,7 @@ def test_a_run_window_outranks_the_saved_preference_without_changing_it():
     finally:
         set_run_window(0)
 
-    assert _age_limit("waymo") == 0.0, "the limit leaves with the run"
+    assert _age_limit("waymo") == baseline, "the run's window leaves with the run"
     assert json.dumps(flags.company_prefs(), sort_keys=True) == before
 
 
@@ -115,3 +118,51 @@ def test_no_window_means_no_limit_so_undated_boards_still_work():
     set_run_window(0)
     assert run_window() == 0.0
     assert is_fresh(iso(days=900), 0, now=NOW) is True
+
+
+# --- a rejection has to say why --------------------------------------------
+
+def test_every_age_rejection_names_the_job_and_its_date(caplog):
+    """A role vanishing from a scan with no explanation is indistinguishable from
+    a scan that failed to see it, and the owner cannot tell whether the window was
+    too narrow or the board's date was wrong. Those need different actions, so the
+    log names each skipped role, the date it was judged on, and the window.
+    """
+    import logging
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from core.models import JobRecord
+    from discovery.crawler import _enqueue
+    from discovery.watchlist import CompanyConfig
+
+    now = datetime.now(timezone.utc)
+
+    def job(title, hours):
+        return JobRecord(company="Scale AI", job_id=title[:8], title=title,
+                         jd_url=f"https://x/{title[:8]}", jd_text="x",
+                         posted_at=(now - timedelta(hours=hours)).isoformat())
+
+    class Stores:
+        class tracking:
+            @staticmethod
+            def put_new(j): return True
+        class queue:
+            @staticmethod
+            def enqueue(*a, **k): pass
+        tailor_queue = "q"
+
+    co = CompanyConfig(name="Scale AI", careers_url="https://scale.com/careers")
+    with caplog.at_level(logging.INFO), \
+            patch("discovery.crawler._age_limit", return_value=24), \
+            patch("tools.seen.load", return_value=set()), \
+            patch("tools.seen.mark", lambda x: None):
+        _enqueue(co, [job("Staff Software Engineer, Data Platform", 168),
+                      job("Senior Engineer, Inference", 8)], Stores())
+
+    text = caplog.text
+    assert "SKIPPED Staff Software Engineer, Data Platform" in text
+    assert "168h ago" in text, "the age it was judged on"
+    assert "outside the 24h window" in text, "and the window it was judged against"
+    assert "Senior Engineer, Inference" not in text.split("SKIPPED")[1], \
+        "a role inside the window is not reported as skipped"

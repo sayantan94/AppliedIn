@@ -176,3 +176,7 @@ companies:
   - name: Snap
     careers_url: https://careers.snap.com/
     mode: gated
+
+  - name: coinbase
+    careers_url: https://www.coinbase.com/careers/positions
+    mode: gated

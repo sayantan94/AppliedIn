@@ -222,6 +222,11 @@
           <b>Process</b> scores them, tailors your résumé and applies.
         </p>
         <div class="deck-breakdown mono" id="breakdown"></div>
+        <!-- Which companies are being crawled RIGHT NOW, visible from every
+             tab. Filled by renderScanNow() on each stats poll; hidden when
+             nothing is scanning. -->
+        <div class="deck-scan" id="scan-now" hidden aria-live="polite"
+          title="Companies being crawled right now"></div>
         <div class="runbar" id="runbar" data-active="false" aria-hidden="true"></div>
       </header>
 

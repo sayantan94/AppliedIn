@@ -141,6 +141,25 @@ def _age_limit(company_name: str) -> float:
         return 0.0
 
 
+def _note_screened_out(stores: Any, company: str, before: list, after: list) -> None:
+    """Record what the relevance screen rejected.
+
+    The other half of "why is this role not on my board". An age drop and a
+    preferences drop look identical from the outside — the job is simply absent —
+    but one is fixed by widening the window and the other by changing the
+    preferences, so they must be distinguishable.
+    """
+    kept = {getattr(j, "jd_url", "") for j in after}
+    dropped = [j for j in before if getattr(j, "jd_url", "") not in kept]
+    if not dropped:
+        return
+    from . import passed_over
+
+    passed_over.record(getattr(stores.tracking, "r", None), company, dropped,
+                       "not_relevant",
+                       "did not match your title, seniority or keyword preferences")
+
+
 def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     """Drop anything too old, dedup against past runs, queue what is genuinely new.
 
@@ -157,17 +176,68 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
 
     limit = _age_limit(company.name)
     if limit:
-        before = len(jobs)
-        jobs = [j for j in jobs if is_fresh(getattr(j, "posted_at", ""), limit)]
-        if before != len(jobs):
+        from .freshness import age_hours
+
+        kept, dropped = [], []
+        for j in jobs:
+            (kept if is_fresh(getattr(j, "posted_at", ""), limit) else dropped).append(j)
+        jobs = kept
+
+        # Name every rejection, with the date it was judged on. A role vanishing
+        # from a scan with no explanation is indistinguishable from a scan that
+        # failed to see it, and the owner cannot tell whether the window was too
+        # narrow or the board's date was wrong. Both need different actions.
+        for j in dropped:
+            posted = getattr(j, "posted_at", "")
+            age = age_hours(posted)
+            log.info("%s: SKIPPED %s — published %s (%s), outside the %gh window",
+                     company.name, j.title[:60], (posted or "?")[:10],
+                     f"{age:.0f}h ago" if age is not None else "unreadable date", limit)
+        if dropped:
+            # Recorded, not only logged. A dropped job never becomes a row, so the
+            # log was the only trace and the board could not answer "why is this
+            # role not here".
+            from . import passed_over
+
+            # getattr, because this is a debugging trail and must never be the
+            # thing that breaks a scan. A store without a Redis handle (the cloud
+            # path) simply keeps no trail.
+            passed_over.record(
+                getattr(stores.tracking, "r", None), company.name, dropped, "too_old",
+                f"published outside the {limit:g} hour window this scan asked for")
+
+        if dropped:
+            # One event, not one per posting: a board with three hundred old roles
+            # would bury the feed it is meant to explain. The examples carry the
+            # dates so the reason is checkable without opening the logs.
+            ex = "; ".join(
+                f"{j.title[:44]} ({describe(getattr(j, 'posted_at', '')) or 'no date'})"
+                for j in sorted(dropped, key=lambda x: getattr(x, "posted_at", ""),
+                                reverse=True)[:3])
+            emit("running", agent="finder", company=company.name,
+                 pk=f"meta#age#{company.name.lower()}",
+                 detail=(f"{company.name}: {len(kept)} of {len(kept) + len(dropped)} "
+                         f"posting(s) were published in the last {limit:g}h. "
+                         f"Skipped as older: {ex}"))
             log.info("%s: %d of %d posting(s) were newer than %gh",
-                     company.name, len(jobs), before, limit)
+                     company.name, len(kept), len(kept) + len(dropped), limit)
+
         undated = sum(1 for j in jobs if not getattr(j, "posted_at", ""))
         if undated:
             # Say it, because it is the difference between "nothing new was posted"
             # and "this board does not publish dates so the filter did nothing".
             log.info("%s: %d kept posting(s) carry no publish date, so the age "
                      "limit could not judge them", company.name, undated)
+            if undated == len(jobs):
+                # EVERY role from this board is undated, so none of them can ever
+                # appear in the Fresh view however recent they are. Watching Fresh
+                # while scanning a board like this looks exactly like a scan that
+                # found nothing, so say where the roles actually went.
+                emit("running", agent="finder", company=company.name,
+                     pk=f"meta#undated#{company.name.lower()}",
+                     detail=(f"{company.name} publishes no posting dates, so its "
+                             f"{undated} role(s) cannot show under Fresh. They are "
+                             f"on the Pipeline board under Found."))
 
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]
@@ -241,6 +311,7 @@ def crawl_company(
     if not html and extractor is None:
         found = _browser_extract(company.careers_url, company.name, prefs)
         jobs = relevant(found, prefs)
+        _note_screened_out(stores, company.name, found, jobs)
         # Three outcomes that a single "0 new" line used to blur together, and
         # they need different actions from the owner: fix the URL, loosen the
         # preferences, or nothing at all.
@@ -269,6 +340,7 @@ def crawl_company(
     from tools import seen
 
     jobs = relevant(extracted, prefs)
+    _note_screened_out(stores, company.name, extracted, jobs)
     # Escalate to a real browser agent that loads the FULL listing, then re-screen.
     # Two ways in. Skipped when an extractor is injected (tests stay offline).
     #
@@ -292,6 +364,7 @@ def crawl_company(
         by_url.update({j.jd_url: j for j in seen_by_browser})
         extracted = list(by_url.values())
         jobs = relevant(extracted, prefs)
+        _note_screened_out(stores, company.name, extracted, jobs)
 
     log.info("%s: extracted %d postings, %d relevant", company.name, len(extracted), len(jobs))
     if not extracted:

@@ -384,12 +384,13 @@ def create_app() -> FastAPI:
 
     @app.get("/stats")
     def stats():
+        from discovery import handler as _handler
+
         stores = make_stores(settings)
-        counts: dict[str, int] = {}
-        for r in stores.tracking.all():
-            if not _is_job_row(r):
-                continue
-            counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+        # Counted from the status index, not by reading every row. The row walk
+        # took 34 seconds at 1737 rows, on an endpoint the dashboard polls every
+        # three seconds, which is why the whole board felt unresponsive.
+        counts = stores.tracking.status_counts()
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
         from core import flags
         return {"today_submitted": applied,
@@ -400,6 +401,13 @@ def create_app() -> FastAPI:
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _discovery_running(), "processing": _RUNNING["process"],
+                # WHICH companies, not just whether any. Scans became per company
+                # when the global lock was replaced by claims, but the board still
+                # had only a yes or no, so it disabled the Run button whenever
+                # anything anywhere was scanning: starting Apple made every other
+                # company unstartable, which is exactly what the per company work
+                # was meant to allow.
+                "scanning": sorted(_handler.scanning()),
                 # How many applications are being filled right now. In /stats
                 # rather than only in /apply-queue because the deck needs it every
                 # poll to know whether to offer Stop applying, and that panel is
@@ -1225,6 +1233,41 @@ def create_app() -> FastAPI:
         emit("running", agent="daemon",
              detail=f"{what} stopped by you — {killed} browser session(s) ended")
         return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
+
+    @app.get("/passed-over")
+    def passed_over_view(company: str = "", limit: int = 200):
+        """Roles the last scans decided NOT to keep, and the reason for each.
+
+        A dropped job never becomes a row, so the board could not answer the
+        question the owner actually asks: why is this role, which I can see on the
+        careers page, not here. The three answers need three different actions, so
+        they are kept apart: too old means widen the window, not relevant means
+        change the preferences, and absent from this list entirely means the scan
+        never saw it, which is a reading problem.
+        """
+        from discovery import passed_over
+        from discovery.freshness import describe
+
+        r = make_stores(settings).tracking.r
+        if company:
+            rows = passed_over.for_company(r, company, limit)
+            for row in rows:
+                row["posted_label"] = describe(row.get("posted_at") or "")
+                row["company"] = company
+            return {"companies": [{"company": company, "total": len(rows),
+                                   "jobs": rows, "by_reason": {}}],
+                    "count": len(rows)}
+
+        groups = passed_over.by_company(r)
+        total, by_reason = 0, {}
+        for g in groups:
+            total += g["total"]
+            for k, n in g["by_reason"].items():
+                by_reason[k] = by_reason.get(k, 0) + n
+            for row in g["jobs"]:
+                row["posted_label"] = describe(row.get("posted_at") or "")
+        return {"companies": groups, "count": total, "by_reason": by_reason,
+                "shown_per_company": 25}
 
     @app.get("/fresh")
     def fresh(hours: int = 48):
