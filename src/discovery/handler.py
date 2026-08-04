@@ -9,6 +9,8 @@ storage comes from the mode factory, never constructed directly.
 
 from __future__ import annotations
 
+import time as _time
+
 import threading
 from pathlib import Path
 from typing import Any
@@ -274,6 +276,38 @@ def add_watchlist_company(name: str, careers_url: str = "") -> dict:
 _LOCK = threading.Lock()
 _SCANNING: set[str] = set()
 
+# The ONE company being read right now, and how far through the batch we are.
+#
+# Claims are taken for the whole batch up front, so `_SCANNING` says "these 47 are
+# spoken for", not "these 47 are being crawled". Reporting the claim set as the
+# scanning set meant a 47 company sweep showed all 47 as in progress with an
+# identical clock, and there was no way to tell a run that was working from one
+# that had hung. Crawls are sequential: exactly one company is ever being read.
+_ACTIVE: dict[str, object] = {"company": "", "since": 0.0, "done": 0, "total": 0}
+
+
+def active() -> dict:
+    """Which company is being read right now, and progress through the batch."""
+    import time as _t
+
+    with _LOCK:
+        a = dict(_ACTIVE)
+    a["elapsed_s"] = int(_t.time() - float(a["since"] or 0)) if a["since"] else 0
+    return a
+
+
+def _set_active(company: str, done: int, total: int) -> None:
+    import time as _t
+
+    with _LOCK:
+        _ACTIVE.update({"company": company, "since": _t.time(),
+                        "done": done, "total": total})
+
+
+def _clear_active() -> None:
+    with _LOCK:
+        _ACTIVE.update({"company": "", "since": 0.0, "done": 0, "total": 0})
+
 
 def scanning() -> set[str]:
     """The companies being scanned right now, lowercased."""
@@ -357,6 +391,9 @@ def _targets(only: list[str] | None) -> set[str]:
 
 
 def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
+    # Progress through the batch, so the board can say "12 of 47" rather than
+    # implying all 47 are being read at once.
+    done_n = 0
     settings = get_settings()
     stores = make_stores(settings)
     config_dir = Path(settings.config_dir)
@@ -381,6 +418,11 @@ def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
                          before - len(companies))
 
     total = crawl_total = 0
+    batch_n = len(companies)      # what "12 of 47" counts against
+    from . import scan_log
+
+    _r = getattr(stores.tracking, "r", None)
+    scan_log.start_run(_r, batch_n)
     crawl_companies: list[CompanyConfig] = []
     with httpx.Client(headers=BROWSER_HEADERS) as client:
         for raw in companies:
@@ -393,9 +435,15 @@ def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
                 crawl_companies.append(company)  # custom career page -> crawler
                 continue
             try:
-                total += discover_company(company, prefs, stores.tracking,
-                                          stores.queue, client,
-                                          stores.tailor_queue, profile_id)
+                _set_active(company.name, done_n, batch_n)
+                done_n += 1
+                _t0 = _time.time()
+                _n = discover_company(company, prefs, stores.tracking,
+                                      stores.queue, client,
+                                      stores.tailor_queue, profile_id)
+                total += _n
+                scan_log.finished(_r, company.name, found=_n, relevant=_n,
+                                  enqueued=_n, seconds=_time.time() - _t0)
             except Exception:
                 log.exception("discovery failed for %s", company.name)
 
@@ -405,10 +453,17 @@ def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
 
         for company in crawl_companies:
             try:
-                crawl_total += crawl_company(company, prefs, stores)
+                _set_active(company.name, done_n, batch_n)
+                done_n += 1
+                _t0 = _time.time()
+                _n = crawl_company(company, prefs, stores)
+                crawl_total += _n
+                scan_log.finished(_r, company.name, found=_n, relevant=_n,
+                                  enqueued=_n, seconds=_time.time() - _t0)
             except Exception:
                 log.exception("crawl failed for %s", company.name)
 
+    _clear_active()      # nothing is being read once the batch is finished
     log.info("discovery done: feed=%d crawl=%d", total, crawl_total)
     return {"enqueued": total, "crawled": crawl_total}
 

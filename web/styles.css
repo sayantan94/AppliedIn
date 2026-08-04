@@ -755,15 +755,14 @@ button:disabled { cursor: default; }
 .bd.s-work i { background: color-mix(in srgb, var(--scan) 55%, var(--faint)); }
 .bd.dim { color: var(--faint); }
 
-/* The scanning-now strip: which companies are being crawled at this moment,
-   readable from every tab because it lives in the sticky deck. One chip per
-   company on the --scan accent, with an elapsed clock when the page saw the
-   scan start. Wraps rather than widens, so it can never push the page
-   sideways. */
+/* The scan strip: ONE chip for the company being read at this moment, a
+   determinate bar for how far through the batch the run is, and a count of
+   what is left — readable from every tab because it lives in the sticky deck.
+   Wraps rather than widens, so it can never push the page sideways. */
 .deck-scan {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
   padding: 0 0 10px;
 }
@@ -800,6 +799,43 @@ button:disabled { cursor: default; }
   font-weight: 500;
   color: color-mix(in srgb, var(--scan) 65%, var(--fg));
 }
+/* How far through the batch: a real bar, because a four hour sweep needs a
+   sense of motion that a fraction alone cannot give. It flexes into the row's
+   spare width; the fill's width is poked in place between rebuilds so it
+   animates without the strip redrawing. */
+.sn-track {
+  flex: 1 1 160px;
+  min-width: 120px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--scan) 18%, var(--border));
+  overflow: hidden;
+}
+.sn-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--scan);
+  transition: width 0.6s ease;
+}
+/* "12 done, 35 to go" beside the bar. On a sweep that runs for hours the
+   useful question is not whether something is running but how much is left. */
+.sn-prog {
+  font: var(--t-label);
+  font-size: 11px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+/* The finished receipt: a completed sweep is a good outcome, so the label
+   keeps the accent while the chip goes quiet — a receipt, not an alert. */
+.sn-label.sn-done { color: var(--scan); }
+.sn-chip.sn-chip-done {
+  border-color: var(--border-2);
+  background: var(--card-2);
+  color: var(--text-default);
+}
+.sn-ok { color: var(--scan); font-weight: 700; }
 
 /* slim indeterminate bar while a run is active */
 .runbar { height: 2px; margin: 0 calc(-1 * clamp(16px, 3vw, 32px)); overflow: hidden; }
@@ -1834,6 +1870,7 @@ a.rowlk, button.rowlk { display: inline-block; }
   * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
   .runbar[data-active="true"] { animation: none; }
   .sn-dot { animation: none; }
+  .sn-fill { transition: none; }
 }
 
 /* Flagged-lane retry: one click re-runs the application with human-style clicks. */
@@ -3680,3 +3717,41 @@ a.po-t:hover { color: var(--fg); text-decoration: underline; }
    rather than the others being hidden: the facet says what to scan next, this
    panel says what already happened, and one must not silently empty the other. */
 .pog-head.pog-picked .pog-co { color: var(--scan); }
+
+/* The run tally under the scan strip: every finished company and what it
+   produced, a dense multi column list rather than cards, so forty entries stay
+   shallow. Capped and scrolling inside its own box, because the deck is sticky
+   on every tab and a long run must never push the board down the page. */
+.deck-scan-results { padding: 0 0 10px; }
+.sr-head {
+  display: flex; align-items: baseline; gap: 8px;
+  font: var(--t-label); color: var(--text-subtle); margin-bottom: 4px;
+}
+.sr-n { color: var(--text-default); }
+.sr-sum { color: var(--scan); font-weight: 600; }
+.sr-sum.sr-sum-none { color: var(--faint); font-weight: 400; }
+.sr-list {
+  list-style: none; margin: 0; padding: 0 8px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  column-gap: 28px;
+  max-height: 112px; overflow-y: auto;
+}
+/* Name, then its result right beside it, then the time at the cell's far
+   edge. The result hugs the name so the pairing reads at a glance even when
+   only a few cells are filled; a long name truncates rather than pushing. */
+.sr-row {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) max-content minmax(12px, 1fr);
+  gap: 10px; align-items: baseline; font-size: 12px; padding: 2px 0;
+}
+.sr-row .sr-t { justify-self: end; }
+.sr-co { color: var(--text-default); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-got { color: var(--scan); font-weight: 600; white-space: nowrap; }
+/* Nothing new is a RESULT, so it is stated rather than left blank: a company
+   that found nothing differs from one the sweep has not reached. */
+.sr-none {
+  color: var(--faint); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+}
+.sr-t { color: var(--text-subtle); font-size: 11px; }

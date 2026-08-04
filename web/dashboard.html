@@ -222,11 +222,16 @@
           <b>Process</b> scores them, tailors your résumé and applies.
         </p>
         <div class="deck-breakdown mono" id="breakdown"></div>
-        <!-- Which companies are being crawled RIGHT NOW, visible from every
-             tab. Filled by renderScanNow() on each stats poll; hidden when
-             nothing is scanning. -->
+        <!-- Scan progress, visible from every tab: the ONE company being read
+             right now with its clock, a bar for how far through the batch the
+             run is, and (after a run) a ten minute finished receipt. Filled by
+             renderScanNow() on each stats poll; hidden when idle. -->
         <div class="deck-scan" id="scan-now" hidden aria-live="polite"
-          title="Companies being crawled right now"></div>
+          title="The company being read right now, and how far the run has got"></div>
+        <!-- The run tally: what each finished company produced, newest first.
+             Filled by renderScanResults(); capped and scrolling on its own. -->
+        <div class="deck-scan-results" id="scan-results" hidden
+          aria-live="polite"></div>
         <div class="runbar" id="runbar" data-active="false" aria-hidden="true"></div>
       </header>
 

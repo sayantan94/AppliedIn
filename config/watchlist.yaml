@@ -180,3 +180,7 @@ companies:
   - name: coinbase
     careers_url: https://www.coinbase.com/careers/positions
     mode: gated
+
+  - name: Applied Intuition
+    careers_url: https://www.appliedintuition.com/careers
+    mode: gated

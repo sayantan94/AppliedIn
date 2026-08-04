@@ -407,7 +407,12 @@ def create_app() -> FastAPI:
                 # anything anywhere was scanning: starting Apple made every other
                 # company unstartable, which is exactly what the per company work
                 # was meant to allow.
+                # The one company being READ right now, plus progress. The claim
+                # set is the whole batch, so reporting it made a 47 company sweep
+                # look like 47 simultaneous crawls with one identical clock, and a
+                # working run indistinguishable from a hung one.
                 "scanning": sorted(_handler.scanning()),
+                "scan_active": _handler.active(),
                 # How many applications are being filled right now. In /stats
                 # rather than only in /apply-queue because the deck needs it every
                 # poll to know whether to offer Stop applying, and that panel is
@@ -1233,6 +1238,19 @@ def create_app() -> FastAPI:
         emit("running", agent="daemon",
              detail=f"{what} stopped by you — {killed} browser session(s) ended")
         return {"ok": True, "what": what, "stopped": was, "sessions_killed": killed}
+
+    @app.get("/scan-log")
+    def scan_log_view():
+        """What each company's scan produced, as the sweep works through them.
+
+        A whole watchlist sweep is hours of sequential work. Without this the
+        board could say which company is being read but nothing about the forty
+        that already finished, so a long run was a spinner rather than a list you
+        can watch fill up.
+        """
+        from discovery import scan_log
+
+        return scan_log.results(make_stores(settings).tracking.r)
 
     @app.get("/passed-over")
     def passed_over_view(company: str = "", limit: int = 200):

@@ -53,6 +53,7 @@ const state = {
   fresh: null,        // /fresh payload, fetched once at the widest window
   freshHours: 48,     // the Fresh tab's selected window, in hours
   passed: null,
+  scanLog: null,        // /scan-log: what each company produced this run
   passedOpen: new Set(), // companies unfolded in the passed over trail          // /passed-over: what recent scans rejected, and why
   freshPicked: new Set(), // companies picked for a scan run FROM the Fresh tab.
                       // The tab's own selection: state.picked belongs to the
@@ -564,30 +565,196 @@ function renderMenuState() {
   $("#m-theme-state").textContent = document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
-/* The scanning-now strip: WHICH companies are being crawled, right in the
-   deck, on every tab. "Discovering…" said only that something, somewhere, was
-   busy; with per company scans the name is the information. Elapsed time rides
-   along when this page saw the scan start (see trackScanning) and is omitted,
-   not guessed, when it did not. Lives outside the pane, holds no inputs, and
-   is redrawn wholesale on every poll tick so the clocks count. */
+/* ─── Scan progress, in the deck ────────────────────────────────────────────
+   A watchlist sweep is hours of sequential browser work, minutes per company.
+   Three questions must be answerable from any tab without clicking: which
+   company is being read RIGHT NOW (one chip, one clock — claims are taken for
+   the whole batch up front, so the claim list says nothing about progress),
+   how far through the batch the run is (a bar plus counts), and what each
+   finished company produced (the tally below, where zero is stated, never
+   blank). Each block rebuilds its DOM only when its content actually changes;
+   between polls a 1s ticker advances the clock's text alone, so the strip
+   never flickers on the 3 second poll. */
 function scanElapsed(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
+// A completed duration: "48s", "4m 32s", "4h 32m".
+function scanTook(secs) {
+  const s = Math.max(0, Math.round(Number(secs) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+// Assign innerHTML only when it changed. This is what keeps the deck calm on
+// the poll: an unchanged strip is not rebuilt, and the results list keeps its
+// scroll position while a run works through the watchlist.
+function setHtmlOnce(host, html) {
+  if (host.dataset.sig === html) return false;
+  host.dataset.sig = html;
+  host.innerHTML = html;
+  return true;
+}
+
+// The clock between polls. The server's elapsed_s is the anchor (it survives
+// reloads and pages opened mid run) and is re anchored on every poll; the
+// ticker advances only the text of #sn-clock, never the strip around it.
+let _snTicker = null;
+let _snAnchor = null;   // {secs, at}: server side elapsed + when we heard it
+function _snTickClock() {
+  const el = $("#sn-clock");
+  if (el && _snAnchor)
+    el.textContent = scanElapsed(_snAnchor.secs * 1000 + (Date.now() - _snAnchor.at));
+}
+function snClock(on) {
+  if (on && !_snTicker) _snTicker = setInterval(_snTickClock, 1000);
+  else if (!on && _snTicker) { clearInterval(_snTicker); _snTicker = null; }
+}
+
 function renderScanNow() {
   const host = $("#scan-now");
   if (!host) return;
   const names = state.stats.scanning || [];
-  if (!names.length) { host.hidden = true; host.innerHTML = ""; return; }
-  // /stats lowercases names; show the watchlist's own casing where it has one.
+  if (!names.length) {
+    snClock(false); _snAnchor = null;
+    if (renderScanFinished()) return;
+    host.hidden = true; host.innerHTML = ""; delete host.dataset.sig;
+    return;
+  }
+
+  // ONE chip for the company actually being read, not one per claimed company.
+  // Claims are taken for the whole batch up front, so a 47 company sweep used
+  // to render 47 chips all showing the same clock, which said nothing about
+  // progress and made a working run look identical to a hung one. Crawls are
+  // sequential: exactly one company is ever being read.
   const disp = new Map(state.companies.map((c) => [String(c).toLowerCase(), c]));
-  host.innerHTML = `<span class="sn-label">Scanning now</span>` + names.map((n) => {
-    const lc = String(n).toLowerCase();
-    const t = _scanSeen.get(lc);
-    return `<span class="sn-chip"><span class="sn-dot"></span>${esc(disp.get(lc) || n)}${
-      t ? `<span class="sn-t mono">${scanElapsed(Date.now() - t)}</span>` : ""}</span>`;
-  }).join("");
+  // scan_active arrives from a daemon new enough to report it. An older daemon
+  // sends only the claim list, and rendering 47 chips from that is the very
+  // thing this replaced, so fall back to a count rather than a wall of names.
+  const a = state.stats.scan_active || {};
+  const legacy = !("scan_active" in state.stats);
+  const active = a.company ? (disp.get(String(a.company).toLowerCase()) || a.company) : "";
+  const total = Number(a.total) || names.length;
+  const done = Math.max(0, Math.min(total, Number(a.done) || 0));
+  const left = Math.max(0, total - done);
+
+  const chip = active
+    ? `<span class="sn-chip"><span class="sn-dot"></span>${esc(active)}`
+      + `<span id="sn-clock" class="sn-t mono" aria-live="off"></span></span>`
+    : legacy
+      ? `<span class="sn-chip"><span class="sn-dot"></span>${names.length}
+           compan${names.length === 1 ? "y" : "ies"} queued for this run</span>`
+      : `<span class="sn-chip"><span class="sn-dot"></span>starting…</span>`;
+
+  // The bar answers "how far through". A four hour sweep needs visible motion,
+  // not only a fraction. Only for a real batch: one company has no arc.
+  const bar = !legacy && total > 1
+    ? `<span class="sn-track" role="progressbar" aria-valuemin="0"`
+      + ` aria-valuemax="${total}" aria-valuenow="${done}" aria-label="scan progress">`
+      + `<span id="sn-fill" class="sn-fill"></span></span>`
+      + `<span class="sn-prog">${done} done, ${left} to go</span>`
+    : "";
+
+  setHtmlOnce(host, `<span class="sn-label">Scanning</span>${chip}${bar}`);
   host.hidden = false;
+  // The moving parts are poked in place, so the strip itself never redraws.
+  const fill = $("#sn-fill");
+  if (fill) fill.style.width = (total ? (done / total) * 100 : 0) + "%";
+  _snAnchor = { secs: Number(a.elapsed_s) || 0, at: Date.now() };
+  _snTickClock();
+  snClock(!!active);
+}
+
+/* The run tally: every finished company and what it produced, newest first,
+   kept while a run is live and through the receipt window after it ends.
+   Zero is a RESULT and is written out: "nothing new" from a finished company
+   is a different fact from a company the sweep has not reached. The list caps
+   its own height and scrolls, so 47 finished companies never push the board
+   down the page. */
+function renderScanResults() {
+  const host = $("#scan-results");
+  if (!host) return;
+  const log = state.scanLog || {};
+  const rows = log.companies || [];
+  const scanning = (state.stats.scanning || []).length;
+  if (!rows.length || (!scanning && !_scanFinishedAt)) {
+    host.hidden = true; host.innerHTML = ""; delete host.dataset.sig;
+    return;
+  }
+  const total = (log.run && log.run.total) || rows.length;
+  const gained = rows.reduce((n, c) => n + (Number(c.enqueued) || 0), 0);
+  const sum = gained
+    ? `${gained} new job${gained === 1 ? "" : "s"}${scanning ? " so far" : ""}`
+    : (scanning ? "nothing new yet" : "nothing new");
+  const html = `<div class="sr-head">Finished`
+    + ` <span class="sr-n mono">${rows.length} of ${total}</span>`
+    + `<span class="sr-sum${gained ? "" : " sr-sum-none"}">${sum}</span></div>`
+    + `<ol class="sr-list">` + rows.map((c) => {
+        const got = Number(c.enqueued) > 0
+          ? `<span class="sr-got">${c.enqueued} new</span>`
+          : `<span class="sr-none">${c.note ? esc(c.note) : "nothing new"}</span>`;
+        return `<li class="sr-row">`
+          + `<span class="sr-co" title="${esc(c.company)}">${esc(c.company)}</span>`
+          + got
+          + `<span class="sr-t mono">${scanTook(c.seconds)}</span></li>`;
+      }).join("") + `</ol>`;
+  setHtmlOnce(host, html);
+  host.hidden = false;
+}
+
+/* A finished run has to SAY so. A four hour sweep whose indicator silently
+   vanishes cannot be told apart from a dead daemon or a stale tab, so the
+   strip holds a receipt for ten minutes: how many companies, how long the run
+   took, what it yielded, and how long ago it ended. */
+let _scanFinishedAt = 0;
+let _scanFinishedN = 0;
+
+function noteScanFinished(companyCount) {
+  _scanFinishedAt = Date.now();
+  _scanFinishedN = companyCount || 0;
+}
+
+// A reload must not eat the receipt. The server's scan log outlives the page,
+// so on boot a run that ended inside the receipt window is adopted as finished
+// and the strip says so, exactly as if the tab had watched it end.
+function adoptFinishedRun() {
+  if ((state.stats.scanning || []).length || _scanFinishedAt) return;
+  const rows = (state.scanLog || {}).companies || [];
+  if (!rows.length) return;
+  const end = Math.max(...rows.map((c) => (Number(c.at) || 0) * 1000));
+  if (end && Date.now() - end < 10 * 60000) {
+    _scanFinishedAt = end;
+    _scanFinishedN = rows.length;
+  }
+}
+
+function renderScanFinished() {
+  const host = $("#scan-now");
+  if (!host || !_scanFinishedAt) return false;
+  const mins = Math.floor((Date.now() - _scanFinishedAt) / 60000);
+  if (mins >= 10) { _scanFinishedAt = 0; return false; }   // said its piece
+  const when = mins < 1 ? "just now" : `${mins} min ago`;
+
+  const log = state.scanLog || {};
+  const rows = log.companies || [];
+  const n = rows.length || _scanFinishedN;
+  const t0 = Number((log.run || {}).at) || 0;
+  const end = rows.length ? Math.max(...rows.map((c) => Number(c.at) || 0)) : 0;
+  const took = t0 && end > t0 ? ` in ${scanTook(end - t0)}` : "";
+  const gained = rows.reduce((s, c) => s + (Number(c.enqueued) || 0), 0);
+  const produced = rows.length
+    ? (gained
+        ? `${gained} new job${gained === 1 ? "" : "s"} queued, `
+        : "nothing new anywhere, ")
+    : "";
+
+  setHtmlOnce(host, `<span class="sn-label sn-done">Scan finished</span>`
+    + `<span class="sn-chip sn-chip-done"><span class="sn-ok">✓</span>`
+    + (n ? `${n} compan${n === 1 ? "y" : "ies"}${took}` : `run complete`)
+    + `</span>`
+    + `<span class="sn-prog">${produced}${when}</span>`);
+  host.hidden = false;
+  return true;
 }
 
 // --- tabs + company filter -------------------------------------------------
@@ -1587,6 +1754,17 @@ let _freshBusy = false;
 /* What the last scans decided NOT to keep. Fetched with the fresh view because
    it answers the question the fresh view provokes: a role you can see on the
    careers page is missing, and the three reasons need three different fixes. */
+/* Per company results as the sweep completes them. Fetched only while a run is
+   live or has just ended, because outside that window it is a list of things that
+   already happened and the board has better places to say so. */
+async function loadScanLog() {
+  if (DEMO) return;
+  try {
+    state.scanLog = await fetch(api("/scan-log"), { headers: auth.header() })
+      .then((r) => r.json());
+  } catch { /* leave the last good list rather than blanking it */ }
+}
+
 async function loadPassedOver() {
   if (DEMO) { state.passed = { jobs: [], by_reason: {} }; return; }
   try {
@@ -2551,6 +2729,7 @@ async function pollStats() {
     const s = await fetch(api("/stats"), { headers: auth.header() }).then((r) => r.json());
     const was = !!(state.stats.discovering || state.stats.processing);
     const wasDisc = !!state.stats.discovering;
+    const wasScanning = (state.stats.scanning || []).length;
     applyStats(s);
     renderDeck();
     // The Fresh tab's scan slab mirrors WHICH companies are busy. Written in
@@ -2571,6 +2750,15 @@ async function pollStats() {
     // Same cadence as the rest of the poll, but only while the panel is open.
     const qpEl = $("#qpicker");
     if (qpEl && !qpEl.hidden) loadQueue();
+    // The moment the last company finishes, so the strip can say so rather than
+    // vanishing and leaving a four hour sweep with no visible outcome.
+    if (wasScanning && !(s.scanning || []).length) noteScanFinished(wasScanning);
+    // Only while it matters: during a run, and for the short window after one
+    // ends when the results are still what you came back to look at. The strip
+    // re-renders after the fetch too, so the receipt counts the fresh log.
+    if ((s.scanning || []).length || _scanFinishedAt)
+      loadScanLog().then(() => { renderScanResults(); renderScanNow(); });
+    else renderScanResults();
     const is = !!(s.discovering || s.processing);
     if (was && !is) { loadApps(); loadQueue(); toast("Run finished — board updated."); }
     // A scan queued behind another one starts the moment ITS company frees.
@@ -4471,6 +4659,9 @@ async function boot() {
   loadQueue();   // the workbar badge needs a first read; after this it only
                  // refreshes on events, or every 3s while the panel is open
   if (!DEMO) {
+    // The finish receipt survives a reload: the server's scan log knows a run
+    // just ended even when this page was not open to watch it happen.
+    loadScanLog().then(() => { adoptFinishedRun(); renderScanNow(); renderScanResults(); });
     connectLive();                                      // live activity (SSE)
     setInterval(pollStats, 3000);                       // button/vitals state
     setInterval(() => loadApps().catch(() => {}), 30000); // slow safety refresh
