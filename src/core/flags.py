@@ -287,6 +287,36 @@ def paused() -> bool:
     return get_flag("paused", "no") == "yes"
 
 
+def stop_epoch() -> int:
+    """How many times the owner has asserted Stop, as a counter.
+
+    `paused` answers "should work start on its own?". It cannot answer "should
+    the run I am inside right now keep going?", and conflating the two broke
+    both readings at once: a paused board refused the scans the owner pressed
+    by hand, because the in loop check saw the pause flag and bailed after zero
+    companies while the endpoint still returned ok.
+
+    A counter separates them. A run records the epoch it began at; a later Stop
+    bumps the counter and every loop comparing against its own start value sees
+    the change and lands. A Stop from BEFORE the run started leaves the counter
+    equal, so pressing Discover on a paused board does what it says.
+    """
+    try:
+        return int(get_flag("stop_epoch", "0") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_stop_epoch() -> int:
+    """Assert Stop: end the runs that are currently going. Best effort like the
+    rest of this module — a failure here must never take the pipeline down."""
+    try:
+        return int(_redis().hincrby(_KEY, "stop_epoch", 1))
+    except Exception:  # noqa: BLE001
+        log.debug("bump_stop_epoch failed", exc_info=True)
+        return stop_epoch()
+
+
 # --- worker heartbeat ------------------------------------------------------
 # The pipeline must never LOOK healthy while doing nothing. `python -m server`
 # is uvicorn ONLY — the board renders and /stats returns 200, but no job is ever

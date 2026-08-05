@@ -368,3 +368,61 @@ def test_the_applier_returns_the_code_as_reason():
 
     src = inspect.getsource(_run._apply_direct)
     assert 'return {"result": "failed", "pk": pk, "reason": code, "detail": reason}' in src
+
+
+def test_the_apply_paths_own_result_key_is_understood():
+    """`_apply_direct` returns its outcome under `result`, not `status`.
+
+    is_retryable read only `status`, so every real apply outcome arrived as "" and
+    fell through to (False, "done"). The retry branch was unreachable: no timeout,
+    no unreachable posting, no environment fault was ever retried, backed off or
+    dead lettered. Live corroboration when this was found — 31 rows in Unable,
+    zero "apply retry" lines in a 29k line log, and an empty dead letter queue.
+    """
+    assert is_retryable({"result": "failed", "reason": "timeout"}) == (True, "timeout")
+    assert is_retryable({"result": "error", "reason": "jd_fetch_failed"})[0] is True
+    # The successful and gated outcomes use their own words on this path.
+    assert is_retryable({"result": "done", "confirmation": "x"})[0] is False
+    assert is_retryable({"result": "gated", "question": "?"})[0] is False
+    # The engines' own vocabulary still works — one shape must not break the other.
+    assert is_retryable({"status": "failed", "reason": "timeout"}) == (True, "timeout")
+    assert is_retryable({"status": "applied"})[0] is False
+
+
+def test_an_uncertain_apply_is_never_retried(q):
+    """The one outcome that must never be tried again.
+
+    `uncertain` means the browser died partway and the form MAY already have been
+    submitted; a second attempt sends a second application under a real name. It
+    carries no `reason`, so the applier used to record it as the code "failed" —
+    which is not in TERMINAL. That was survivable only while retries were dead.
+    With the key fixed, this is the assertion standing between one application
+    and two, so it is pinned at both layers.
+    """
+    # The queue refuses it when the code survives.
+    assert is_retryable({"result": "failed", "reason": "uncertain"})[0] is False
+    assert is_retryable({"status": "uncertain"})[0] is False
+
+    # And the applier must send the status as the code when there is no reason,
+    # rather than flattening it to "failed".
+    import inspect
+
+    from agent import run as _run
+
+    src = inspect.getsource(_run._apply_direct)
+    assert 'code = str(result.get("reason") or result.get("status") or "failed")' in src, \
+        "an uncertain outcome must reach the queue as 'uncertain', not as 'failed'"
+
+
+def test_every_backoff_tier_is_reachable():
+    """A tier nobody ever waits is a lie in the config.
+
+    retry() dead letters at attempts >= MAX_ATTEMPTS, so the wait index only ever
+    reaches MAX_ATTEMPTS - 2. A third 30 minute entry read as policy and was not.
+    """
+    from core.apply_queue import BACKOFF_S, MAX_ATTEMPTS
+
+    highest_index_used = min(MAX_ATTEMPTS - 2, len(BACKOFF_S) - 1)
+    assert highest_index_used == len(BACKOFF_S) - 1, (
+        f"BACKOFF_S has {len(BACKOFF_S)} tiers but only "
+        f"{highest_index_used + 1} can ever be waited")

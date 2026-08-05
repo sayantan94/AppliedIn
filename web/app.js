@@ -683,12 +683,19 @@ function renderScanResults() {
   }
   const total = (log.run && log.run.total) || rows.length;
   const gained = rows.reduce((n, c) => n + (Number(c.enqueued) || 0), 0);
-  const sum = gained
-    ? `${gained} new job${gained === 1 ? "" : "s"}${scanning ? " so far" : ""}`
-    : (scanning ? "nothing new yet" : "nothing new");
-  const html = `<div class="sr-head">Finished`
-    + ` <span class="sr-n mono">${rows.length} of ${total}</span>`
-    + `<span class="sr-sum${gained ? "" : " sr-sum-none"}">${sum}</span></div>`
+  // The header answers "how far along, and is it worth watching" — both of which
+  // are only questions WHILE the run is going. Once it ends the strip above says
+  // the same two numbers ("2 companies in 19s", "3 new jobs queued"), and the
+  // list below breaks them down per company, so keeping it meant one scan of two
+  // companies reported itself three times and "2 of 2" appeared as news.
+  const head = scanning
+    ? `<div class="sr-head">Scanning`
+      + ` <span class="sr-n mono">${rows.length} of ${total}</span>`
+      + `<span class="sr-sum${gained ? "" : " sr-sum-none"}">`
+      + (gained ? `${gained} new job${gained === 1 ? "" : "s"} so far` : "nothing new yet")
+      + `</span></div>`
+    : "";
+  const html = head
     + `<ol class="sr-list">` + rows.map((c) => {
         const got = Number(c.enqueued) > 0
           ? `<span class="sr-got">${c.enqueued} new</span>`
@@ -1277,7 +1284,11 @@ function queuedSec(rows) {
 
 function appliedSec(rows) {
   const n = rows.length;
-  const shown = state.page.applied || 6;
+  // Opens at REVEAL like every other lane. It used to open at six, which made a
+  // long submitted history look like it had been lost: 72 applications behind a
+  // fold that showed six and stepped 25 at a time. Everything you have sent is
+  // work you can be asked about, so it stays one click from the board.
+  const shown = state.page.applied || REVEAL;
   return `<section class="psec ps-applied">
     <div class="ps-head">
       <span class="ps-dot"></span>
@@ -1285,6 +1296,8 @@ function appliedSec(rows) {
       <span class="ps-n mono">${n}</span>
       <span class="ps-hint">${n ? "Submitted, confirmation captured. Newest first."
                                 : "Nothing submitted yet."}</span>
+      ${n > shown ? `<button class="ps-all" data-see-applied
+        title="Open the full history in the Applications table">See all ${n}</button>` : ""}
     </div>
     ${n ? `<div class="jrows">${rows.slice(0, shown).map(appliedRow).join("")}</div>
       ${n > shown ? moreBtn("applied", shown, n) : ""}` : ""}
@@ -1828,8 +1841,38 @@ function freshRow(j, byPk) {
    sentences: "nothing dated landed in this window" is a claim about dated
    postings only, and the standing footer carries how much of the board has no
    publish date at all. */
+/* Every facet currently narrowing the list, in words. A company tick is saved
+   to localStorage and restored on the next visit, so the commonest way to see
+   an empty Fresh tab is a choice made days ago against a company that has
+   published nothing since. "Nothing matches your current filters" sends you
+   hunting through a rail of 47 checkboxes for one you do not remember ticking,
+   so the empty state names the filter instead of alluding to it. */
+function freshActiveFacets() {
+  const q = state.query.trim();
+  const out = [];
+  if (state.freshPicked.size)
+    out.push(`a company tick on <b>${esc([...state.freshPicked].sort().join(", "))}</b>`);
+  if (state.freshStatus) out.push(`the <b>${esc(state.freshStatus)}</b> status facet`);
+  if (state.coFilter) out.push(`the company filter <b>${esc(state.coFilter)}</b>`);
+  if (q) out.push(`a search for <b>${esc(q)}</b>`);
+  return out;
+}
 function freshEmpty(windowed, undated, winTxt) {
-  if (windowed.length) return emptyFiltered();   // the window has roles; filters hid them
+  if (windowed.length) {                         // the window has roles; filters hid them
+    const on = freshActiveFacets();
+    if (!on.length) return emptyFiltered();
+    const n = windowed.length;
+    return `<div class="empty">
+      <div class="empty-big">${n} dated role${n === 1 ? "" : "s"} in this window,
+        every one of them hidden</div>
+      <div class="fresh-claim">Hidden by ${on.join(", and by ")}. A tick outlives
+        the tab it was made in, so this can be a choice from an earlier visit
+        rather than anything the scan did.</div>
+      <div class="empty-act">
+        <button class="btn btn-ghost" data-clear-filters="1">Clear filters</button>
+      </div>
+    </div>`;
+  }
   const newest = (state.fresh.jobs || [])[0];
   const wider = newest
     ? `<div class="fresh-hint">The newest dated posting appeared
@@ -3128,16 +3171,39 @@ async function stopRun(what = "discover", ask = true) {
   return true;
 }
 
+/* The confirm has to state the number the SERVER will queue, not a smaller one.
+   This counted only needs_human rows awaiting approval while /actions/approve-all
+   also takes every TAILORED row, so the dialog offered 11 and the press queued
+   328. On a board in auto mode that difference is 300 applications sent under a
+   real name from a dialog that named a tenth of them. The rule below mirrors
+   server.py's selection exactly; if one moves, the other has to move with it. */
+const approveAllPicks = (a) =>
+  a.status === "tailored"
+  || (a.status === "needs_human"
+      && (a.gate_reason === "approval"
+          || String(a.gate_question || "").startsWith("Ready to apply")));
+
 function approveAll() {
   if (demoGuard()) return;
-  const n = state.apps.filter(
-    (a) => a.status === "needs_human" && a.gate_reason === "approval").length;
-  if (!confirm(`Approve and apply to ${n} job${n === 1 ? "" : "s"}? `
-    + `They run a few at a time — finish any CAPTCHA windows as they open.`)) return;
-  state.apps.filter((a) => a.status === "needs_human" && a.gate_reason === "approval")
-    .forEach((a) => markBusy(a.pk, "queued…"));
-  post("/actions/approve-all", { company: "__all__" }).then(() => loadQueue());
-  toast(`Approving ${n} — applications are running.`);
+  const picks = state.apps.filter(approveAllPicks);
+  const n = picks.length;
+  if (!n) { toast("Nothing is waiting for approval."); return; }
+  // Gated is a waiting room: the worker only drains the queue in auto mode, so
+  // promising that applications are running would be false in the default mode.
+  const after = state.mode === "auto"
+    ? "They will be applied for a few at a time — finish any CAPTCHA windows as they open."
+    : "They go to the apply queue and wait. Nothing is submitted until you run them.";
+  if (!confirm(`Approve ${n} job${n === 1 ? "" : "s"}?\n\n${after}`)) return;
+  picks.forEach((a) => markBusy(a.pk, "queued…"));
+  post("/actions/approve-all", { company: "__all__" }).then((d) => {
+    loadQueue();
+    if (d && d.ok) {
+      toast(`Queued ${d.queued}${d.already_queued ? `, ${d.already_queued} already there` : ""}.`
+        + (state.mode === "auto" ? " Applying now." : " Waiting for you to run them."));
+    } else {
+      toast((d && d.error) || "Approve all failed — nothing was queued. See the logs.");
+    }
+  });
   scheduleReload();
 }
 
@@ -4423,6 +4489,18 @@ function wire() {
     if (lk) { state.logKind = lk.dataset.logkind; renderPane(); return; }
     const chip = e.target.closest("[data-filter]");
     if (chip) { state.filter = chip.dataset.filter; renderPane(); return; }
+    if (e.target.closest("[data-see-applied]")) {
+      // Straight to the full record rather than paging a lane: the table carries
+      // the resume, the posting and the screenshot for every row. renderTabs
+      // owns the active state, so switching here goes through it rather than
+      // reaching for the buttons directly.
+      state.tab = "apps";
+      state.filter = "applied";
+      delete state.page.appsTable;
+      renderTabs();
+      renderPane();
+      return;
+    }
     const res = e.target.closest("[data-resume]");
     if (res) { openResume(res.dataset.resume); return; }
     if (e.target.closest("[data-approve-all]")) { approveAll(); return; }

@@ -3,15 +3,14 @@
 Sequential pipeline, each stage the pattern that fits it:
 
   root = SequentialAgent
-    1. scorer          SINGLE-AGENT + structured output (MatchScore, no parsing).
+    1. scorer          structured output (MatchScore, no parsing).
     2. tailor_critique REVIEW-&-CRITIQUE (LoopAgent): the tailor operates on the
                        seed résumé via the `resume-tailoring` SKILL and saves a
                        TYPED résumé (save_tailored_resume — validated, no regex);
                        the critic refines until it calls exit_loop.
-    3. applier         LlmAgent that delegates to the browser apply (apply_to_job) —
-                       a real browser agent (on Anthropic) fills & submits from
-                       human-approved answers only; HUMAN-IN-THE-LOOP via
-                       ask_human (ADK long-running tool) whenever it's blocked.
+    3. applier         Agent that delegates to the browser apply (apply_to_job) —
+                       a real browser agent that fills & submits from
+                       human-approved answers only; HUMAN-IN-THE-LOOP workflow when required
 
 Model follows the mode (Anthropic local / Bedrock cloud) via core.config.
 """

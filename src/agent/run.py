@@ -540,7 +540,13 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.info("browser conflict for pk=%s — re-queued rather than failed", pk)
         return {"result": "requeued", "pk": pk, "reason": "browser_conflict"}
 
-    code = str(result.get("reason") or "failed")
+    # The STATUS is the fallback code, not the word "failed". An uncertain outcome
+    # carries no `reason` — the browser died partway and may already have
+    # submitted — so collapsing it to "failed" threw away the one fact that makes
+    # it terminal, and it reached the queue looking like an ordinary fault. That
+    # was harmless only while the retry branch was unreachable; the moment retries
+    # work, it is the difference between one application and two under a real name.
+    code = str(result.get("reason") or result.get("status") or "failed")
     stores.tracking.set_status(pk, Status.FAILED, fail_reason=reason, fail_kind=code)
     emit("error", pk=pk, agent="applier", detail=reason, url=jd_url)
     log.info("failed pk=%s [%s]: %s", pk, code, reason)

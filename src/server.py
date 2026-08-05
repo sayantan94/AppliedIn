@@ -473,10 +473,14 @@ def create_app() -> FastAPI:
         here in code — so a field can only ever receive an owner-approved answer or
         a drafted essay, never something the model made up.
         """
-        from tools.browser_apply import (
+        # The guard helpers moved to claude_chrome when the five apply files were
+        # collapsed into three; this import was not moved with them, so every call
+        # here raised ImportError and the endpoint 500d. The extension's assisted
+        # apply calls it for every posting, so that path has been dead since.
+        from tools.browser_apply import _map_fields
+        from tools.claude_chrome import (
             _SAFE_OPTION_RX,
             _SANCTIONS_RX,
-            _map_fields,
             _safe_sanctions_answer,
         )
         from tools.narrative import draft_answer
@@ -859,7 +863,7 @@ def create_app() -> FastAPI:
                 emit("running", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
                      detail=f"▶ {name}: one-company run — discovering…")
-                found = run_discovery(only=[name], profile_id=profile_id)
+                found = run_discovery(only=[name], profile_id=profile_id, manual=True)
                 n_new = (found.get("enqueued") or 0) + (found.get("crawled") or 0)
                 emit("running", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
@@ -871,7 +875,7 @@ def create_app() -> FastAPI:
                 _RUNNING["discover"] = False
             _RUNNING["process"] = True
             try:
-                process_backlog_once(companies=[name])
+                process_backlog_once(companies=[name], manual=True)
                 # Report the outcome, not the fact that the code reached the end.
                 # "Tailored jobs await your approval" when nothing was found sends
                 # the owner to look at an empty board and doubt the board.
@@ -1147,7 +1151,7 @@ def create_app() -> FastAPI:
             from daemon import process_backlog_once
             _RUNNING["process"] = True
             try:
-                process_backlog_once(companies=companies)
+                process_backlog_once(companies=companies, manual=True)
             except Exception:  # noqa: BLE001
                 import logging
                 logging.getLogger("server").exception("manual process failed")
@@ -1210,6 +1214,13 @@ def create_app() -> FastAPI:
                     "error": "what must be discover, process, apply or all"}
 
         was = {"discover": _RUNNING["discover"], "process": _RUNNING["process"]}
+        # The signal that actually reaches a run already going. The per-run loops
+        # compare this against the epoch they started at, so a Stop pressed now
+        # lands mid sweep while a board that was merely left paused does not veto
+        # the next press.
+        from core import flags as _flags
+
+        _flags.bump_stop_epoch()
         killed = 0
         if what in ("discover", "all"):
             # The crawl and the posting reads it spawns. Never "apply".
@@ -1712,6 +1723,8 @@ def create_app() -> FastAPI:
         Nothing starts here, so if the daemon is paused the jobs sit in the queue
         and the Apply queue panel says so, rather than quietly running anyway.
         """
+        import logging
+
         from core.apply_queue import ApplyQueue
 
         company = (body.get("company") or "").strip().lower()
@@ -1731,8 +1744,13 @@ def create_app() -> FastAPI:
 
         q = ApplyQueue(stores.tracking.r)
         queued = sum(1 for pk, co in picked if q.put(pk, co))
-        log.info("approve-all queued %d of %d eligible job(s)%s",
-                 queued, len(picked), f" for {company}" if company else "")
+        # Bound to a local logger like every other handler here. `log` is not a
+        # module global in this file, so this line raised NameError AFTER the
+        # rows were queued: the work happened, the caller got a 500, and the
+        # dashboard — which ignores the response — still said it had worked.
+        logging.getLogger("server").info(
+            "approve-all queued %d of %d eligible job(s)%s",
+            queued, len(picked), f" for {company}" if company else "")
         return {"ok": True, "approving": queued, "queued": queued,
                 "already_queued": len(picked) - queued}
 
@@ -1740,7 +1758,14 @@ def create_app() -> FastAPI:
     def set_pause(body: dict):
         """Freeze/unfreeze the worker + discovery without stopping the daemon."""
         from core import flags
-        flags.set_flag("paused", "yes" if body.get("paused") else "no")
+        on = bool(body.get("paused"))
+        flags.set_flag("paused", "yes" if on else "no")
+        # Pausing also means "and stop what is going right now". That is the half
+        # the pause flag cannot express on its own, because a run already inside
+        # a loop needs to know the Stop came AFTER it started — otherwise a board
+        # left paused refuses every scan the owner later presses by hand.
+        if on:
+            flags.bump_stop_epoch()
         return {"ok": True, "paused": flags.paused()}
 
     @app.post("/actions/reset")

@@ -53,7 +53,10 @@ MAX_ATTEMPTS = 3
 # Backoff between attempts, in seconds. Generous on purpose: the failures worth
 # retrying are transient conditions in a browser, and hammering one a second
 # later just spends a session to see the same thing.
-BACKOFF_S = (120, 600, 1800)
+# Two waits, because three attempts only ever sit between two of them: attempt 1
+# fails, wait 120; attempt 2 fails, wait 600; attempt 3 fails, dead letter. A
+# third entry read as a 30 minute tier nobody ever waited.
+BACKOFF_S = (120, 600)
 
 _KEY = "applyq"          # applyq:companies (set) and applyq:co:<company> (list)
 _DLQ = "applyq:dlq"
@@ -375,14 +378,23 @@ def is_retryable(result: dict) -> tuple[bool, str]:
     Reads the SAME result shape every engine returns, so the decision lives in one
     place rather than being re-derived by each caller.
     """
-    status = str(result.get("status") or "")
+    # The apply path returns its outcome under `result`; the browser engines under
+    # `status`. This read only `status`, so every apply came back as "" and fell
+    # through to (False, "done") — the retry branch below was unreachable and no
+    # transient failure was ever retried, backed off or dead lettered. A timeout
+    # or a posting that would not load landed permanently in Unable and cost a
+    # manual Retry each. Read both, and accept both vocabularies.
+    outcome = str(result.get("status") or result.get("result") or "")
     reason = str(result.get("reason") or "")
-    if status in ("applied", "applied_manual"):
+    if outcome in ("applied", "applied_manual", "done"):
         return False, "applied"
-    if status == "gate":
+    if outcome in ("gate", "gated"):
         return False, "waiting on the owner"
-    if reason in TERMINAL or status in TERMINAL:
-        return False, reason or status
-    if status in ("failed", "unknown", "error"):
-        return True, reason or status
-    return False, status or "done"
+    # TERMINAL is checked BEFORE the retry branch and must stay there. It is what
+    # keeps `uncertain` (may already have submitted), `already_applied` and an
+    # employer's own cap from being tried a second time.
+    if reason in TERMINAL or outcome in TERMINAL:
+        return False, reason or outcome
+    if outcome in ("failed", "unknown", "error"):
+        return True, reason or outcome
+    return False, outcome or "done"

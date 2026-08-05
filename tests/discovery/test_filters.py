@@ -77,6 +77,66 @@ def test_a_company_is_never_scanned_by_two_runs_at_once():
     assert scanning() == set(), "claims are released afterwards"
 
 
+def test_pause_does_not_veto_a_scan_the_owner_pressed():
+    """Pause means "do not go and find work on your own", not "refuse me".
+
+    These were one flag. The in loop stop check read `paused`, sat at the top of
+    the company loop, and so a Discover press on a paused board broke out after
+    zero companies while /actions/discover still returned ok — six times in one
+    evening, each one reported to the owner as a scan that had started.
+
+    A scheduled sweep must still freeze while paused, and a Stop pressed DURING
+    a manual run must still land. All three are asserted here because fixing any
+    one of them by hand is what broke the other two.
+    """
+    from core import flags
+    from discovery.handler import _stop_requested
+
+    real_paused, real_epoch = flags.paused, flags.stop_epoch
+    try:
+        flags.paused = lambda: True          # the board is paused throughout
+        flags.stop_epoch = lambda: 7
+
+        # Owner presses Discover: the run began at epoch 7 and no Stop has been
+        # asserted since, so it proceeds despite the pause.
+        assert _stop_requested(manual=True, epoch0=7) is False
+
+        # Same paused board, but the SCHEDULED sweep stays frozen.
+        assert _stop_requested(manual=False, epoch0=7) is True
+
+        # Stop pressed while the manual run is going: the epoch moved, so it lands.
+        flags.stop_epoch = lambda: 8
+        assert _stop_requested(manual=True, epoch0=7) is True
+    finally:
+        flags.paused, flags.stop_epoch = real_paused, real_epoch
+
+
+def test_pause_does_not_veto_a_process_pass_the_owner_pressed():
+    """The same contract for the backlog pass, which has the same shape.
+
+    Every caller of process_backlog_once is a button, so reading `paused` in the
+    per job check meant a paused board took the press, returned ok:true, and
+    broke before job one with the whole backlog waiting. Asserted separately from
+    discovery because the two checks live in different modules and the first fix
+    landed in only one of them.
+    """
+    from core import flags
+    from daemon import _pass_cancelled
+
+    real_paused, real_epoch = flags.paused, flags.stop_epoch
+    try:
+        flags.paused = lambda: True
+        flags.stop_epoch = lambda: 3
+
+        assert _pass_cancelled(manual=True, epoch0=3) is False   # owner pressed it
+        assert _pass_cancelled(manual=False, epoch0=3) is True   # scheduled, frozen
+
+        flags.stop_epoch = lambda: 4                             # Stop pressed
+        assert _pass_cancelled(manual=True, epoch0=3) is True
+    finally:
+        flags.paused, flags.stop_epoch = real_paused, real_epoch
+
+
 def test_a_reset_voids_work_that_was_already_running():
     """Emptying the store does not stop the workers.
 

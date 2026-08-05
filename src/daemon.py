@@ -79,6 +79,14 @@ _EVAL_LANES = int(os.environ.get("APPLIEDIN_EVAL_LANES", "2"))
 def _evaluate_one(pk: str) -> None:
     """Score + tailor ONE job. Each lane builds its OWN Stores bundle rather than
     sharing one across threads — the same rule the apply lanes follow."""
+    # Checked per job, not just before the drain. drain() empties the queue, so
+    # one batch can be thousands of jobs, and pausing during it did nothing: the
+    # pool worked through the whole batch while the board read paused.
+    from core import flags as _flags
+
+    if _flags.paused():
+        return
+
     from agent.run import run_job
     from core import flags
 
@@ -265,13 +273,43 @@ def run_discovery_once(only: list[str] | None = None, profile_id: str = "",
 
     log.info("manual discovery requested (companies=%s, profile=%s)",
              only or "all", profile_id or "default")
+    # manual=True: the owner is pressing a button right now, so a board left
+    # paused must not veto it. Only a Stop asserted after this call ends the run.
     result = run_discovery(only=only, profile_id=profile_id,
-                           max_age_hours=max_age_hours)
+                           max_age_hours=max_age_hours, manual=True)
     log.info("manual discovery: %s", result)
     return result
 
 
-def process_backlog_once(companies: list | None = None) -> dict:
+def _pass_cancelled(manual: bool = False, epoch0: int = 0) -> bool:
+    """True when this pass should stop, checked per job.
+
+    A full pass is hours of model work over the whole backlog. Reading the flag
+    only at the start meant Pause and Stop could not reach one already going.
+
+    Same split as discovery's `_stop_requested`, and for the same reason: every
+    caller of `process_backlog_once` is a button, so reading `paused` here meant
+    a paused board took the press, returned ok, and broke before job 1 with 1341
+    jobs waiting. A manual pass stops only for a Stop asserted after it began.
+
+    `_RUNNING["process"]` is deliberately NOT read as a stop signal any more. It
+    is one boolean written by four endpoints (process, run-company, tailor-text,
+    apply-role), so a tailor-text finishing next to a running pass cleared it and
+    silently aborted the pass mid backlog. /actions/stop bumps the epoch, which
+    is the signal that actually means the owner asked for a stop.
+    """
+    try:
+        from core import flags as _flags
+
+        if manual:
+            return _flags.stop_epoch() != epoch0
+        return bool(_flags.paused())
+    except Exception:  # noqa: BLE001 - a stop check must never break a pass
+        return False
+
+
+def process_backlog_once(companies: list | None = None,
+                         manual: bool = False) -> dict:
     """One on-demand pass over the discovered backlog (the UI 'Process
     applications' button): score + tailor EVERY waiting `found` job, then apply
     everything that qualifies — queued for the apply worker, which runs them
@@ -305,7 +343,13 @@ def process_backlog_once(companies: list | None = None) -> dict:
     if sel or skipped:
         found = [r for r in found if _in_scope(r.get("company"))]
     evaluated = 0
+    # Captured before the first job, so only a Stop pressed after this point ends
+    # the pass. A board already paused does not.
+    epoch0 = _flags.stop_epoch()
     for row in found:
+        if _pass_cancelled(manual, epoch0):
+            log.info("process: stopped by the owner after %d job(s)", evaluated)
+            break
         try:
             log.info("process: %s", run_job(row["pk"], stores))
             evaluated += 1

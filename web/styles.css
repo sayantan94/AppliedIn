@@ -2636,6 +2636,23 @@ button.ps-head:hover { background: var(--card-2); }
 }
 .ps-more:hover { color: var(--fg); border-color: var(--border-2); }
 
+/* "See all" in the Applied header. The lane folds like every other one, but a
+   submitted application is a thing you may be asked about months later, so the
+   full record is one click away rather than several rounds of Show more. It
+   sits right of the hint and pushes to the end of the header row. */
+.ps-applied .ps-all {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.ps-applied .ps-all:hover { color: var(--fg); border-color: var(--border-2); }
+
 /* Needs you: the one section allowed to shout, and only while it holds work. */
 .ps-needs.has { border-color: color-mix(in srgb, var(--scan) 50%, var(--border)); }
 .ps-needs.has > .ps-head { background: color-mix(in srgb, var(--scan) 8%, var(--card)); }

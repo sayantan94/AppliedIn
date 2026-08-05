@@ -330,7 +330,8 @@ def _release(names: set[str]) -> None:
 
 
 def run_discovery(only: list[str] | None = None, profile_id: str = "",
-                  max_age_hours: float | int | None = None) -> dict:
+                  max_age_hours: float | int | None = None,
+                  manual: bool = False) -> dict:
     """Find new jobs across the watchlist and enqueue them for the pipeline.
 
     `only` scopes the run to specific companies (case-insensitive names, matched
@@ -365,8 +366,13 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "",
         # Partial overlap: get on with the rest rather than refusing everything.
         log.info("already scanning %s — running the other %d",
                  ", ".join(sorted(targets - claimed)), len(claimed))
+    # Captured before the first company, so only a Stop pressed after this point
+    # can end the run. A board that was already paused does not.
+    from core import flags as _flags
+
+    epoch0 = _flags.stop_epoch()
     try:
-        return _run_discovery(sorted(claimed), profile_id)
+        return _run_discovery(sorted(claimed), profile_id, manual, epoch0)
     finally:
         _release(claimed)
 
@@ -390,7 +396,32 @@ def _targets(only: list[str] | None) -> set[str]:
     return names - set(_flags.skipped_companies() or ())
 
 
-def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
+def _stop_requested(manual: bool = False, epoch0: int = 0) -> bool:
+    """True when this run should stop, checked between companies.
+
+    A sweep is an hour of sequential browser work. Reading the flag only before
+    the cycle starts meant Pause could not reach a run already going, and Stop
+    killed the live session only for the loop to pick up the next company. This
+    is the check that lets either one land inside a sweep.
+
+    A scheduled sweep stops while paused: it has no owner behind it, and pause
+    means "do not go and find work". A MANUAL run is the owner speaking now, so
+    the pause flag must not veto it — pressing Discover on a paused board used
+    to return ok and scan nothing, six times in one evening. It stops only for a
+    Stop asserted after it began, which the epoch comparison detects.
+    """
+    try:
+        from core import flags as _flags
+
+        if manual:
+            return _flags.stop_epoch() != epoch0
+        return bool(_flags.paused())
+    except Exception:  # noqa: BLE001 - a stop check must never break a scan
+        return False
+
+
+def _run_discovery(only: list[str] | None, profile_id: str,
+                   manual: bool = False, epoch0: int = 0) -> dict:
     # Progress through the batch, so the board can say "12 of 47" rather than
     # implying all 47 are being read at once.
     done_n = 0
@@ -426,6 +457,9 @@ def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
     crawl_companies: list[CompanyConfig] = []
     with httpx.Client(headers=BROWSER_HEADERS) as client:
         for raw in companies:
+            if _stop_requested(manual, epoch0):
+                log.info("discovery stopped by the owner after %d company(ies)", done_n)
+                break
             try:
                 company = resolve_company(raw, client)
             except Exception:
@@ -452,6 +486,9 @@ def _run_discovery(only: list[str] | None, profile_id: str) -> dict:
         from .crawler import crawl_company
 
         for company in crawl_companies:
+            if _stop_requested(manual, epoch0):
+                log.info("discovery stopped by the owner after %d company(ies)", done_n)
+                break
             try:
                 _set_active(company.name, done_n, batch_n)
                 done_n += 1
