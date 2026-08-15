@@ -1,0 +1,1544 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:">
+  <title>Isometric Codebase Map</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 64 64'%3E%3Ctext y='52' font-size='52'%3E%F0%9F%97%BA%EF%B8%8F%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      --paper: #f3efe3;
+      --paper-2: #e9e2d1;
+      --ink: #242b2a;
+      --muted: #69706d;
+      --line: #9b9a8d;
+      --accent: #d24d35;
+      --panel: rgba(249, 246, 237, 0.94);
+      --shadow: rgba(47, 42, 31, 0.16);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button { font: inherit; }
+
+    .shell {
+      min-width: 1180px;
+      height: 100vh;
+      padding-top: 72px;
+      background:
+        linear-gradient(rgba(69, 77, 71, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(69, 77, 71, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 18px 18px;
+    }
+
+    .topbar {
+      position: fixed;
+      top: 0;
+      right: 0;
+      left: 0;
+      height: 72px;
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) auto auto;
+      align-items: center;
+      gap: 22px;
+      padding: 0 20px;
+      border-bottom: 1px solid rgba(63, 69, 66, 0.34);
+      background: rgba(246, 242, 232, 0.96);
+      box-shadow: 0 4px 18px rgba(51, 48, 39, 0.07);
+      z-index: 10;
+    }
+
+    .brand {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .brand-mark {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border: 1px solid var(--ink);
+      background:
+        repeating-linear-gradient(135deg, transparent 0 4px, rgba(36, 43, 42, 0.15) 4px 5px),
+        #dfd7c2;
+      box-shadow: 3px 3px 0 rgba(36, 43, 42, 0.16);
+      font-size: 20px;
+    }
+
+    .brand-copy { min-width: 0; }
+
+    .brand h1 {
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand p {
+      margin: 3px 0 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .stats {
+      display: flex;
+      align-items: stretch;
+      border-left: 1px solid rgba(63, 69, 66, 0.25);
+    }
+
+    .stat {
+      min-width: 80px;
+      padding: 3px 14px;
+      border-right: 1px solid rgba(63, 69, 66, 0.25);
+      text-align: center;
+    }
+
+    .stat strong {
+      display: block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 15px;
+      line-height: 1.1;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .control {
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid rgba(36, 43, 42, 0.5);
+      border-radius: 2px;
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .control:hover,
+    .control:focus-visible {
+      outline: none;
+      background: var(--ink);
+      color: var(--paper);
+    }
+
+    .control.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fffaf0;
+    }
+
+    .app {
+      height: calc(100vh - 72px);
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 258px minmax(560px, 1fr) 342px;
+    }
+
+    .rail,
+    .detail {
+      min-height: 0;
+      overflow: auto;
+      background: var(--panel);
+      backdrop-filter: blur(7px);
+      scrollbar-width: thin;
+      scrollbar-color: rgba(36, 43, 42, 0.28) transparent;
+    }
+
+    .rail {
+      border-right: 1px solid rgba(63, 69, 66, 0.34);
+      padding: 20px 14px 30px;
+    }
+
+    .detail {
+      border-left: 1px solid rgba(63, 69, 66, 0.34);
+      padding: 24px 24px 38px;
+    }
+
+    .rail-heading,
+    .eyebrow {
+      margin: 0 0 15px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .group { margin-bottom: 19px; }
+
+    .group-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 7px 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .swatch {
+      width: 9px;
+      height: 9px;
+      border: 1px solid rgba(36, 43, 42, 0.46);
+      transform: rotate(45deg);
+    }
+
+    .structure-link {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 31px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 37px;
+      margin: 2px 0;
+      padding: 4px 6px;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .structure-link:hover,
+    .structure-link:focus-visible,
+    .structure-link.active {
+      outline: none;
+      border-color: rgba(36, 43, 42, 0.35);
+      background: rgba(255, 252, 244, 0.8);
+      box-shadow: 2px 2px 0 rgba(36, 43, 42, 0.09);
+    }
+
+    .structure-link.active { border-left: 3px solid var(--accent); }
+
+    .code-chip {
+      width: 28px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(36, 43, 42, 0.5);
+      background: var(--chip, #ddd4bf);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .structure-link .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .structure-link .loc {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 9px;
+    }
+
+    .stage {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background:
+        repeating-linear-gradient(30deg, transparent 0 12px, rgba(65, 75, 69, 0.035) 12px 13px),
+        repeating-linear-gradient(150deg, transparent 0 12px, rgba(65, 75, 69, 0.028) 12px 13px),
+        radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.78), rgba(230, 223, 207, 0.52));
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      display: block;
+      overflow: visible;
+    }
+
+    .ground-line {
+      fill: none;
+      stroke: rgba(66, 73, 69, 0.11);
+      stroke-width: 1;
+    }
+
+    .zone-label {
+      fill: rgba(52, 61, 57, 0.28);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+    }
+
+    .edge-line {
+      fill: none;
+      stroke: rgba(54, 64, 59, 0.43);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .edge-line.flow { stroke: rgba(56, 72, 65, 0.68); }
+    .edge-line.dashed { stroke-dasharray: 5 5; stroke: rgba(83, 81, 70, 0.5); }
+    .edge-line.active { stroke: var(--accent); stroke-width: 3; }
+    .edge-line.trace-complete { stroke: #aa6d32; stroke-width: 2.2; opacity: 0.9; }
+    .edge-line.trace-current { stroke: var(--accent); stroke-width: 4; opacity: 1; }
+
+    .edge-hit {
+      fill: none;
+      stroke: transparent;
+      stroke-width: 12;
+      pointer-events: stroke;
+      cursor: help;
+    }
+
+    .flow-dot {
+      fill: #c54831;
+      stroke: #fff8e8;
+      stroke-width: 1.2;
+      pointer-events: all;
+    }
+
+    .structure {
+      cursor: pointer;
+      transition: opacity 140ms ease;
+    }
+
+    .structure:focus-visible { outline: none; }
+    .structure .face { stroke: rgba(31, 39, 36, 0.62); stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .structure .top { filter: url(#paper-shadow); }
+
+    .structure:hover .face,
+    .structure.active .face,
+    .structure:focus-visible .face {
+      stroke: var(--accent);
+      stroke-width: 2.4;
+    }
+
+    .structure.dimmed { opacity: 0.28; }
+
+    .structure.trace-complete .face {
+      stroke: #aa6d32;
+      stroke-width: 2.1;
+    }
+
+    .structure.trace-current {
+      filter: drop-shadow(0 0 6px rgba(210, 77, 53, 0.5));
+    }
+
+    .structure.trace-current .face {
+      stroke: var(--accent);
+      stroke-width: 3.2;
+    }
+
+    .block-code {
+      fill: #28302d;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 900;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    .block-loc {
+      fill: rgba(40, 48, 45, 0.67);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 8px;
+      font-weight: 700;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    .external-line {
+      fill: none;
+      stroke: rgba(78, 79, 70, 0.53);
+      stroke-width: 1.2;
+      stroke-dasharray: 4 5;
+    }
+
+    .external-card {
+      fill: rgba(249, 246, 237, 0.96);
+      stroke: rgba(58, 64, 61, 0.58);
+      stroke-width: 1;
+    }
+
+    .external-name {
+      fill: var(--ink);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+    }
+
+    .external-pay {
+      fill: var(--muted);
+      font-size: 8px;
+    }
+
+    .tooltip {
+      position: fixed;
+      z-index: 30;
+      width: 240px;
+      padding: 12px 13px;
+      border: 1px solid var(--ink);
+      background: #fffaf0;
+      box-shadow: 5px 5px 0 rgba(36, 43, 42, 0.14);
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(10px, 10px);
+    }
+
+    .tooltip.show { opacity: 1; }
+
+    .tooltip strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+    }
+
+    .tooltip span {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .detail h2 {
+      margin: 0 0 10px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 28px;
+      line-height: 1.05;
+      letter-spacing: -0.025em;
+    }
+
+    .detail-meta {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      margin-bottom: 25px;
+    }
+
+    .detail-meta span {
+      padding: 4px 7px;
+      border: 1px solid rgba(36, 43, 42, 0.32);
+      background: rgba(255, 252, 244, 0.65);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .detail-section {
+      padding: 18px 0;
+      border-top: 1px solid rgba(63, 69, 66, 0.24);
+    }
+
+    .detail-section h3 {
+      margin: 0 0 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .detail-section p,
+    .detail-section li {
+      margin: 0;
+      color: #4f5753;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .detail-section ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .inside-button {
+      width: 100%;
+      min-height: 44px;
+      margin-top: 17px;
+      border: 1px solid var(--ink);
+      background:
+        repeating-linear-gradient(135deg, transparent 0 6px, rgba(255, 255, 255, 0.15) 6px 7px),
+        var(--ink);
+      color: #fffaf0;
+      cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .inside-button:hover,
+    .inside-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .trace-card {
+      position: absolute;
+      left: 24px;
+      right: 24px;
+      bottom: 20px;
+      z-index: 8;
+      display: none;
+      grid-template-columns: 130px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px 18px;
+      min-height: 148px;
+      padding: 14px 16px 12px;
+      border: 1px solid var(--ink);
+      background: rgba(255, 250, 240, 0.96);
+      box-shadow: 6px 6px 0 rgba(36, 43, 42, 0.14);
+    }
+
+    .trace-card.show { display: grid; }
+
+    .trace-count {
+      min-width: 120px;
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 900;
+    }
+
+    .trace-count small,
+    .trace-count span {
+      display: block;
+      color: var(--muted);
+      font-size: 8px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .trace-count b {
+      display: block;
+      margin: 2px 0 3px;
+      font-size: 22px;
+    }
+
+    .trace-copy strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 15px;
+    }
+
+    .trace-copy span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .trace-actions { display: flex; gap: 7px; }
+
+    .trace-actions button {
+      min-width: 72px;
+      height: 34px;
+      padding: 0 9px;
+      border: 1px solid rgba(36, 43, 42, 0.48);
+      background: transparent;
+      cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .trace-actions button:hover,
+    .trace-actions button:focus-visible { outline: none; background: var(--ink); color: var(--paper); }
+
+    .trace-actions button:disabled { cursor: default; opacity: 0.3; }
+
+    .trace-timeline {
+      position: relative;
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(var(--trace-count), minmax(42px, 1fr));
+      gap: 5px;
+      padding-top: 13px;
+      border-top: 1px solid rgba(63, 69, 66, 0.24);
+    }
+
+    .trace-timeline::before {
+      position: absolute;
+      top: 27px;
+      right: 22px;
+      left: 22px;
+      height: 2px;
+      background: rgba(36, 43, 42, 0.18);
+      content: "";
+    }
+
+    .trace-step {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      justify-items: center;
+      gap: 4px;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .trace-dot {
+      width: 29px;
+      height: 29px;
+      display: grid;
+      place-items: center;
+      border: 2px solid rgba(36, 43, 42, 0.35);
+      border-radius: 50%;
+      background: #fffaf0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 9px;
+      font-weight: 900;
+    }
+
+    .trace-step.complete .trace-dot { border-color: #aa6d32; background: #aa6d32; color: #fffaf0; }
+    .trace-step.current .trace-dot { border-color: var(--accent); background: var(--accent); color: #fffaf0; box-shadow: 0 0 0 4px rgba(210, 77, 53, 0.16); }
+
+    .trace-step-label {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 8px;
+      font-weight: 800;
+    }
+
+    .trace-step.current .trace-step-label { color: var(--accent); }
+    .trace-step:hover .trace-step-label,
+    .trace-step:focus-visible .trace-step-label { color: var(--ink); }
+    .trace-step:focus-visible { outline: 1px solid var(--ink); outline-offset: 3px; }
+
+    .inside-title {
+      fill: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .inside-note {
+      fill: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+    }
+
+    .inside-boundary {
+      fill: rgba(255, 252, 244, 0.3);
+      stroke: rgba(56, 64, 60, 0.36);
+      stroke-width: 1.2;
+      stroke-dasharray: 8 6;
+    }
+
+    .inside-back {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      z-index: 9;
+      display: none;
+    }
+
+    .inside-back.show { display: block; }
+
+    .legend {
+      position: absolute;
+      right: 16px;
+      top: 15px;
+      display: flex;
+      gap: 13px;
+      padding: 7px 9px;
+      border: 1px solid rgba(36, 43, 42, 0.22);
+      background: rgba(249, 246, 237, 0.72);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 8px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .legend i {
+      width: 18px;
+      height: 2px;
+      display: inline-block;
+      margin-right: 5px;
+      vertical-align: middle;
+      background: rgba(56, 72, 65, 0.68);
+    }
+
+    .legend i.dashed {
+      background: repeating-linear-gradient(90deg, rgba(83, 81, 70, 0.7) 0 4px, transparent 4px 7px);
+    }
+
+    /* ---------------------------------------------------------------------
+       Narrow screens.
+
+       The desktop layout is three fixed columns inside a shell pinned to
+       min-width 1180px, so on a phone the page was 1180px wide: you got a
+       horizontally scrolling board with the map about a third the width of a
+       thumb. Nothing here changes the desktop; it unpins the shell and stacks
+       the same three regions, because a map, a list and a detail panel read
+       perfectly well one after another when there is only one column to give.
+       --------------------------------------------------------------------- */
+    @media (max-width: 900px) {
+      .shell {
+        min-width: 0;
+        height: auto;
+        padding-top: 0;
+      }
+
+      /* Static rather than fixed: 72px of permanently occupied height is a lot
+         of a phone screen, and the map below it can be scrolled to instead. */
+      .topbar {
+        position: static;
+        height: auto;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 12px 14px;
+      }
+      .stats { flex-wrap: wrap; gap: 8px 14px; }
+      .top-actions { flex-wrap: wrap; }
+
+      .app {
+        display: flex;
+        flex-direction: column;
+        height: auto;
+      }
+
+      /* The map keeps a real share of the viewport and its own aspect ratio;
+         the SVG already carries a viewBox, so it scales rather than crops. */
+      .stage {
+        order: 1;
+        height: min(62vh, 460px);
+        min-height: 300px;
+      }
+      .detail { order: 2; border-left: 0; border-top: 1px solid rgba(63, 69, 66, 0.34);
+                padding: 18px 16px 26px; }
+      .rail   { order: 3; border-right: 0; border-top: 1px solid rgba(63, 69, 66, 0.34);
+                padding: 16px 14px 28px; }
+      .rail, .detail { overflow: visible; }
+
+      /* A hover tooltip cannot be reached by a finger, and this one is a fixed
+         240px box that would sit over the map with no way to dismiss it. The
+         detail panel already says everything it says, on tap. */
+      .tooltip { display: none; }
+
+      .trace-card { grid-template-columns: 1fr; gap: 8px; }
+      .legend { flex-wrap: wrap; }
+    }
+
+    /* Touch devices of any width: the same tooltip problem, since it is driven
+       by pointer position and never dismissed without a mouse leaving. */
+    @media (hover: none) {
+      .tooltip { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">🗺️</div>
+        <div class="brand-copy">
+          <h1 id="page-title"></h1>
+          <p id="page-subtitle"></p>
+        </div>
+      </div>
+      <div class="stats" id="stats" aria-label="Repository statistics"></div>
+      <div class="top-actions">
+        <button class="control" id="overview-button" type="button">Overview</button>
+        <button class="control primary" id="trace-button" type="button">Request trace</button>
+      </div>
+    </header>
+
+    <div class="app">
+      <aside class="rail" aria-label="Repository structures">
+        <p class="rail-heading">Structure index</p>
+        <nav id="structure-nav"></nav>
+      </aside>
+
+      <main class="stage" id="stage">
+        <svg id="map" viewBox="0 0 1000 790" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Interactive isometric architecture map">
+          <defs>
+            <filter id="paper-shadow" x="-20%" y="-20%" width="150%" height="160%">
+              <feDropShadow dx="3" dy="5" stdDeviation="3" flood-color="#3b392f" flood-opacity="0.16"></feDropShadow>
+            </filter>
+            <pattern id="fine-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+              <line x1="0" y1="0" x2="0" y2="7" stroke="#27302d" stroke-opacity="0.09" stroke-width="1"></line>
+            </pattern>
+          </defs>
+        </svg>
+        <button class="control inside-back" id="inside-back" type="button">← Back to system</button>
+        <div class="legend" aria-hidden="true"><span><i></i>runtime flow</span><span><i class="dashed"></i>advisory</span></div>
+        <div class="trace-card" id="trace-card" aria-live="polite"></div>
+      </main>
+
+      <aside class="detail" id="detail" aria-live="polite"></aside>
+    </div>
+  </div>
+
+  <div class="tooltip" id="tooltip" role="tooltip"></div>
+
+  <script>
+  "use strict";
+
+  /* ========================================================================
+     DATA — REPLACE ONLY THIS SECTION FOR A NEW REPOSITORY
+
+     STRUCTURES fields:
+       id, code, name, group, loc, gx, gy, w, d, h, what, how, talks
+       optional slab:true
+       optional children:[{code,name,h,what}]
+
+     EDGES fields:
+       f, t, pay
+       optional flow:1, dashed:1, via:[[gx,gy], ...]
+
+     EXTERNALS fields:
+       id, name, target, gx, gy, pay
+
+     TRACE contains 10-14 [structureId, sentence] entries.
+     Keep structure footprints disjoint and all IDs stable across updates.
+     ======================================================================== */
+
+  const SAMPLE_DATA = false;
+
+  const TITLE = "AppliedIn — Isometric Architecture";
+  const SUBTITLE = "A measured map of the local-first job discovery, resume tailoring, and application pipeline";
+
+  const STATS = [
+    { value: "23,515", label: "source lines" },
+    { value: "56", label: "API routes" },
+    { value: "30", label: "test files" },
+    { value: "6", label: "graph nodes" }
+  ];
+
+  const GROUPS = [
+    { id: "surface", name: "User surfaces", color: "#d8a14a", labelGX: 4, labelGY: -1 },
+    { id: "entry", name: "Entry and runtime", color: "#c86a52", labelGX: 3, labelGY: 4 },
+    { id: "ingest", name: "Discovery", color: "#73a08c", labelGX: -2, labelGY: 9 },
+    { id: "domain", name: "Pipeline core", color: "#5d9074", labelGX: 7, labelGY: 10 },
+    { id: "compute", name: "Agents and tools", color: "#6689a6", labelGX: 15, labelGY: 7 },
+    { id: "data", name: "State and storage", color: "#9a8eb4", labelGX: 8, labelGY: 20 },
+    { id: "delivery", name: "Verification and delivery", color: "#8b9272", labelGX: 0, labelGY: 18 }
+  ];
+
+  const STRUCTURES = [
+    { id: "public-site", code: "PS", name: "Public site", group: "surface", loc: "1,200 LOC", gx: 0, gy: 0, w: 3, d: 2, h: 4, what: "Explains the product and leads a person into the working dashboard.", how: "Tracked HTML, CSS, JavaScript, configuration, and the small logo in web provide the landing and access surface.", talks: ["dashboard"] },
+    { id: "dashboard", code: "UI", name: "Pipeline dashboard", group: "surface", loc: "9,142 LOC", gx: 5, gy: 0, w: 4, d: 3, h: 9, what: "Shows every role, score, tailored resume, gate, queue, and confirmed application in one review surface.", how: "web/app.js drives a plain JavaScript application over dashboard.html and styles.css; demo-data.js supplies the offline demonstration state.", talks: ["api"] , children: [
+      { code: "BD", name: "Job board", h: 7, what: "Groups roles by their explicit pipeline status." },
+      { code: "DR", name: "Review drawer", h: 6, what: "Shows evidence, resume changes, questions, and apply controls." },
+      { code: "CF", name: "Configuration", h: 5, what: "Edits company watchlists, preferences, profiles, and runtime modes." },
+      { code: "LG", name: "Live activity", h: 4, what: "Streams agent steps, results, gates, and failures as they happen." },
+      { code: "AQ", name: "Apply queue", h: 5, what: "Makes pending, running, delayed, and exhausted submissions visible." }
+    ] },
+    { id: "extension", code: "EX", name: "Assisted browser extension", group: "surface", loc: "751 LOC", gx: 11, gy: 0, w: 3, d: 2, h: 3, what: "Lets a person finish a tailored application manually in their own browser session.", how: "The extension package uses background, content, popup, and overlay scripts to request approved context and display a guided form plan.", talks: ["api"] },
+
+    { id: "cli", code: "CL", name: "CLI and bootstrap", group: "entry", loc: "549 LOC", gx: 0, gy: 3, w: 3, d: 2, h: 3, what: "Installs the project, starts or stops it, runs one-off discovery, and reports local health.", how: "The appliedin launcher delegates to src/cli.py; setup and support scripts keep the single entry point reproducible.", talks: ["daemon"] },
+    { id: "api", code: "AP", name: "Dashboard API", group: "entry", loc: "1,951 LOC · 56 routes", gx: 5, gy: 4, w: 4, d: 2, h: 6, what: "Turns dashboard actions into safe pipeline commands and streams current state back to the browser.", how: "src/server.py builds a FastAPI application with 56 measured route decorators, static asset serving, background actions, and a live event stream.", talks: ["discovery", "posting-readers", "runtime", "apply-queue", "stores", "execution"] },
+    { id: "daemon", code: "DM", name: "Local daemon", group: "entry", loc: "512 LOC", gx: 11, gy: 3, w: 3, d: 2, h: 4, what: "Keeps the local system alive while web serving, discovery, evaluation, and browser application proceed independently.", how: "src/daemon.py runs dedicated scheduler, evaluation, application, and heartbeat threads; src/pipeline.py supplies one-pass composition.", talks: ["api", "discovery", "runtime", "apply-queue", "execution"] },
+
+    { id: "discovery", code: "DC", name: "Discovery coordinator", group: "ingest", loc: "509 LOC", gx: 0, gy: 7, w: 3, d: 2, h: 5, what: "Scans selected companies, chooses the appropriate discovery path, prevents overlapping scans, and stages new roles.", how: "discovery/handler.py owns deterministic orchestration from watchlist loading through normalized tracking writes and queue handoff.", talks: ["resolver", "feeds", "crawl", "relevance", "runtime"] },
+    { id: "feeds", code: "FD", name: "ATS feed adapters", group: "ingest", loc: "320 LOC", gx: 0, gy: 10, w: 3, d: 2, h: 3, what: "Reads structured job-board feeds and converts provider-specific records into one common job shape.", how: "Five provider adapters plus their registry live under discovery/adapters and return JobRecord values without browser automation.", talks: ["relevance"] },
+    { id: "resolver", code: "RS", name: "Board resolver", group: "ingest", loc: "274 LOC", gx: 0, gy: 13, w: 3, d: 2, h: 3, what: "Works out which board technology and discovery method a company page actually uses.", how: "discovery/resolver.py and the package marker probe known feed shapes and normalize a configured company before scanning begins.", talks: ["feeds", "crawl"] },
+    { id: "posting-readers", code: "JR", name: "Posting readers", group: "ingest", loc: "342 LOC", gx: 4, gy: 7, w: 3, d: 2, h: 3, what: "Fetches one complete job description and recognizes board-specific metadata before scoring begins.", how: "agent/finder.py plus tools/jd.py and ats.py wrap feed reads, direct page extraction, and browser fallback behind normalized job context.", talks: ["resolver", "feeds", "crawl", "browser"] },
+    { id: "crawl", code: "CR", name: "HTTP and browser crawl", group: "ingest", loc: "749 LOC", gx: 4, gy: 10, w: 3, d: 3, h: 5, what: "Finds postings on career pages that do not expose a complete structured feed.", how: "discovery/crawler.py handles fetchable pages while chrome_crawl.py drives a real browser for client-rendered listings and returns normalized candidates.", talks: ["relevance", "playbooks"] },
+    { id: "relevance", code: "RV", name: "Screening and diagnostics", group: "ingest", loc: "553 LOC", gx: 4, gy: 14, w: 3, d: 2, h: 4, what: "Keeps only timely roles that match preferences and records why postings or scans were passed over.", how: "watchlist, filters, freshness, passed_over, scan_log, and relevance modules combine deterministic checks with one bounded model screen.", talks: ["runtime", "stores", "graph"] },
+
+    { id: "execution", code: "RN", name: "Job execution controller", group: "domain", loc: "922 LOC", gx: 8, gy: 8, w: 4, d: 3, h: 6, what: "Moves one role through scoring, tailoring, approval, submission, retries, and final status without losing its state.", how: "agent/run.py restores durable sessions, drives graph events, enforces stale-resume and duplicate checks, and maps outcomes back to tracked statuses.", talks: ["posting-readers", "graph", "runtime", "apply-queue", "stores", "browser"] , children: [
+      { code: "SC", name: "Score phase", h: 4, what: "Loads one role and stops low matches before expensive work." },
+      { code: "TL", name: "Tailor phase", h: 7, what: "Builds and validates a role-specific resume." },
+      { code: "GT", name: "Human gate", h: 3, what: "Waits for approval or an answer instead of guessing." },
+      { code: "SB", name: "Submit phase", h: 6, what: "Hands approved evidence to the browser engine once." },
+      { code: "RC", name: "Recovery", h: 4, what: "Requeues environmental faults while isolating uncertain outcomes." }
+    ] },
+    { id: "domain", code: "MD", name: "Models, config, and profiles", group: "domain", loc: "546 LOC", gx: 8, gy: 12, w: 3, d: 2, h: 4, what: "Defines the shared job vocabulary, stable identity, runtime settings, and application profiles.", how: "Core models and identifiers stay framework-free, while config and profiles select providers and apply deterministic contact replacements.", talks: ["execution", "runtime", "stores"] },
+    { id: "runtime", code: "RT", name: "Runtime control and telemetry", group: "domain", loc: "887 LOC", gx: 8, gy: 15, w: 3, d: 2, h: 5, what: "Holds live modes, pause and reset signals, preferences, model throttling, events, worker health, and verification handoff.", how: "Six core modules coordinate workers through durable flags, publish live activity, retain a compact outcome diary, and expose operational health.", talks: ["daemon", "execution", "apply-queue", "stores", "local-state", "cloud-state"] },
+    { id: "stores", code: "ST", name: "Storage contracts", group: "domain", loc: "165 LOC", gx: 12, gy: 14, w: 2, d: 2, h: 2, what: "Gives the rest of the pipeline one storage interface whether it runs locally or through managed services.", how: "core/stores.py selects a backend bundle implementing the abstract tracking, answer, artifact, queue, and private-data contracts in core/storage/base.py.", talks: ["local-state", "cloud-state"] },
+    { id: "apply-queue", code: "AQ", name: "Company-aware apply queue", group: "domain", loc: "400 LOC", gx: 15, gy: 14, w: 3, d: 2, h: 4, what: "Orders approved applications fairly, prevents two live submissions to one employer, and makes every retry or exhausted item reviewable.", how: "core/apply_queue.py implements per-company leases, global arrival order, bounded backoff, terminal outcomes, manual drains, recovery, and a dead-letter lane on Redis.", talks: ["daemon", "execution", "local-state"] },
+
+    { id: "graph", code: "AG", name: "Agent graph", group: "compute", loc: "452 LOC · 6 nodes", gx: 14, gy: 6, w: 3, d: 3, h: 5, what: "Scores fit, tailors the resume, critiques the edit, and prepares application work as a bounded multi-stage graph.", how: "agent/graph.py declares four model roles plus a loop and sequential root, then exposes deterministic tools for data access, validation, rendering, and handoff.", talks: ["playbooks", "resume-tools", "safety", "execution"] , children: [
+      { code: "SR", name: "Scorer", h: 4, what: "Returns a calibrated structured match score." },
+      { code: "TL", name: "Tailor", h: 7, what: "Rewords existing resume evidence for one role." },
+      { code: "CT", name: "Critic", h: 5, what: "Reviews the edit and requests at most one focused repair." },
+      { code: "LP", name: "Critique loop", h: 4, what: "Bounds revision so the graph cannot churn indefinitely." },
+      { code: "AP", name: "Applier", h: 6, what: "Collects approved facts and delegates submission." },
+      { code: "SQ", name: "Sequential root", h: 3, what: "Orders the agent stages around deterministic gates." }
+    ] },
+    { id: "playbooks", code: "PB", name: "Skills and approved context", group: "compute", loc: "31 guides · 1,317 lines", gx: 18, gy: 4, w: 2, d: 2, h: 4, what: "Gives agents repository instructions, proven site behavior, approved login lookup, optional public repository context, and seen-posting memory.", how: "Thirty-one Markdown files and five focused tool modules load task skills, match site guidance, and provide bounded context to discovery and application runs.", talks: ["graph", "crawl", "browser"] },
+    { id: "resume-tools", code: "RX", name: "Resume artifact tools", group: "compute", loc: "236 LOC", gx: 18, gy: 8, w: 2, d: 2, h: 3, what: "Renders tailored resumes, summarizes changes, and produces concise inspection narratives.", how: "tools/render.py, diffing.py, and narrative.py isolate document compilation and human-readable evidence from model orchestration.", talks: ["safety", "stores"] },
+    { id: "safety", code: "GD", name: "Deterministic guardrails", group: "compute", loc: "332 LOC", gx: 15, gy: 10, w: 3, d: 2, h: 4, what: "Rejects unsupported resume edits, keeps answers within approved evidence, and requires structured outcomes at model boundaries.", how: "Truthfulness, gate, confidence, output, and schema modules enforce facts and result shapes in code instead of relying on model promises.", talks: ["resume-tools", "browser", "execution"] },
+    { id: "browser", code: "BR", name: "Browser application engine", group: "compute", loc: "1,270 LOC", gx: 19, gy: 11, w: 3, d: 3, h: 5, what: "Reads the live posting, fills an approved application, uploads the tailored resume, and reports exactly what the page confirmed.", how: "tools/browser_apply.py dispatches to claude_chrome.py; duplicate guards, the subprocess protocol, safe value checks, site guidance, and result parsing separate browser faults from job outcomes.", talks: ["playbooks", "safety", "stores"] },
+
+    { id: "local-state", code: "LS", name: "Local state", group: "data", loc: "276 LOC", gx: 7, gy: 18, w: 4, d: 2, h: 1, slab: true, what: "Persists tracked jobs and queues while keeping answers, resumes, screenshots, and login data on the local machine.", how: "core/storage/local.py implements Redis-backed tracking and queues plus private file-backed stores behind the shared contracts.", talks: ["stores"] },
+    { id: "cloud-state", code: "CS", name: "Managed-service adapters", group: "data", loc: "309 LOC", gx: 13, gy: 18, w: 4, d: 2, h: 1, slab: true, what: "Provides alternate tracking, queue, answer, artifact, and protected-data adapters for the optional cloud mode.", how: "Five compact modules under core/storage implement the same contracts with managed persistence services; their presence is a code role, not proof of a live deployment.", talks: ["stores"] },
+
+    { id: "infra", code: "IF", name: "Cloud deployment blueprint", group: "delivery", loc: "579 LOC", gx: 0, gy: 17, w: 3, d: 2, h: 3, what: "Describes an optional managed deployment of scheduling, queues, compute, persistence, and monitoring.", how: "Tracked TypeScript constructs and one container recipe live under infra. The map treats them as a blueprint because repository contents alone cannot prove deployed services.", talks: ["cloud-state", "runtime", "apply-queue", "execution"] },
+    { id: "tests", code: "TS", name: "Offline test suite", group: "delivery", loc: "3,077 LOC · 30 tests", gx: 3, gy: 18, w: 3, d: 2, h: 6, what: "Pins the costly safety, queueing, discovery, storage, and browser-failure lessons so they do not quietly regress.", how: "Thirty tracked test modules exercise the pipeline offline with fake stores, model responses, browser reports, and managed-service emulators.", talks: ["discovery", "posting-readers", "execution", "runtime", "apply-queue", "stores", "safety", "browser"] }
+  ];
+
+  const EDGES = [
+    { f: "public-site", t: "dashboard", flow: 1, pay: "Open workspace" },
+    { f: "dashboard", t: "api", flow: 1, pay: "Review action" },
+    { f: "extension", t: "api", flow: 1, pay: "Approved context" },
+    { f: "cli", t: "daemon", flow: 1, pay: "Lifecycle command" },
+    { f: "daemon", t: "api", flow: 1, pay: "Serve application" },
+    { f: "api", t: "discovery", flow: 1, pay: "Scoped scan" },
+    { f: "api", t: "posting-readers", pay: "Pasted role" },
+    { f: "discovery", t: "resolver", flow: 1, pay: "Company page" },
+    { f: "resolver", t: "feeds", flow: 1, pay: "Feed identity" },
+    { f: "resolver", t: "crawl", pay: "Crawl mode" },
+    { f: "feeds", t: "relevance", flow: 1, pay: "Normalized roles" },
+    { f: "crawl", t: "relevance", pay: "Browser candidates" },
+    { f: "relevance", t: "runtime", flow: 1, pay: "Qualifying job" },
+    { f: "relevance", t: "stores", pay: "Screen decision" },
+    { f: "runtime", t: "daemon", flow: 1, pay: "Queued job" },
+    { f: "daemon", t: "execution", flow: 1, pay: "Claimed work" },
+    { f: "api", t: "execution", pay: "Manual action" },
+    { f: "execution", t: "posting-readers", flow: 1, pay: "Job reference" },
+    { f: "posting-readers", t: "execution", flow: 1, pay: "Full job context" },
+    { f: "execution", t: "graph", flow: 1, pay: "Job context" },
+    { f: "graph", t: "playbooks", dashed: 1, pay: "Skill guidance" },
+    { f: "crawl", t: "playbooks", dashed: 1, pay: "Site guidance", via: [[9, 11], [15, 7]] },
+    { f: "graph", t: "safety", flow: 1, pay: "Candidate resume" },
+    { f: "safety", t: "resume-tools", flow: 1, pay: "Validated source" },
+    { f: "resume-tools", t: "execution", flow: 1, pay: "Rendered artifact", via: [[17, 12], [12, 12]] },
+    { f: "execution", t: "browser", flow: 1, pay: "Approved application" },
+    { f: "execution", t: "apply-queue", flow: 1, pay: "Approved job" },
+    { f: "runtime", t: "apply-queue", flow: 1, pay: "Mode and limits" },
+    { f: "apply-queue", t: "daemon", flow: 1, pay: "Leased work", via: [[16, 13], [13, 6]] },
+    { f: "apply-queue", t: "execution", flow: 1, pay: "Dispatch or retry" },
+    { f: "browser", t: "safety", flow: 1, pay: "Field and submit evidence" },
+    { f: "browser", t: "playbooks", dashed: 1, pay: "Site behavior" },
+    { f: "execution", t: "stores", flow: 1, pay: "Status and session" },
+    { f: "runtime", t: "stores", flow: 1, pay: "Flags and leases" },
+    { f: "resume-tools", t: "stores", flow: 1, pay: "Resume and evidence" },
+    { f: "browser", t: "stores", flow: 1, pay: "Confirmed outcome", via: [[18, 15], [14, 16]] },
+    { f: "stores", t: "local-state", flow: 1, pay: "Local backend" },
+    { f: "stores", t: "cloud-state", pay: "Cloud backend" },
+    { f: "stores", t: "api", flow: 1, pay: "Live snapshot" },
+    { f: "api", t: "dashboard", flow: 1, pay: "Events and state" },
+    { f: "domain", t: "execution", pay: "Typed rules" },
+    { f: "domain", t: "runtime", pay: "Statuses and policy" },
+    { f: "infra", t: "cloud-state", dashed: 1, pay: "Provisioned roles" },
+    { f: "infra", t: "runtime", dashed: 1, pay: "Managed triggers", via: [[3, 16], [7, 16]] },
+    { f: "infra", t: "apply-queue", dashed: 1, pay: "Queue blueprint", via: [[7, 18], [14, 17]] },
+    { f: "tests", t: "discovery", dashed: 1, pay: "Offline fixtures", via: [[4, 17], [1, 15]] },
+    { f: "tests", t: "execution", dashed: 1, pay: "Pipeline checks" },
+    { f: "tests", t: "safety", dashed: 1, pay: "Invariant checks", via: [[7, 17], [14, 13]] }
+  ];
+
+  const EXTERNALS = [
+    { id: "job-boards", name: "Job boards", target: "feeds", gx: -4, gy: 10, pay: "Listings and job details" },
+    { id: "model-provider", name: "Model provider", target: "graph", gx: 21, gy: 5, pay: "Resume and role context" },
+    { id: "employer-forms", name: "Employer forms", target: "browser", gx: 24, gy: 12, pay: "Approved form submission" },
+    { id: "document-compiler", name: "Document compiler", target: "resume-tools", gx: 22, gy: 17, pay: "Source in, PDF out" }
+  ];
+
+  const TRACE = [
+    ["dashboard", "A person starts a company-scoped discovery run from the dashboard."],
+    ["api", "The API validates the action and starts the scan outside the request thread."],
+    ["discovery", "The coordinator loads public preferences and selects the requested company."],
+    ["resolver", "The resolver identifies the board technology and the reliable feed path for current postings."],
+    ["relevance", "Freshness and preference rules retain only plausible roles."],
+    ["runtime", "Each unseen match is recorded and placed on the durable evaluation queue."],
+    ["daemon", "An evaluation lane claims the asynchronous job without blocking discovery or the dashboard."],
+    ["execution", "The controller restores the job, base resume, profile, and reset epoch."],
+    ["posting-readers", "The full posting is fetched and normalized before any score is trusted."],
+    ["graph", "The graph scores the match, tailors the resume, and runs the bounded critique loop."],
+    ["safety", "Deterministic checks reject unsupported edits before any artifact is accepted."],
+    ["resume-tools", "The validated source is rendered and its evidence is saved for review."],
+    ["browser", "Only after human approval, the browser fills once and requires page confirmation."],
+    ["dashboard", "Live state returns to the board with the tailored artifact or confirmed outcome."]
+  ];
+
+  const OVERVIEW_WHAT = "AppliedIn turns a watchlist or one pasted role into a reviewable path from discovery through match scoring, resume tailoring, human approval, and browser submission. The dashboard keeps every transition visible, and expensive or risky work continues asynchronously without pretending an uncertain submission succeeded.";
+  const OVERVIEW_HOW = "The actively documented runtime is one local daemon with separate web, discovery, evaluation, and application threads. FastAPI and plain browser code sit above a backend-neutral store bundle; Redis and private files implement local durability. The agent graph handles judgment, while code-enforced queues, validation, duplicate checks, and confirmation rules own safety. The infrastructure directory is shown as an optional blueprint, not counted as evidence of live deployed services. Block heights use a consistent clamped logarithmic scale, with the 9,142-line dashboard as the tallest measured subsystem.";
+
+  /* ============================== END DATA ============================== */
+
+  (function () {
+    const NS = "http:" + "//www.w3.org/2000/svg";
+    const VIEW_W = 1000;
+    const VIEW_H = 790;
+    const ORIGIN_X = 493;
+    const ORIGIN_Y = 175;
+    const ISO_X = 26;
+    const ISO_Y = 14.3;
+    const ISO_H = 16;
+
+    const svg = document.getElementById("map");
+    const nav = document.getElementById("structure-nav");
+    const detail = document.getElementById("detail");
+    const tooltip = document.getElementById("tooltip");
+    const traceCard = document.getElementById("trace-card");
+    const insideBack = document.getElementById("inside-back");
+    const groupById = new Map(GROUPS.map((group) => [group.id, group]));
+    const structureById = new Map(STRUCTURES.map((structure) => [structure.id, structure]));
+    let selectedId = null;
+    let insideId = null;
+    let traceIndex = null;
+
+    function esc(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function svgEl(name, attrs, text) {
+      const node = document.createElementNS(NS, name);
+      Object.entries(attrs || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
+      if (text !== undefined) node.textContent = String(text);
+      return node;
+    }
+
+    function project(gx, gy, h) {
+      return [ORIGIN_X + (gx - gy) * ISO_X, ORIGIN_Y + (gx + gy) * ISO_Y - h * ISO_H];
+    }
+
+    function points(values) {
+      return values.map((point) => point.join(",")).join(" ");
+    }
+
+    function shade(hex, amount) {
+      const raw = hex.replace("#", "");
+      const value = parseInt(raw, 16);
+      const r = Math.max(0, Math.min(255, (value >> 16) + amount));
+      const g = Math.max(0, Math.min(255, ((value >> 8) & 255) + amount));
+      const b = Math.max(0, Math.min(255, (value & 255) + amount));
+      return `rgb(${r},${g},${b})`;
+    }
+
+    function structureCenter(structure) {
+      return {
+        gx: structure.gx + structure.w / 2,
+        gy: structure.gy + structure.d / 2
+      };
+    }
+
+    function clearDrawing() {
+      svg.querySelectorAll(".drawing-layer").forEach((node) => node.remove());
+    }
+
+    function makeLayer(name) {
+      const layer = svgEl("g", { class: `drawing-layer ${name}` });
+      svg.appendChild(layer);
+      return layer;
+    }
+
+    function drawGround(layer) {
+      for (let i = -5; i <= 24; i += 2) {
+        const a = project(i, -4, 0);
+        const b = project(i, 23, 0);
+        layer.appendChild(svgEl("line", { class: "ground-line", x1: a[0], y1: a[1], x2: b[0], y2: b[1] }));
+      }
+      for (let i = -4; i <= 23; i += 2) {
+        const a = project(-5, i, 0);
+        const b = project(24, i, 0);
+        layer.appendChild(svgEl("line", { class: "ground-line", x1: a[0], y1: a[1], x2: b[0], y2: b[1] }));
+      }
+    }
+
+    function routeFor(edge) {
+      const from = structureById.get(edge.f);
+      const to = structureById.get(edge.t);
+      if (!from || !to) return null;
+      const start = structureCenter(from);
+      const end = structureCenter(to);
+      const logical = [
+        [start.gx, start.gy],
+        ...(edge.via || [[end.gx, start.gy]]),
+        [end.gx, end.gy]
+      ];
+      const projected = logical.map(([gx, gy]) => project(gx, gy, 0.08));
+      return `M ${projected.map((point) => `${point[0]} ${point[1]}`).join(" L ")}`;
+    }
+
+    function showTooltip(event, title, body) {
+      tooltip.innerHTML = `<strong>${esc(title)}</strong><span>${esc(body)}</span>`;
+      const left = Math.min(window.innerWidth - 270, event.clientX + 12);
+      const top = Math.min(window.innerHeight - 120, event.clientY + 12);
+      tooltip.style.left = `${Math.max(10, left)}px`;
+      tooltip.style.top = `${Math.max(10, top)}px`;
+      tooltip.classList.add("show");
+    }
+
+    function hideTooltip() {
+      tooltip.classList.remove("show");
+    }
+
+    function drawEdges(layer) {
+      EDGES.forEach((edge, index) => {
+        const d = routeFor(edge);
+        if (!d) return;
+        const path = svgEl("path", {
+          id: `flow-path-${index}`,
+          class: `edge-line${edge.flow ? " flow" : ""}${edge.dashed ? " dashed" : ""}`,
+          d,
+          "data-from": edge.f,
+          "data-to": edge.t
+        });
+        const hit = svgEl("path", { class: "edge-hit", d, tabindex: "0" });
+        const describe = (event) => showTooltip(event, `${structureById.get(edge.f).name} → ${structureById.get(edge.t).name}`, edge.pay);
+        hit.addEventListener("pointermove", describe);
+        hit.addEventListener("pointerleave", hideTooltip);
+        hit.addEventListener("focus", (event) => showTooltip({ clientX: window.innerWidth / 2, clientY: 120 }, "Data flow", edge.pay));
+        hit.addEventListener("blur", hideTooltip);
+        layer.appendChild(path);
+        layer.appendChild(hit);
+
+        if (edge.flow) {
+          [0, 1].forEach((dotIndex) => {
+            const circle = svgEl("circle", { class: "flow-dot", r: 3.5, "data-pay": edge.pay });
+            const motion = svgEl("animateMotion", {
+              path: d,
+              dur: `${5.5 + (index % 4) * 0.8}s`,
+              begin: `${dotIndex * -2.7}s`,
+              repeatCount: "indefinite"
+            });
+            circle.appendChild(motion);
+            circle.addEventListener("pointermove", (event) => showTooltip(event, "In transit", edge.pay));
+            circle.addEventListener("pointerleave", hideTooltip);
+            layer.appendChild(circle);
+          });
+        }
+      });
+    }
+
+    function blockGeometry(structure) {
+      const height = structure.slab ? Math.max(0.55, structure.h) : structure.h;
+      const topA = project(structure.gx, structure.gy, height);
+      const topB = project(structure.gx + structure.w, structure.gy, height);
+      const topC = project(structure.gx + structure.w, structure.gy + structure.d, height);
+      const topD = project(structure.gx, structure.gy + structure.d, height);
+      const baseB = project(structure.gx + structure.w, structure.gy, 0);
+      const baseC = project(structure.gx + structure.w, structure.gy + structure.d, 0);
+      const baseD = project(structure.gx, structure.gy + structure.d, 0);
+      return { height, topA, topB, topC, topD, baseB, baseC, baseD };
+    }
+
+    function drawBlock(layer, structure, options) {
+      const settings = options || {};
+      const group = groupById.get(structure.group) || { color: "#a69d88" };
+      const color = settings.color || group.color;
+      const geometry = blockGeometry(structure);
+      const node = svgEl("g", {
+        class: "structure",
+        tabindex: "0",
+        role: "button",
+        "aria-label": `${structure.name}, ${structure.loc || "internal structure"}`,
+        "data-id": structure.id
+      });
+
+      node.appendChild(svgEl("polygon", {
+        class: "face right",
+        points: points([geometry.topB, geometry.topC, geometry.baseC, geometry.baseB]),
+        fill: shade(color, -36)
+      }));
+      node.appendChild(svgEl("polygon", {
+        class: "face left",
+        points: points([geometry.topC, geometry.topD, geometry.baseD, geometry.baseC]),
+        fill: shade(color, -18)
+      }));
+      node.appendChild(svgEl("polygon", {
+        class: "face top",
+        points: points([geometry.topA, geometry.topB, geometry.topC, geometry.topD]),
+        fill: color
+      }));
+      node.appendChild(svgEl("polygon", {
+        points: points([geometry.topA, geometry.topB, geometry.topC, geometry.topD]),
+        fill: "url(#fine-hatch)",
+        "pointer-events": "none"
+      }));
+
+      const topCenter = project(structure.gx + structure.w / 2, structure.gy + structure.d / 2, geometry.height);
+      node.appendChild(svgEl("text", { class: "block-code", x: topCenter[0], y: topCenter[1] - 2 }, structure.code));
+      node.appendChild(svgEl("text", { class: "block-loc", x: topCenter[0], y: topCenter[1] + 11 }, structure.loc || ""));
+
+      const activate = () => settings.onSelect ? settings.onSelect(structure) : selectStructure(structure.id);
+      node.addEventListener("click", activate);
+      node.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate();
+        }
+      });
+      node.addEventListener("pointermove", (event) => {
+        showTooltip(event, `${structure.name} · ${structure.loc || ""}`, structure.what);
+        if (!settings.noNeighbors) highlightNeighborhood(structure.id);
+      });
+      node.addEventListener("pointerleave", () => {
+        hideTooltip();
+        if (!settings.noNeighbors) applyHighlightState();
+      });
+      node.addEventListener("focus", () => {
+        if (!settings.noNeighbors) highlightNeighborhood(structure.id);
+      });
+      node.addEventListener("blur", () => {
+        if (!settings.noNeighbors) applyHighlightState();
+      });
+      layer.appendChild(node);
+      return node;
+    }
+
+    function drawExternals(layer) {
+      EXTERNALS.forEach((external) => {
+        const target = structureById.get(external.target);
+        if (!target) return;
+        const targetCenter = structureCenter(target);
+        const start = project(external.gx, external.gy, 0.1);
+        const end = project(targetCenter.gx, targetCenter.gy, 0.1);
+        const width = Math.max(118, external.name.length * 7.2);
+        const group = svgEl("g", { tabindex: "0", role: "note" });
+        group.appendChild(svgEl("path", { class: "external-line", d: `M ${start[0]} ${start[1]} L ${end[0]} ${end[1]}` }));
+        group.appendChild(svgEl("rect", { class: "external-card", x: start[0] - width / 2, y: start[1] - 18, width, height: 35, rx: 2 }));
+        group.appendChild(svgEl("text", { class: "external-name", x: start[0], y: start[1] - 3, "text-anchor": "middle" }, external.name));
+        group.appendChild(svgEl("text", { class: "external-pay", x: start[0], y: start[1] + 10, "text-anchor": "middle" }, external.pay));
+        group.addEventListener("pointermove", (event) => showTooltip(event, external.name, external.pay));
+        group.addEventListener("pointerleave", hideTooltip);
+        layer.appendChild(group);
+      });
+    }
+
+    function drawZoneLabels(layer) {
+      const labels = GROUPS
+        .filter(
+          (group) =>
+            Number.isFinite(group.labelGX)
+            && Number.isFinite(group.labelGY)
+        )
+        .map((group) => [group.name.toUpperCase(), group.labelGX, group.labelGY]);
+
+      labels.forEach(([label, gx, gy]) => {
+        const at = project(gx, gy, 0);
+        layer.appendChild(svgEl("text", { class: "zone-label", x: at[0], y: at[1], "text-anchor": "middle" }, label));
+      });
+    }
+
+    function renderCity() {
+      insideId = null;
+      insideBack.classList.remove("show");
+      clearDrawing();
+      const ground = makeLayer("ground-layer");
+      const edges = makeLayer("edge-layer");
+      const blocks = makeLayer("block-layer");
+      const externals = makeLayer("external-layer");
+      drawGround(ground);
+      drawZoneLabels(ground);
+      drawEdges(edges);
+      STRUCTURES
+        .slice()
+        .sort((a, b) => (a.gx + a.gy) - (b.gx + b.gy))
+        .forEach((structure) => drawBlock(blocks, structure));
+      drawExternals(externals);
+      applyHighlightState();
+    }
+
+    function renderInside(parent) {
+      insideId = parent.id;
+      selectedId = parent.id;
+      traceIndex = null;
+      traceCard.classList.remove("show");
+      insideBack.classList.add("show");
+      clearDrawing();
+      const ground = makeLayer("ground-layer");
+      const blocks = makeLayer("block-layer");
+      drawGround(ground);
+
+      ground.appendChild(svgEl("rect", { class: "inside-boundary", x: 130, y: 130, width: 740, height: 520, rx: 8 }));
+      ground.appendChild(svgEl("text", { class: "inside-title", x: 165, y: 184 }, `Inside ${parent.name}`));
+      ground.appendChild(svgEl("text", { class: "inside-note", x: 166, y: 207 }, "COMPONENT RESPONSIBILITIES · HEIGHTS FOLLOW RELATIVE SIZE"));
+
+      const children = parent.children || [];
+      children.forEach((child, index) => {
+        const column = index % 3;
+        const row = Math.floor(index / 3);
+        const structure = {
+          id: `${parent.id}-child-${index}`,
+          code: child.code,
+          name: child.name,
+          group: parent.group,
+          loc: child.loc || "internal",
+          gx: 5 + column * 5,
+          gy: 8 + row * 6,
+          w: 3,
+          d: 2.4,
+          h: child.h,
+          what: child.what,
+          how: parent.how,
+          talks: []
+        };
+        drawBlock(blocks, structure, {
+          color: (groupById.get(parent.group) || { color: "#9d9480" }).color,
+          noNeighbors: true,
+          onSelect: () => renderChildDetail(parent, child)
+        });
+      });
+      renderStructureDetail(parent);
+      syncNav();
+    }
+
+    function highlightNeighborhood(id) {
+      const neighbors = new Set([id]);
+      EDGES.forEach((edge) => {
+        if (edge.f === id) neighbors.add(edge.t);
+        if (edge.t === id) neighbors.add(edge.f);
+      });
+      svg.querySelectorAll(".structure").forEach((node) => {
+        node.classList.toggle("dimmed", !neighbors.has(node.dataset.id));
+      });
+      svg.querySelectorAll(".edge-line").forEach((node) => {
+        node.classList.toggle("active", node.dataset.from === id || node.dataset.to === id);
+      });
+    }
+
+    function applyHighlightState() {
+      const active = traceIndex !== null ? TRACE[traceIndex][0] : selectedId;
+      const completedIds = traceIndex !== null
+        ? new Set(TRACE.slice(0, traceIndex + 1).map(([id]) => id))
+        : new Set();
+      const transitions = traceIndex !== null
+        ? TRACE.slice(1, traceIndex + 1).map(([to], index) => [TRACE[index][0], to])
+        : [];
+      svg.querySelectorAll(".structure").forEach((node) => {
+        const isCurrent = traceIndex !== null && node.dataset.id === active;
+        const isComplete = traceIndex !== null && completedIds.has(node.dataset.id) && !isCurrent;
+        node.classList.toggle("dimmed", traceIndex !== null && !completedIds.has(node.dataset.id));
+        node.classList.toggle("active", traceIndex === null && node.dataset.id === active);
+        node.classList.toggle("trace-complete", isComplete);
+        node.classList.toggle("trace-current", isCurrent);
+      });
+      svg.querySelectorAll(".edge-line").forEach((node) => {
+        let lastMatch = -1;
+        transitions.forEach(([from, to], index) => {
+          const matches = (node.dataset.from === from && node.dataset.to === to)
+            || (node.dataset.from === to && node.dataset.to === from);
+          if (matches) lastMatch = index;
+        });
+        node.classList.toggle("active", false);
+        node.classList.toggle("trace-complete", lastMatch >= 0 && lastMatch < transitions.length - 1);
+        node.classList.toggle("trace-current", lastMatch >= 0 && lastMatch === transitions.length - 1);
+      });
+      syncNav();
+    }
+
+    function syncNav() {
+      nav.querySelectorAll(".structure-link").forEach((button) => {
+        button.classList.toggle("active", button.dataset.id === selectedId);
+      });
+    }
+
+    function renderNav() {
+      nav.textContent = "";
+      GROUPS.forEach((group) => {
+        const members = STRUCTURES.filter((structure) => structure.group === group.id);
+        if (!members.length) return;
+        const section = document.createElement("section");
+        section.className = "group";
+        const title = document.createElement("p");
+        title.className = "group-title";
+        title.innerHTML = `<span class="swatch" style="background:${esc(group.color)}"></span>${esc(group.name)}`;
+        section.appendChild(title);
+        members.forEach((structure) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "structure-link";
+          button.dataset.id = structure.id;
+          button.style.setProperty("--chip", group.color);
+          button.innerHTML = `<span class="code-chip">${esc(structure.code)}</span><span class="name">${esc(structure.name)}</span><span class="loc">${esc(structure.loc)}</span>`;
+          button.addEventListener("click", () => {
+            if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+            if (insideId) renderCity();
+            traceIndex = null;
+            traceCard.classList.remove("show");
+            selectStructure(structure.id);
+          });
+          section.appendChild(button);
+        });
+        nav.appendChild(section);
+      });
+    }
+
+    function renderOverview() {
+      selectedId = null;
+      detail.innerHTML = `
+        <p class="eyebrow">System overview</p>
+        <h2>${esc(TITLE)}</h2>
+        <div class="detail-meta"><span>${STRUCTURES.length} structures</span><span>${EDGES.length} connections</span></div>
+        <section class="detail-section"><h3>What it does</h3><p>${esc(OVERVIEW_WHAT)}</p></section>
+        <section class="detail-section"><h3>How it's built</h3><p>${esc(OVERVIEW_HOW)}</p></section>
+        <section class="detail-section"><h3>How to explore</h3><p>Hover blocks and moving dots for context. Select a structure for details. Request trace reveals a numbered path: orange marks completed steps and red marks the current step. Structures with internal components offer a go-inside view.</p></section>`;
+      syncNav();
+    }
+
+    function renderStructureDetail(structure) {
+      const group = groupById.get(structure.group);
+      const connections = (structure.talks || [])
+        .map((id) => structureById.get(id))
+        .filter(Boolean);
+      const connectionsHtml = connections.length
+        ? `<ul>${connections.map((item) => `<li>${esc(item.name)}</li>`).join("")}</ul>`
+        : `<p>No outgoing runtime connection is shown.</p>`;
+      detail.innerHTML = `
+        <p class="eyebrow">${esc(group ? group.name : "Structure")}</p>
+        <h2>${esc(structure.name)}</h2>
+        <div class="detail-meta"><span>${esc(structure.code)}</span><span>${esc(structure.loc)}</span>${structure.slab ? "<span>storage slab</span>" : ""}</div>
+        <section class="detail-section"><h3>What it does</h3><p>${esc(structure.what)}</p></section>
+        <section class="detail-section"><h3>How it's built</h3><p>${esc(structure.how)}</p></section>
+        <section class="detail-section"><h3>Talks to</h3>${connectionsHtml}</section>
+        ${structure.children && structure.children.length ? `<button class="inside-button" id="go-inside" type="button">Go inside · ${structure.children.length} components</button>` : ""}`;
+      const insideButton = document.getElementById("go-inside");
+      if (insideButton) insideButton.addEventListener("click", () => { location.hash = `inside=${encodeURIComponent(structure.id)}`; });
+    }
+
+    function renderChildDetail(parent, child) {
+      detail.innerHTML = `
+        <p class="eyebrow">Inside ${esc(parent.name)}</p>
+        <h2>${esc(child.name)}</h2>
+        <div class="detail-meta"><span>${esc(child.code)}</span><span>internal component</span></div>
+        <section class="detail-section"><h3>What it does</h3><p>${esc(child.what)}</p></section>
+        <section class="detail-section"><h3>Parent implementation</h3><p>${esc(parent.how)}</p></section>`;
+    }
+
+    function selectStructure(id) {
+      const structure = structureById.get(id);
+      if (!structure) return;
+      selectedId = id;
+      renderStructureDetail(structure);
+      applyHighlightState();
+    }
+
+    function renderTrace(index) {
+      const safeIndex = Math.max(0, Math.min(TRACE.length - 1, index));
+      traceIndex = safeIndex;
+      const [id, sentence] = TRACE[safeIndex];
+      const structure = structureById.get(id);
+      const traceStepsHtml = TRACE.map(([stepId], stepIndex) => {
+        const stepStructure = structureById.get(stepId);
+        const state = stepIndex === safeIndex ? " current" : (stepIndex < safeIndex ? " complete" : "");
+        const label = stepStructure ? stepStructure.code : String(stepIndex + 1);
+        const name = stepStructure ? stepStructure.name : stepId;
+        return `<button class="trace-step${state}" type="button" data-trace-step="${stepIndex + 1}" aria-label="Go to trace step ${stepIndex + 1}: ${esc(name)}"><span class="trace-dot">${stepIndex + 1}</span><span class="trace-step-label">${esc(label)}</span></button>`;
+      }).join("");
+      selectedId = id;
+      if (insideId) renderCity();
+      traceCard.classList.add("show");
+      traceCard.innerHTML = `
+        <div class="trace-count"><small>Request trace</small><b>${String(safeIndex + 1).padStart(2, "0")} / ${String(TRACE.length).padStart(2, "0")}</b><span>Orange done · red current</span></div>
+        <div class="trace-copy"><strong>${esc(structure ? structure.name : id)}</strong><span>${esc(sentence)}</span></div>
+        <div class="trace-actions">
+          <button type="button" data-trace-action="previous"${safeIndex === 0 ? " disabled" : ""}>← Previous</button>
+          <button type="button" data-trace-action="next"${safeIndex === TRACE.length - 1 ? " disabled" : ""}>Next →</button>
+          <button type="button" data-trace-action="close">Close</button>
+        </div>
+        <div class="trace-timeline" style="--trace-count:${TRACE.length}">${traceStepsHtml}</div>`;
+      traceCard.querySelector('[data-trace-action="previous"]').addEventListener("click", () => setTrace(Math.max(1, safeIndex)));
+      traceCard.querySelector('[data-trace-action="next"]').addEventListener("click", () => setTrace(Math.min(TRACE.length, safeIndex + 2)));
+      traceCard.querySelector('[data-trace-action="close"]').addEventListener("click", () => { location.hash = ""; });
+      traceCard.querySelectorAll("[data-trace-step]").forEach((button) => {
+        button.addEventListener("click", () => setTrace(Number(button.dataset.traceStep)));
+      });
+      if (structure) renderStructureDetail(structure);
+      applyHighlightState();
+    }
+
+    function setTrace(oneBasedIndex) {
+      location.hash = `trace=${oneBasedIndex}`;
+    }
+
+    function applyHash() {
+      // Debug hooks: #inside=STRUCTURE_ID and #trace=7.
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+      const params = new URLSearchParams(location.hash.slice(1));
+      const inside = params.get("inside");
+      const trace = Number(params.get("trace"));
+      if (inside) {
+        const structure = structureById.get(inside);
+        if (structure && structure.children && structure.children.length) {
+          renderInside(structure);
+          return;
+        }
+      }
+      renderCity();
+      if (Number.isFinite(trace) && trace >= 1) {
+        renderTrace(trace - 1);
+      } else {
+        traceIndex = null;
+        traceCard.classList.remove("show");
+        renderOverview();
+        applyHighlightState();
+      }
+    }
+
+    document.getElementById("page-title").textContent = TITLE;
+    document.getElementById("page-subtitle").textContent = SUBTITLE;
+    document.title = TITLE;
+    document.getElementById("stats").innerHTML = STATS.map((stat) => `<div class="stat"><strong>${esc(stat.value)}</strong><span>${esc(stat.label)}</span></div>`).join("");
+    document.getElementById("overview-button").addEventListener("click", () => { location.hash = ""; });
+    document.getElementById("trace-button").addEventListener("click", () => setTrace(1));
+    insideBack.addEventListener("click", () => { location.hash = ""; });
+    window.addEventListener("hashchange", applyHash);
+    window.addEventListener("pointerdown", (event) => {
+      if (!event.target.closest(".structure") && !event.target.closest(".structure-link") && !event.target.closest(".detail")) hideTooltip();
+    });
+
+    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+    renderNav();
+    applyHash();
+    window.__isometricReady = true;
+  }());
+  </script>
+</body>
+</html>

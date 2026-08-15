@@ -871,11 +871,53 @@ honest:
    If there is none, leave them blank. Blank is a valid answer; a guess is not.
 3. Sanctions questions ("are you a citizen of, or located in, Cuba, Iran, North
    Korea, Syria…") are always answered with the negative or "None of the above".
-4. Free text should be grounded in the owner's real work from the answers above,
-   written in plain sentences. Do not use dashes as connectors. Make it
-   genuinely useful to a reader deciding whether to interview them.
-5. Remember to click each text box / radio button / checkbox after selecting
-6. If the portal offers "Continue with Google" (or Sign in with Google), PREFER IT
+4. Free text is grounded in the owner's real work from the answers above, written
+   in plain sentences. Do not use dashes as connectors. Make it genuinely useful
+   to a reader deciding whether to interview them.
+
+   The answers above are SOURCE MATERIAL, not text to paste. Several of them are
+   long stored paragraphs about one project. Pasting one whole into a question
+   that did not ask about that project is the single worst thing you can write:
+   it reads as a form letter, and a reader stops at the first sentence that is
+   plainly not about them. So:
+
+   - Answer the question that was actually asked, in its own words.
+   - Choose only the material that fits THIS role, which is on the page in front
+     of you. A project is worth naming when its subject matches what this team
+     works on. When it does not, leave it out; the professional record is the
+     stronger answer nearly every time.
+   - Never open with a project the question did not ask about.
+   - Do not end with a sentence of enthusiasm that would be true of any employer
+     ("I am excited about X because it combines exactly what I do"). If the
+     interest is real it is specific to something on this page; if it is not
+     specific, write nothing rather than filler.
+   - Three or four sentences is usually right. Long is not thorough.
+
+   When the field is an open invitation rather than a question — "Additional
+   information", "anything else you want us to know", an optional note — fill it
+   rather than leaving it blank, and use it to make the case the form never asked
+   for: what this team gets by hiring the owner. One sentence on the fit, named
+   concretely with its scale or outcome; one on what the team can do sooner
+   because he is on it; and, only if the field asks for motivation, one on why
+   this team's problem is the one he wants next. Do not summarise the résumé they
+   already have.
+5. When a question offers OPTIONS and several approved answers would each be
+   true, pick the one closest to THIS role, which is described on the page in
+   front of you. The owner's answers deliberately cover more than one option for
+   the same question — a preferred technical domain, an area of expertise — and
+   choosing by relevance is the difference between an answer and a default. Two
+   rules bound it: the value you select must match one of the options offered,
+   and it must be one of the approved answers. Never pick an option the owner has
+   not claimed in order to fit the posting better.
+   Worked example. "What technical domain do you prefer to work in and have most
+   expertise with?" with options Front End, Full Stack, Back End, Infrastructure,
+   Database Operations / SRE, Low-Level Systems Development, Distributed Systems:
+   for a platform or reliability role choose Infrastructure, for a services or
+   API role Back End, and for a role about scale, consistency or data movement
+   Distributed Systems. All three are approved answers; the posting decides.
+
+6. Remember to click each text box / radio button / checkbox after selecting
+7. If the portal offers "Continue with Google" (or Sign in with Google), PREFER IT
    over creating an account, but ONLY when the Google account it is already signed
    in as matches the email this application is going out under, shown in the
    answers above. Check the account it names before clicking through.

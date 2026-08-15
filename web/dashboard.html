@@ -313,22 +313,50 @@
                   <div class="cp-foot" id="q-foot"></div>
                 </div>
               </div>
+              <!-- Only appears once some company rotates: one press re-points
+                   every rotating company's un-sent work at its own address and
+                   puts it all in line. It stops at the queue. -->
+              <button id="btn-rotate-all" class="skipbtn rotbtn" hidden
+                title="Every rotating company at once: re-point what has not been sent, tailor what the current address already covers, and queue all of it. Nothing is applied — the queue is where you press Process.">↻ Rotate &amp; queue all<span
+                  id="rot-count" class="skip-count mono" hidden>0</span></button>
               <div class="profmgr" id="profmgr">
                 <button id="btn-profiles" class="skipbtn profbtn" aria-haspopup="true" aria-expanded="false"
                   title="Which email + phone an application goes out under">◐ Profiles<span
                     id="prof-count" class="skip-count mono" hidden>0</span></button>
                 <div id="profpicker" class="copicker profpicker" hidden>
-                  <div class="cp-role-h">Who the application comes from</div>
+                  <div class="cp-role-h">Who the application comes from
+                    <button id="pr-new" class="pr-new" type="button"
+                      aria-expanded="false">＋ new</button></div>
                   <div class="pr-list" id="pr-list"></div>
-                  <div class="pr-add">
+                  <div class="pr-add" id="pr-add-form" hidden>
                     <input id="pr-label" class="cp-search" type="text" placeholder="label — e.g. Job hunt" autocomplete="off" />
                     <input id="pr-email" class="cp-search" type="email" placeholder="email address" autocomplete="off" />
                     <input id="pr-phone" class="cp-search" type="tel" placeholder="phone (optional)" autocomplete="off" />
+                    <label class="pr-rot-opt" title="A template rather than an identity: it never applies under the base address, it mints one alias per company and rotates when that alias reaches its limit.">
+                      <input id="pr-rotating" type="checkbox" /> rotating
+                      <input id="pr-limit" class="cp-search pr-narrow" type="number" min="1" max="50"
+                        value="5" title="Applications one alias may carry at one company" />
+                      <select id="pr-style" class="cp-search pr-narrow"
+                        title="plus — name+careers@gmail.com. dot — na.me@gmail.com, Gmail only, for boards that reject a +">
+                        <option value="plus">+tag</option>
+                        <option value="dot">dot</option>
+                      </select>
+                    </label>
                     <button id="pr-add" class="cp-lk cp-add-btn" type="button">Add profile</button>
                   </div>
-                  <div class="cp-foot">The résumé is re-rendered with the profile's
-                    address, so the form and the PDF never disagree. Marked
-                    <b>default</b> is used by anything you don't set.</div>
+                  <!-- Read-only here on purpose. Turning rotation ON is a
+                       per-company decision and belongs with that company's other
+                       rules (Discover → pick a company → Apply as), so this is
+                       the summary of where it is already on, not a second place
+                       to set it up. -->
+                  <div class="pr-rot" id="pr-rot" hidden>
+                    <div class="cp-role-h">Rotating <span class="pr-rot-hint">— set per company under Discover</span></div>
+                    <div id="pr-rot-list" class="pr-rot-list"></div>
+                  </div>
+                  <div class="cp-foot">The résumé is re-rendered to match, so the
+                    form and the PDF never disagree. <b>Default</b> covers anything
+                    you don't set; <b>rotating</b> gives each company its own alias
+                    of one address, counted and replaced at the limit.</div>
                 </div>
               </div>
               <div class="prefmgr" id="prefmgr">

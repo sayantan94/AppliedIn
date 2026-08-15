@@ -27,6 +27,7 @@ const state = {
   locFilter: "",      // Tailored lane: show one location tier only ("" = all)
   profiles: [],       // identities an application can go out under
   profileDefault: "", // the one used by any job that has not chosen
+  rotation: [],       // companies whose applications get an alias each, per /rotation
   collapsed: null,    // folded location buckets (null = pick the default once)
   dayShut: null,      // folded tailoring-date groups in Ready to apply
   companies: [],      // watchlist names for the discovery picker
@@ -48,6 +49,7 @@ const state = {
   secOpen: { closed: false }, // pipeline stack: which foldable sections are open
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
+  qPicked: new Set(),  // queued jobs ticked for a bulk Skip / Remove
   page: {},           // pipeline stack: rows revealed per list key
   heat: null,         // /activity payload for the heatmap ({days, totals})
   fresh: null,        // /fresh payload, fetched once at the widest window
@@ -366,6 +368,11 @@ function renderDetail() {
   }
   const over = state.cprefs[co.toLowerCase()] || {};
   const n = Object.keys(over).length;
+  // Whether this company rotates its address. Read once here: the "Apply as"
+  // field needs it to show the right selection, and the footer needs it for the
+  // one action that follows — which lives there rather than beside the field,
+  // because the field is halfway down a scrolling list and the footer is pinned.
+  const rotc = (state.rotation || []).find((r) => r.company === co.toLowerCase());
 
   const field = (f) => {
     const isOver = over[f.k] !== undefined;
@@ -387,11 +394,18 @@ function renderDetail() {
       // gets a named option instead of a blank row.
       const dn = (state.profiles.find((x) => x.id === state.profileDefault) || {}).label
                  || "default profile";
-      const opts = [`<option value=""${value === "" ? " selected" : ""}>${esc(dn)}</option>`]
+      // Rotation is chosen HERE, in the same control as any other identity,
+      // because "who does this company hear from" is one question with one
+      // answer. Picking a rotating profile binds the company instead of storing
+      // a per-company override — the address is decided per application.
+      const opts = [`<option value=""${value === "" && !rotc ? " selected" : ""}>${esc(dn)}</option>`]
         .concat(state.profiles
-          .filter((x) => x.id !== state.profileDefault)
-          .map((x) => `<option value="${esc(x.id)}"${value === x.id ? " selected" : ""}
-            >${esc(x.label || x.id)}${x.email ? ` · ${esc(x.email)}` : ""}</option>`));
+          .filter((x) => x.id !== state.profileDefault && x.kind !== "rotating")
+          .map((x) => `<option value="${esc(x.id)}"${value === x.id && !rotc ? " selected" : ""}
+            >${esc(x.label || x.id)}${x.email ? ` · ${esc(x.email)}` : ""}</option>`))
+        .concat(state.profiles.filter((x) => x.kind === "rotating")
+          .map((x) => `<option value="rot:${esc(x.id)}"${rotc && rotc.profile === x.id ? " selected" : ""}
+            >↻ ${esc(x.label || x.id)} — a new address every ${x.limit || 5}</option>`));
       return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
         <select ${attrs}>${opts.join("")}</select></label>`;
     }
@@ -411,10 +425,20 @@ function renderDetail() {
         n ? `${n} only here` : "all shared"}</span>
     </div>
     <div class="cp-dt-body">${CPREF_FIELDS.map(field).join("")}</div>
+    ${rotc ? `<div class="cp-dt-rotbar" title="Each application to ${esc(co)} goes out
+      under its own address; a new one is minted when this one reaches the limit.">
+      <span class="cp-dt-rotmark">↻</span>
+      <span class="cp-dt-rotmail">${rotc.email
+        ? esc(rotc.email) : "first address on the next application"}</span>
+      ${rotc.email ? `<span class="cp-dt-rotn mono">${rotc.used}/${rotc.limit}</span>` : ""}
+    </div>` : ""}
     <div class="cp-dt-foot">
-      <span class="cp-dt-hint">Edits apply to ${esc(co)} only.</span>
+      <span class="cp-dt-hint">${rotc ? "" : `Edits apply to ${esc(co)} only.`}</span>
       ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
         title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
+      ${rotc ? `<button class="cp-lk cp-add-btn cp-rot-go" id="cp-dt-rotgo" type="button"
+        data-co="${esc(co)}"
+        title="Point every un-sent ${esc(co)} job at the rotating address, tailor what has no résumé yet, and queue it all — no further approvals. Bounded by what the address has room for; anything gated on a real question is left alone.">Rotate &amp; approve all</button>` : ""}
       <button class="cp-lk cp-add-btn cp-add-go" id="cp-dt-scan" type="button"
         title="Scan ${esc(co)} now with these rules, score and tailor what it finds. Stops before applying.">Scan now</button>
     </div>`;
@@ -862,10 +886,27 @@ function locHtml(loc) {
 /* Only shown when a job uses something other than the default identity — a
    badge on every card would be noise, but a job quietly going out from the wrong
    address is exactly the thing worth surfacing. */
-function profHtml(id) {
+function profHtml(id, company) {
+  // A job at a rotating company with no identity yet is NOT on the default one:
+  // it was deliberately taken off whatever it had, and it gets its address as it
+  // is dispatched. Saying nothing here would read as "goes out as you".
+  if (!id && (state.rotation || []).some((r) => r.company === (company || "").trim().toLowerCase())) {
+    return `<div class="kc-prof is-rot" title="This company rotates its address. This job gets one the moment it is applied — the current one, or a fresh one if that is full.">↻ rotating</div>`;
+  }
   if (!id || id === state.profileDefault) return "";
-  const p = state.profiles.find((x) => x.id === id);
+  const p = state.profiles.find((x) => x.id === id) || aliasById(id);
   return `<div class="kc-prof" title="${esc((p && p.email) || id)}">◐ ${esc((p && p.label) || id)}</div>`;
+}
+
+/* A minted alias lives in the rotation ledger rather than the profile list, so
+   a card stamped with one would otherwise show a bare id. The ADDRESS is the
+   thing worth reading before approving a submission, so it is the label. */
+function aliasById(id) {
+  for (const co of state.rotation || []) {
+    const hit = (co.aliases || []).find((a) => a.id === id);
+    if (hit) return { id, label: hit.email, email: hit.email };
+  }
+  return null;
 }
 
 function laneCard(r) {
@@ -902,7 +943,7 @@ function laneCard(r) {
     <div class="kc-co">${esc(r.company)}</div>
     <div class="kc-role">${esc(r.title)}</div>
     ${locHtml(r.location)}
-    ${profHtml(r.profile_id)}
+    ${profHtml(r.profile_id, r.company)}
     ${live}
     <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${aged}${retry}</div>
   </div>`;
@@ -1063,8 +1104,14 @@ function gateMini(r) {
          title="Opens the filled application in Chrome again. Solve the CAPTCHA there and click Submit">▶ Solve &amp; submit</button>`
     : `<button class="kc-retry kc-apply" data-open="${esc(r.pk)}"
          title="Open the question and type an answer">✎ Answer</button>`;
-  const q = String(r.gate_question || defaultGateText(r))
-    .replace(/[#*_`>]/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+  // Cut at a WORD, not at character 200. "create a Perplexity.ai thread (Option
+  // 1: teach ..." stopped mid-phrase, so the card asked you to open the drawer to
+  // find out what the question even was — which is the one thing this card exists
+  // to save you.
+  const full = String(r.gate_question || defaultGateText(r))
+    .replace(/[#*_`>]/g, "").replace(/\s+/g, " ").trim();
+  const q = full.length <= 240 ? full
+    : full.slice(0, 240).replace(/\s+\S*$/, "") + "…";
   return `<div class="ncard" data-open="${esc(r.pk)}" role="button" tabindex="0"
       title="Open details">
     <div class="nc-co">${esc(r.company)}<span class="nc-role">${esc(r.title)}</span></div>
@@ -1198,6 +1245,32 @@ function flightSec(rows) {
    filtering: hiding NVIDIA must not move a Microsoft job up the line, and
    renumbering it to 1 would claim it did. Groups keep first appearance order,
    which IS dispatch order of each company's next job. */
+/* The selection bar, rendered on its own so a tick can refresh JUST this rather
+   than the whole pane. Re-rendering 291 rows on every checkbox meant a quick
+   second click landed on a node being replaced and was lost — the selection
+   looked like it only ever held one job. */
+/* Paint one row's ticked state and refresh the bar — in place, no re-render. */
+function qselPaint(row, on) {
+  if (row) row.classList.toggle("un-picked", !!on);
+  const bar = document.getElementById("qsel-bar");
+  if (bar) bar.innerHTML = qselBar((state.queue || {}).concurrency || 1);
+}
+
+function qselBar(cap) {
+  const n = state.qPicked.size;
+  if (!n) {
+    return `<span class="ps-hint">By company, in dispatch order. Runs ${cap} at a time, one per company.</span>
+      <button class="ps-link" data-qsel-all="1"
+        title="Select everything listed here, then Skip or Remove them in one go">Select all</button>`;
+  }
+  return `<span class="ps-hint">${n} selected</span>
+    <button class="ps-link on" data-qsel-none="1">Clear</button>
+    <button class="ps-link" data-qsel-remove="1"
+      title="Take the selected out of the queue. They stay on the board under Ready to apply">Remove ${n}</button>
+    <button class="ps-link un-skip" data-qsel-skip="1"
+      title="Skip the selected for good — they leave the queue and move to closed">Skip ${n}</button>`;
+}
+
 function queuedSec(rows) {
   const q = state.queue || {};
   const cap = q.concurrency || 1;
@@ -1222,7 +1295,11 @@ function queuedSec(rows) {
     const why = it.blocked === "company_busy" ? "waiting for the one running"
       : it.blocked === "backoff" ? `retry in ${Math.ceil(it.ready_in / 60)}m`
       : it.first ? "starts next" : "waiting for a slot";
-    return `<li class="un-row${it.first ? " un-next" : ""}">
+    return `<li class="un-row${it.first ? " un-next" : ""}${
+      state.qPicked.has(it.pk) ? " un-picked" : ""}">
+      <input type="checkbox" class="un-sel" data-qsel="${esc(it.pk)}"
+        ${state.qPicked.has(it.pk) ? "checked" : ""}
+        title="Select for a bulk action" aria-label="Select ${esc(r.title || it.pk)}" />
       <span class="un-pos mono" title="position in the whole queue">${it.pos}</span>
       <span class="un-title" data-open="${esc(it.pk)}" role="button" tabindex="0">${esc(r.title || it.pk)}</span>
       <span class="un-rank mono" title="position within ${esc(it.company)}">#${it.company_rank}</span>
@@ -1240,6 +1317,12 @@ function queuedSec(rows) {
       </span>
     </li>`;
   };
+
+  // Ticks are kept for jobs still IN the queue only, so one that drained or was
+  // skipped elsewhere cannot sit in the selection and be acted on twice.
+  const live = new Set(pend.map((it) => it.pk));
+  for (const pk of [...state.qPicked]) if (!live.has(pk)) state.qPicked.delete(pk);
+  const picked = state.qPicked.size;
 
   const single = groups.size === 1;
   const body = [...groups.entries()].map(([co, list]) => {
@@ -1259,6 +1342,10 @@ function queuedSec(rows) {
           <span class="un-gn mono" title="${list.length} job${list.length === 1 ? "" : "s"} queued">${list.length}</span>
           <span class="un-gstate${busy ? "" : head.first ? " next" : ""}">${stateTxt}</span>
         </button>
+        ${(state.rotation || []).some((r) => r.company === (co || "").trim().toLowerCase())
+          ? `<button class="ps-link un-rot" data-act="rot-co" data-company="${esc(co)}"
+              title="Re-point ${esc(co)}'s un-sent jobs at its rotating address — including these, which were queued under the old one — and put every tailored one in line. It stops at the queue; Process runs them."
+            >↻ Rotate &amp; queue</button>` : ""}
         <button class="ps-link un-go${busy ? "" : " on"}" data-act="drain-co"
           data-company="${esc(co)}"${busy ? " disabled" : ""}
           title="${busy ? `${esc(co)} already has one running`
@@ -1275,7 +1362,7 @@ function queuedSec(rows) {
       <span class="ps-name">Queued to apply</span>
       <span class="ps-n mono">${pend.length}</span>
       <span class="ps-chip">${groups.size} compan${groups.size === 1 ? "y" : "ies"}</span>
-      <span class="ps-hint">By company, in dispatch order. Runs ${cap} at a time, one per company.</span>
+      <span class="qsel-bar" id="qsel-bar">${qselBar(cap)}</span>
     </div>
     <div class="un-groups">${body}</div>
   </section>`;
@@ -1319,7 +1406,9 @@ function foundGroup(co, rows, forceOpen) {
     title="${freshN} posting${freshN === 1 ? "" : "s"} the employer published in the last 2 days">${freshN} new</span>` : "";
   const key = `co:${co}`;
   const shown = state.page[key] || REVEAL;
+  const rotates = (state.rotation || []).some((x) => x.company === (co || "").trim().toLowerCase());
   return `<div class="fgroup${open ? " open" : ""}">
+    <div class="fg-headrow">
     <button class="fg-head" data-co-fold="${esc(co)}" aria-expanded="${open}"
       title="${open ? "Hide" : "Show"} the postings found at ${esc(co)}">
       <span class="ps-caret" aria-hidden="true"></span>
@@ -1329,6 +1418,9 @@ function foundGroup(co, rows, forceOpen) {
         ? `<span class="fg-best mono">best ${scoreHtml(best)} · ${scored} scored</span>`
         : `<span class="fg-best mono">not scored yet</span>`}
     </button>
+    ${rotates ? `<button class="fg-rot" data-act="rot-co" data-company="${esc(co)}"
+      title="${esc(co)} rotates its address. These have no résumé yet, so nothing is decided for them and no address is spent — press to put everything of ${esc(co)}'s that IS ready into the queue under the rotating address.">↻</button>` : ""}
+    </div>
     ${open ? `<div class="jrows fg-rows">${rows.slice(0, shown).map(foundRow).join("")}
       ${rows.length > shown ? moreBtn(key, shown, rows.length) : ""}</div>` : ""}
   </div>`;
@@ -1402,6 +1494,43 @@ function closedSec(rows) {
   </section>`;
 }
 
+/* The bar that appears when the board is filtered to ONE company: everything
+   about that employer's identity, where you are already looking at its pipeline.
+   Rotation used to be reachable only from Discover, which is the pane for
+   finding jobs, not for deciding who the applications come from. */
+/* Which rotating profile a company is bound to — needed when only the limit is
+   being changed, since binding is one call that carries both. */
+function rotProfileFor(co) {
+  const r = (state.rotation || []).find((x) => x.company === (co || "").trim().toLowerCase());
+  return (r && r.profile) || ((state.profiles || []).find((p) => p.kind === "rotating") || {}).id || "";
+}
+
+function companyBar() {
+  const co = state.coFilter;
+  if (!co) return "";
+  const rot = (state.rotation || []).find((r) => r.company === co.trim().toLowerCase());
+  const rotators = (state.profiles || []).filter((p) => p.kind === "rotating");
+  if (!rot && !rotators.length) return "";   // nothing to offer until one exists
+
+  const body = rot ? `
+    <span class="cbar-mark">↻</span>
+    <span class="cbar-mail" title="Every application to ${esc(co)} goes out under this address until it reaches its limit, then a fresh one is minted.">${
+      rot.email ? esc(rot.email) : "first address on the next application"}</span>
+    ${rot.email ? `<span class="cbar-n mono">${rot.used}/${rot.limit}</span>` : ""}
+    <label class="cbar-lim" title="How many applications ONE address may carry at ${esc(co)}. Your notes: Ramp allows 2, Coinbase 3, OpenAI and Waymo 5.">cap
+      <input type="number" min="1" max="50" value="${rot.limit}" data-rot-limit="${esc(co)}" /></label>
+    <button class="ps-link cp-rot-go" data-act="rot-co" data-company="${esc(co)}"
+      title="Re-point ${esc(co)}'s un-sent jobs at the rotating address and queue everything that has a résumé. Nothing is applied.">Rotate &amp; queue</button>
+    <button class="ps-link" data-rot-off="${esc(co)}"
+      title="Stop rotating for ${esc(co)}. Addresses already used are kept on record.">off</button>`
+  : `<span class="cbar-hint">${esc(co)} applies under your default identity.</span>
+    <button class="ps-link cp-rot-go" data-rot-on="${esc(co)}" data-profile="${esc(rotators[0].id)}"
+      title="Give ${esc(co)} its own rotating address: a new one every ${rotators[0].limit || 5} applications, so no single address carries more than the employer's cap allows.">↻ Rotate addresses here</button>`;
+
+  return `<div class="cbar${rot ? " on" : ""}">
+    <span class="cbar-co">${esc(co)}</span>${body}</div>`;
+}
+
 function viewPipeline() {
   if (!state.apps.length) {
     return `<div class="empty"><div class="empty-big">No applications yet</div>
@@ -1414,6 +1543,7 @@ function viewPipeline() {
   const shown = Object.values(S).reduce((a, b) => a + b.length, 0);
   if (!shown && filtersActive()) return emptyFiltered();
   return `<div class="pstack">
+    ${companyBar()}
     ${needsSec(S.needs)}
     ${readySec(S.ready)}
     ${queuedSec(S.queued)}
@@ -3112,6 +3242,24 @@ function paneAction(act, pk, el) {
     markBusy(pk, "queued…");
     post(`/actions/queue-apply/${encodeURIComponent(pk)}`).then(() => loadQueue());
     toast("Queued — it applies when a browser lane is free.");
+  } else if (act === "rot-co") {
+    // Ends at the queue, deliberately. Queueing is reversible and reviewable;
+    // starting half an hour of browser sessions is the next button along.
+    const co = (el && el.dataset.company) || "";
+    if (demoGuard()) return;
+    el.disabled = true;
+    el.classList.add("is-busy");
+    el.textContent = "↻ rotating…";
+    post("/actions/rotate-and-approve", { company: co }).then((r) => {
+      el.disabled = false;
+      el.classList.remove("is-busy");
+      el.textContent = "↻ Rotate & queue";
+      toast(r && r.ok
+        ? `${co}: ${r.queued} queued, applying as ${r.email} onward${
+            r.tailoring ? ` · ${r.tailoring} tailoring first` : ""} — hit Process to run them.`
+        : (r && r.error) || "Could not rotate that company.");
+      loadQueue(); loadApps();
+    });
   } else if (act === "drain-co") {
     // From the button's own dataset: paneAction is handed the element, not the
     // event, so there is no e.target here.
@@ -3129,6 +3277,28 @@ function paneAction(act, pk, el) {
                       : (r && r.error) || "Could not start it.");
       loadQueue(); loadApps();
     });
+  } else if (act === "qsel-bulk") {
+    // Skip and Remove, over a tick list. Each job still goes through the SAME
+    // endpoint one at a time — a bulk button is a convenience over the existing
+    // action, never a second path that could disagree with it about what
+    // skipping means.
+    const pks = [...state.qPicked];
+    if (!pks.length) return;
+    const skip = el.dataset.mode === "skip";
+    if (skip && !confirm(`Skip ${pks.length} job${pks.length === 1 ? "" : "s"}?`
+        + `\n\nThey leave the queue and move to closed. Removing instead keeps`
+        + ` them on the board under Ready to apply.`)) return;
+    el.disabled = true;
+    el.classList.add("is-busy");
+    const url = (pk) => skip ? `/actions/skip/${encodeURIComponent(pk)}`
+                             : `/actions/queue-remove/${encodeURIComponent(pk)}`;
+    Promise.all(pks.map((pk) => post(url(pk)).catch(() => null))).then((rs) => {
+      const ok = rs.filter((r) => r && (r.ok || r.note)).length;
+      state.qPicked.clear();
+      toast(`${ok} of ${pks.length} ${skip ? "skipped" : "taken out of the queue"}`
+          + (ok < pks.length ? " — the rest could not be, and are still listed." : "."));
+      loadQueue(); loadApps();
+    });
   } else if (act === "queue-remove") {
     post(`/actions/queue-remove/${encodeURIComponent(pk)}`).then((r) => {
       toast(r && r.ok ? "Out of the queue — still on the board under Ready to apply."
@@ -3139,19 +3309,32 @@ function paneAction(act, pk, el) {
     // Confirmed because it is the one that closes the job, not just unqueues it.
     if (!confirm("Skip this job? It leaves the queue and moves to closed.")) return;
     post(`/actions/skip/${encodeURIComponent(pk)}`).then((r) => {
-      toast(r && r.note ? r.note : "Skipped and removed from the queue.");
+      toast(r && r.ok ? "Skipped and removed from the queue."
+                      : (r && r.note) || "Couldn't skip it.");
       loadQueue(); loadApps();
     });
   } else if (act === "skip") {
     if (!confirm("Skip this job? It moves to closed.")) return;
-    post(`/actions/skip/${encodeURIComponent(pk)}`);
-    toast("Skipped.");
+    // The response is READ. It used to say "Skipped." unconditionally, so a
+    // refusal — an application already sent, or one mid-submit — looked exactly
+    // like a skip that worked, and the card said something else afterwards.
+    post(`/actions/skip/${encodeURIComponent(pk)}`).then((r) => {
+      toast(r && r.ok ? "Skipped." : (r && r.note) || "Couldn't skip it.");
+      loadApps();
+    });
   } else if (act === "retry") {
     post(`/actions/retry/${encodeURIComponent(pk)}`);
     toast("Retrying — re-running the pipeline for this job.");
   } else if (act === "mark-applied") {
     post(`/actions/mark-applied/${encodeURIComponent(pk)}`);
     toast("Marked applied — won't resubmit.");
+  } else if (act === "reopen") {
+    post(`/actions/reopen/${encodeURIComponent(pk)}`).then((d) => {
+      toast(d && d.ok
+        ? `Back in play (was ${d.was || "closed"}) — scoring it again now.`
+        : (d && d.note) || "Couldn't reopen it.");
+      loadApps();
+    });
   }
   scheduleReload();
 }
@@ -3286,12 +3469,20 @@ function openDrawer(pk) {
     </div>` : "";
 
   const canRetry = RETRYABLE.includes(r.status);
+  // A closed job that was never sent can go back in play. It is offered on the
+  // skipped ones especially: a role skipped as a low score under preferences you
+  // have since fixed had no way back, and "Run now" silently refused it.
+  const canReopen = !["applied", "applied_manual", "submitting"].includes(r.status)
+                    && !r.confirmation_id
+                    && ["skipped", "failed", "error", "job_gone", "capped"].includes(r.status);
   const closed = r.closed_reason ? `
     <div class="section closed-box">
       <div class="section-t">why it ${canRetry ? "failed" : "closed"}</div>
       <div class="closed-why">${esc(r.closed_reason)}</div>
-      ${canRetry ? `<div class="drawer-actions">
-        <button class="btn btn-primary" data-act="retry" data-pk="${esc(r.pk)}">Retry</button>
+      ${canRetry || canReopen ? `<div class="drawer-actions">
+        ${canRetry ? `<button class="btn btn-primary" data-act="retry" data-pk="${esc(r.pk)}">Retry</button>` : ""}
+        ${canReopen ? `<button class="btn btn-ghost" data-act="reopen" data-pk="${esc(r.pk)}"
+          title="Put it back in play and score it again from scratch, using your preferences as they are now. Nothing is submitted.">↺ Reopen &amp; re-score</button>` : ""}
       </div>` : ""}
     </div>` : "";
 
@@ -3372,10 +3563,16 @@ function openDrawer(pk) {
         <select id="job-profile" data-job-profile="${esc(r.pk)}">
           <option value=""${r.profile_id ? "" : " selected"}>default${
             state.profileDefault ? " — " + esc((state.profiles.find(p => p.id === state.profileDefault) || {}).label || "") : ""}</option>
-          ${state.profiles.map((p) => `<option value="${esc(p.id)}"${p.id === r.profile_id ? " selected" : ""}>${esc(p.label)} · ${esc(p.email)}</option>`).join("")}
+          ${aliasById(r.profile_id) ? `<option value="${esc(r.profile_id)}" selected>rotating · ${
+            esc(aliasById(r.profile_id).email)}</option>` : ""}
+          ${state.profiles.filter((p) => p.kind !== "rotating")
+            .map((p) => `<option value="${esc(p.id)}"${p.id === r.profile_id ? " selected" : ""}>${esc(p.label)} · ${esc(p.email)}</option>`).join("")}
         </select>
         <div class="profpick-note">Changing this re-tailors the résumé so its
-          contact details match what gets typed into the form.</div>
+          contact details match what gets typed into the form.${
+          aliasById(r.profile_id) ? ` This address was minted for ${esc(r.company || "this company")}
+            and is counted against its limit; picking another one here leaves it
+            counted, because the slot is what protects the address.` : ""}</div>
       </div></div>
 
     <div class="section"><div class="section-t">everything the agent did
@@ -3945,6 +4142,25 @@ function wire() {
     const co = el.dataset.co, f = CPREF_FIELDS.find((x) => x.k === el.dataset.cpref);
     if (!co || !f) return;
     const raw = el.value.trim();
+    // "Apply as" carries both kinds of answer. A rotating choice is not a
+    // per-company override — there is no one address to store — so it binds the
+    // company instead, and picking anything else unbinds it.
+    if (f.prof) {
+      const bound = (state.rotation || []).some((r) => r.company === co.toLowerCase());
+      if (raw.startsWith("rot:")) {
+        const d = await post("/actions/rotation", { company: co, profile_id: raw.slice(4) });
+        if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that up."); return; }
+        toast(`${co}: a new address every ${d.limit} applications.`);
+        await loadRotation();
+        renderPicker();
+        return;
+      }
+      if (bound) {
+        await post("/actions/rotation", { company: co, profile_id: "" });
+        await loadRotation();
+        toast(`${co} no longer rotates. Addresses already used are kept.`);
+      }
+    }
     const over = state.cprefs[co.toLowerCase()] || {};
     const shown = cpAsText(over[f.k] !== undefined ? over[f.k] : (state.prefs || {})[f.k], f);
     if (raw === shown) return;                                  // untouched
@@ -3976,6 +4192,28 @@ function wire() {
     if (e.target.tagName === "SELECT" && e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
   });
   $("#cp-detail").addEventListener("click", async (e) => {
+    // Rotate & approve: re-point what is in flight, then queue it. One press,
+    // because doing the two halves separately queues jobs under the address
+    // being retired.
+    const rotgo = e.target.closest("#cp-dt-rotgo");
+    if (rotgo) {
+      if (demoGuard()) return;
+      const company = rotgo.dataset.co;
+      rotgo.disabled = true;
+      rotgo.classList.add("is-busy");
+      rotgo.textContent = "rotating…";
+      const d = await post("/actions/rotate-and-approve", { company });
+      rotgo.disabled = false;
+      rotgo.classList.remove("is-busy");
+      rotgo.textContent = "Rotate & queue";
+      if (!d || !d.ok) { toast((d && d.error) || "Couldn't rotate that company."); return; }
+      toast(`${company}: ${d.queued} queued as ${d.email}`
+          + (d.tailoring ? ` · ${d.tailoring} tailoring now, queued when ready` : "")
+          + (d.left ? ` · ${d.left} left for the next address` : "")
+          + (d.blocked ? ` · ${d.blocked} still need a real answer` : ""));
+      loadRotation(); loadApps();
+      return;
+    }
     if (e.target.closest("#cp-dt-scan")) {
       clearTimeout(_rescanTimer);        // scanning now; do not scan twice
       const co = state.detailCo;
@@ -4121,6 +4359,7 @@ function wire() {
     } catch { state.profiles = []; }
     renderProfiles();
     renderProfilePickers();
+    loadRotation();
   }
   function renderProfiles() {
     const list = $("#pr-list");
@@ -4132,26 +4371,79 @@ function wire() {
         whatever is in your facts.</div>`;
       return;
     }
-    list.innerHTML = state.profiles.map((p) => `
-      <div class="pr-row${p.id === state.profileDefault ? " is-default" : ""}">
+    list.innerHTML = state.profiles.map((p) => {
+      // A rotating profile is a template, not an identity: its own address never
+      // reaches a form, so the two buttons that would SEND under it — "use for
+      // all" and "default" — are the wrong offer and are not shown.
+      const rot = p.kind === "rotating";
+      return `
+      <div class="pr-row${p.id === state.profileDefault ? " is-default" : ""}${rot ? " is-rot" : ""}">
         <div class="pr-main">
           <div class="pr-label">${esc(p.label)}${p.id === state.profileDefault
-            ? '<span class="pr-tag">DEFAULT</span>' : ""}</div>
-          <div class="pr-meta">${esc(p.email)}${p.phone ? " · " + esc(p.phone) : ""}</div>
+            ? '<span class="pr-tag">DEFAULT</span>' : ""}${rot
+            ? `<span class="pr-tag rot">ROTATING · ${p.limit || 5} each</span>` : ""}</div>
+          <div class="pr-meta" title="${esc(p.email)}${p.phone ? " · " + esc(p.phone) : ""}">${
+            rot ? "base " : ""}${esc(p.email)}</div>
         </div>
-        <button class="pr-act use" data-prof-all="${esc(p.id)}"
-          title="Re-render every tailored résumé with this profile's details, ready to apply. No model is called.">use for all</button>
-        ${p.id === state.profileDefault ? "" :
+        ${rot ? "" : `<button class="pr-act use" data-prof-all="${esc(p.id)}"
+          title="Re-render every tailored résumé with this profile's details, ready to apply. No model is called.">use for all</button>`}
+        ${rot || p.id === state.profileDefault ? "" :
           `<button class="pr-act" data-prof-default="${esc(p.id)}" title="Make default">default</button>`}
         <button class="pr-act del" data-prof-del="${esc(p.id)}" title="Remove">✕</button>
+      </div>`;
+    }).join("");
+    renderRotation();
+  }
+
+  // --- rotation: which companies get an alias per application ---------------
+  // The count shown is derived from the rows themselves, so it is what actually
+  // happened rather than a number something remembered to update.
+  async function loadRotation() {
+    try {
+      const r = await fetch(api("/rotation"), { headers: auth.header() });
+      state.rotation = ((await r.json()) || {}).companies || [];
+    } catch { state.rotation = []; }
+    renderRotation();
+  }
+  function renderRotation() {
+    const box = $("#pr-rot"), list = $("#pr-rot-list");
+    const rows = state.rotation || [];
+    // The top-level control belongs to the same data, so it is kept in step here
+    // rather than in a second place that could disagree with this one.
+    const all = $("#btn-rotate-all");
+    if (all) {
+      all.hidden = !rows.length;
+      const n = $("#rot-count");
+      if (n) { n.hidden = !rows.length; n.textContent = String(rows.length); }
+    }
+    if (!box) return;
+    // Only worth the space once something actually rotates: an empty section
+    // explaining a feature nobody has turned on is the definition of clutter.
+    box.hidden = !rows.length;
+    if (!rows.length) return;
+    list.innerHTML = rows.map((r) => `
+      <div class="prr-row">
+        <div class="pr-main">
+          <div class="pr-label">${esc(r.company)}</div>
+          <div class="pr-meta" title="${esc(r.style)} · ${r.minted} minted so far">${
+            r.email ? esc(r.email) + ` · ${r.used}/${r.limit}`
+                    : "first address on the next application"}</div>
+        </div>
+        <button class="pr-act" data-rot-retire="${esc(r.company)}"
+          title="Retire this address so the next application starts on a fresh one. Use it when the board refused under its own cap while this address was still below the limit.">retire</button>
+        <button class="pr-act del" data-rot-unbind="${esc(r.company)}"
+          title="Stop rotating for this company. Addresses already used are kept.">✕</button>
       </div>`).join("");
   }
   function renderProfilePickers() {
     const sel = $("#cp-profile");
     if (!sel) return;
     const cur = sel.value;
+    // Rotating profiles are absent by design: picking one would mean applying
+    // under the base address, which is the one thing rotation exists to prevent.
     sel.innerHTML = `<option value="">default profile</option>` +
-      state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+      state.profiles.filter((p) => p.kind !== "rotating")
+        .map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
     sel.value = cur;
   }
   async function saveProfiles(profiles, def) {
@@ -4178,11 +4470,70 @@ function wire() {
     const email = $("#pr-email").value.trim();
     if (!email) { toast("An email address is required."); return; }
     const label = $("#pr-label").value.trim() || email.split("@")[0];
-    const next = [...state.profiles, { id: label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-                                       label, email, phone: $("#pr-phone").value.trim() }];
+    const rotating = ($("#pr-rotating") || {}).checked;
+    const row = { id: label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+                  label, email, phone: $("#pr-phone").value.trim() };
+    if (rotating) {
+      row.kind = "rotating";
+      row.limit = Number($("#pr-limit").value) || 5;
+      row.style = ($("#pr-style") || {}).value || "plus";
+    }
+    const next = [...state.profiles, row];
     $("#pr-label").value = $("#pr-email").value = $("#pr-phone").value = "";
-    saveProfiles(next, state.profileDefault || next[0].id);
+    if ($("#pr-rotating")) $("#pr-rotating").checked = false;
+    if ($("#pr-add-form")) {           // fold it away again — the list is the point
+      $("#pr-add-form").hidden = true;
+      $("#pr-new").textContent = "＋ new";
+      $("#pr-new").setAttribute("aria-expanded", "false");
+    }
+    // A rotating profile must never become the default — its base address is
+    // exactly the one being kept off every form.
+    const fallback = next.find((p) => p.kind !== "rotating");
+    saveProfiles(next, state.profileDefault || (fallback || {}).id || "");
   });
+
+  // Every rotating company, one press. It confirms first: it moves work for
+  // several employers at once, and the count is the only honest way to say how
+  // much before it happens.
+  $("#btn-rotate-all")?.addEventListener("click", async () => {
+    if (demoGuard()) return;
+    const cos = (state.rotation || []).map((r) => r.company);
+    if (!cos.length) return;
+    if (!confirm(`Rotate and queue ${cos.length} compan${cos.length === 1 ? "y" : "ies"}`
+               + ` — ${cos.join(", ")}?\n\nEvery un-sent job at these employers is`
+               + ` re-pointed at that employer's rotating address, and each one with`
+               + ` a résumé goes into the apply queue.\n\nNothing is applied: the`
+               + ` queue is where you press Process.`)) return;
+    // It re-points and queues across several employers, which takes seconds, and
+    // a button that just sits there reads as a button that did nothing.
+    const btn = $("#btn-rotate-all");
+    const label = btn.firstChild;
+    btn.disabled = true;
+    btn.classList.add("is-busy");
+    if (label) label.textContent = "↻ Rotating…";
+    toast(`Rotating ${cos.length} compan${cos.length === 1 ? "y" : "ies"}…`);
+    const d = await post("/actions/rotate-and-approve", { company: "__all__" });
+    btn.disabled = false;
+    btn.classList.remove("is-busy");
+    if (label) label.textContent = "↻ Rotate & queue all";
+    if (!d || !d.ok) { toast((d && d.error) || "Couldn't rotate."); return; }
+    toast(`${d.queued} queued across ${d.companies} compan${
+      d.companies === 1 ? "y" : "ies"}${d.tailoring ? ` · ${d.tailoring} tailoring first` : ""}`
+      + " — hit Process on a company to run them.");
+    loadRotation(); loadQueue(); loadApps();
+  });
+
+  // The add form is folded away by default. With nine profiles in the list, a
+  // permanently open four-field form is most of the panel, and reading which
+  // address a job goes out under is what this panel is opened for.
+  $("#pr-new")?.addEventListener("click", () => {
+    const form = $("#pr-add-form");
+    form.hidden = !form.hidden;
+    $("#pr-new").setAttribute("aria-expanded", String(!form.hidden));
+    $("#pr-new").textContent = form.hidden ? "＋ new" : "close";
+    if (!form.hidden) $("#pr-label").focus();
+  });
+
   pm.addEventListener("click", (e) => {
     const mk = e.target.closest("[data-prof-default]");
     if (mk) { saveProfiles(state.profiles, mk.dataset.profDefault); return; }
@@ -4203,6 +4554,30 @@ function wire() {
             reload();
           } else toast((d && d.error) || "Couldn't re-render.");
         });
+      return;
+    }
+    const retire = e.target.closest("[data-rot-retire]");
+    if (retire) {
+      if (demoGuard()) return;
+      const co = retire.dataset.rotRetire;
+      if (!confirm(`Retire the address ${co} is applying under?\n\nThe next `
+                 + `application there mints a fresh one. Nothing already sent `
+                 + `changes, and the retired address stays on record.`)) return;
+      post("/actions/rotation-retire", { company: co }).then((d) => {
+        toast(d && d.ok ? `${co} will mint a new address next time.`
+                        : "Nothing to retire there.");
+        loadRotation();
+      });
+      return;
+    }
+    const unbind = e.target.closest("[data-rot-unbind]");
+    if (unbind) {
+      if (demoGuard()) return;
+      const co = unbind.dataset.rotUnbind;
+      post("/actions/rotation", { company: co, profile_id: "" }).then(() => {
+        toast(`${co} no longer rotates. Addresses already used are kept.`);
+        loadRotation();
+      });
       return;
     }
     const del = e.target.closest("[data-prof-del]");
@@ -4521,6 +4896,66 @@ function wire() {
       }
       return;
     }
+    // Bulk selection in the queue. Ticks re-render the pane rather than mutating
+    // the row in place, because the section head has to show the count and the
+    // actions that only exist while something is ticked.
+    // Turning rotation on or off for the company the board is filtered to.
+    const rotOn = e.target.closest("[data-rot-on]");
+    if (rotOn) {
+      if (demoGuard()) return;
+      const company = rotOn.dataset.rotOn;
+      rotOn.disabled = true;
+      rotOn.classList.add("is-busy");
+      post("/actions/rotation", { company, profile_id: rotOn.dataset.profile })
+        .then(async (d) => {
+          if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that up."); return; }
+          await loadRotation();
+          toast(`${company}: a new address every ${d.limit} applications. `
+              + `Rotate & queue moves its un-sent work over.`);
+          renderPane();
+        });
+      return;
+    }
+    const rotOff = e.target.closest("[data-rot-off]");
+    if (rotOff) {
+      if (demoGuard()) return;
+      const company = rotOff.dataset.rotOff;
+      post("/actions/rotation", { company, profile_id: "" }).then(async () => {
+        await loadRotation();
+        toast(`${company} no longer rotates. Addresses already used are kept.`);
+        renderPane();
+      });
+      return;
+    }
+    const tick = e.target.closest("[data-qsel]");
+    if (tick) {
+      const pk = tick.dataset.qsel;
+      state.qPicked.has(pk) ? state.qPicked.delete(pk) : state.qPicked.add(pk);
+      qselPaint(tick.closest(".un-row"), state.qPicked.has(pk));
+      return;
+    }
+    if (e.target.closest("[data-qsel-all]")) {
+      document.querySelectorAll("[data-qsel]").forEach((cb) => {
+        state.qPicked.add(cb.dataset.qsel);
+        cb.checked = true;
+        qselPaint(cb.closest(".un-row"), true);
+      });
+      return;
+    }
+    if (e.target.closest("[data-qsel-none]")) {
+      state.qPicked.clear();
+      document.querySelectorAll("[data-qsel]").forEach((cb) => {
+        cb.checked = false;
+        qselPaint(cb.closest(".un-row"), false);
+      });
+      return;
+    }
+    const bulk = e.target.closest("[data-qsel-skip], [data-qsel-remove]");
+    if (bulk) {
+      bulk.dataset.mode = bulk.hasAttribute("data-qsel-skip") ? "skip" : "remove";
+      paneAction("qsel-bulk", "", bulk);
+      return;
+    }
     const act = e.target.closest("[data-act]");
     if (act) { paneAction(act.dataset.act, act.dataset.pk, act); return; }
     const pco = e.target.closest("[data-passed-co]");
@@ -4571,6 +5006,22 @@ function wire() {
   // come. This used to rebuild the whole pane and then hunt for the checkbox
   // to hand focus back to, which is how mid rebuild clicks were being eaten.
   $("#pane").addEventListener("change", (e) => {
+    // The per-company cap. Employers do not share a number — your notes have
+    // Ramp at 2 and Coinbase at 3 — and until now the only way to say so was to
+    // edit the ledger by hand.
+    const lim = e.target.closest("[data-rot-limit]");
+    if (lim) {
+      const company = lim.dataset.rotLimit;
+      const limit = Math.max(1, Number(lim.value) || 5);
+      post("/actions/rotation", { company, profile_id: rotProfileFor(company), limit })
+        .then(async (d) => {
+          if (!d || !d.ok) { toast((d && d.error) || "Couldn't save that."); return; }
+          await loadRotation();
+          toast(`${company}: a new address every ${d.limit} applications.`);
+          renderPane();
+        });
+      return;
+    }
     const cb = e.target.closest("input[data-fresh-co]");
     if (!cb) return;
     if (cb.checked) state.freshPicked.add(cb.value); else state.freshPicked.delete(cb.value);

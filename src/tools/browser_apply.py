@@ -147,8 +147,19 @@ def _map_fields(fields: list, facts: dict, company: str, jd_text: str) -> dict:
     flist = "\n".join(_fline(f) for f in fields
                       if f.get("label") and f.get("type") not in ("file", "submit", "button"))
     keys = "\n".join(f"- {k!r}" for k, v in facts.items() if v)
+    # The role, which this prompt used to omit entirely. Several facts can answer
+    # the same question truthfully — a preferred technical domain, a primary
+    # language, which project to point at — and without knowing what the job IS
+    # the mapper picked whichever came first, so a backend fact went to an ML
+    # posting and read as a candidate who had not looked at the role. The JD is
+    # only ever used to CHOOSE between the owner's own answers; values are still
+    # substituted in code, so nothing here can invent one.
+    role = (jd_text or "").strip()
+    context = (f"THE ROLE — {company}:\n{role[:1500]}\n\n" if role
+               else f"THE ROLE: a posting at {company}.\n\n")
     prompt = (
         "Map each job-application form field to the candidate fact that answers it.\n\n"
+        + context +
         "FORM FIELDS — a [choice-group] is one QUESTION answered by picking one of "
         f"its options:\n{flist}\n\n"
         f"AVAILABLE FACT KEYS (the only permitted sources):\n{keys}\n\n"
@@ -160,6 +171,16 @@ def _map_fields(fields: list, facts: dict, company: str, jd_text: str) -> dict:
         "describe…).\n"
         "- \"SKIP\" for fields that are optional AND have no matching fact (EEO "
         "demographics with no fact value, marketing opt-ins), or don't apply.\n"
+        "An open invitation to say something ('Additional information', 'Anything "
+        "else you would like us to know', 'Additional comments', an optional cover "
+        "letter or note) is ESSAY, never SKIP. It is optional to the form but it is "
+        "free space to make the case, and leaving it blank forfeits that for nothing. "
+        "SKIP still applies to demographics, opt ins and fields that genuinely do not "
+        "apply to this candidate.\n"
+        "When SEVERAL facts could answer the same field truthfully — a preferred "
+        "technical domain, a project to cite, an area of expertise — choose the one "
+        "closest to THE ROLE above. Relevance is the only tie-breaker; never pick a "
+        "fact that is untrue of the candidate to make it fit.\n"
         "Never map a field to a fact that doesn't answer it."
     )
     model = get_settings().agent_model("") or "openai/gpt-4.1-mini"

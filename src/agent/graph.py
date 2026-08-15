@@ -164,6 +164,17 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
     company = st.get("company", "")
     stores = make_stores()
     facts = stores.answer_bank.all_facts(company)
+    # Last call on which address this goes out under. A job tailored before this
+    # company started rotating still carries the old one, and this is the last
+    # moment to fix it — the résumé is re-rendered from its saved .tex, so the
+    # PDF and the form still agree.
+    from core import rotation as _rotation
+
+    # Deliberately NOT wrapped. If this company rotates and no address can be
+    # assigned, the application must not go out at all — falling back to the base
+    # address is the one outcome rotation exists to prevent, and it cannot be
+    # undone. The failure is loud and nothing is submitted.
+    _rotation.ensure(pk, company, stores)
     # Same override as the direct-apply path: the chosen profile's contact details
     # win, so the form and the attached résumé always agree.
     from core import profiles as _profiles
