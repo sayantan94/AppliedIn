@@ -4408,6 +4408,28 @@ function wire() {
   function renderRotation() {
     const box = $("#pr-rot"), list = $("#pr-rot-list");
     const rows = state.rotation || [];
+    const rotators = (state.profiles || []).filter((p) => p.kind === "rotating");
+    // The section appears as soon as a rotating profile exists, not only once
+    // some company already uses one — otherwise the control that turns the first
+    // one on is hidden behind having turned one on.
+    if (box) box.hidden = !rotators.length;
+    const sel = $("#pr-rot-prof");
+    if (sel) {
+      sel.innerHTML = rotators
+        .map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+      sel.hidden = rotators.length < 2;      // no choice to make with one
+    }
+    const dl = $("#pr-rot-cos");
+    if (dl) {
+      // Every watchlist company, as suggestions. The field stays free text, so a
+      // company that is not on the watchlist can still be bound.
+      const bound = new Set(rows.map((r) => r.company));
+      dl.innerHTML = (state.companies || [])
+        .map((c) => (c && c.name) || c).filter(Boolean)
+        .filter((n) => !bound.has(String(n).toLowerCase()))
+        .map((n) => `<option value="${esc(n)}"></option>`).join("");
+    }
+    if (!rotators.length) return;
     // The top-level control belongs to the same data, so it is kept in step here
     // rather than in a second place that could disagree with this one.
     const all = $("#btn-rotate-all");
@@ -4416,11 +4438,12 @@ function wire() {
       const n = $("#rot-count");
       if (n) { n.hidden = !rows.length; n.textContent = String(rows.length); }
     }
-    if (!box) return;
-    // Only worth the space once something actually rotates: an empty section
-    // explaining a feature nobody has turned on is the definition of clutter.
-    box.hidden = !rows.length;
-    if (!rows.length) return;
+    if (!list) return;
+    if (!rows.length) {
+      list.innerHTML = `<div class="cp-none">No company rotates yet. Name one below
+        and every application to it gets its own address.</div>`;
+      return;
+    }
     list.innerHTML = rows.map((r) => `
       <div class="prr-row">
         <div class="pr-main">
@@ -4521,6 +4544,31 @@ function wire() {
       d.companies === 1 ? "y" : "ies"}${d.tailoring ? ` · ${d.tailoring} tailoring first` : ""}`
       + " — hit Process on a company to run them.");
     loadRotation(); loadQueue(); loadApps();
+  });
+
+  // Bind ANY company from here — the datalist suggests the watchlist, but the
+  // field is free text, so a company you have not tracked yet can be set up
+  // before its first job is even discovered.
+  const bindRotation = async () => {
+    if (demoGuard()) return;
+    const input = $("#pr-rot-co");
+    const company = (input.value || "").trim();
+    if (!company) { toast("Which company should rotate?"); return; }
+    const profile = $("#pr-rot-prof").value
+      || ((state.profiles || []).find((p) => p.kind === "rotating") || {}).id;
+    if (!profile) { toast("Add a rotating profile first."); return; }
+    const d = await post("/actions/rotation", {
+      company, profile_id: profile, limit: Number($("#pr-rot-limit").value) || 0,
+    });
+    if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that up."); return; }
+    input.value = "";
+    await loadRotation();
+    toast(`${company}: a new address every ${d.limit} applications.`);
+    renderPane();       // the board's company markers follow the binding
+  };
+  $("#pr-rot-bind")?.addEventListener("click", bindRotation);
+  $("#pr-rot-co")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); bindRotation(); }
   });
 
   // The add form is folded away by default. With nine profiles in the list, a

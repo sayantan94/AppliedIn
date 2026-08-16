@@ -349,9 +349,22 @@
                        rules (Discover → pick a company → Apply as), so this is
                        the summary of where it is already on, not a second place
                        to set it up. -->
+                  <!-- Turning rotation on for a company lives HERE as well as on
+                       that company's own pane. Reaching it only through Discover
+                       meant finding the company first, which is a search to answer
+                       a question you already know the answer to. -->
                   <div class="pr-rot" id="pr-rot" hidden>
-                    <div class="cp-role-h">Rotating <span class="pr-rot-hint">— set per company under Discover</span></div>
+                    <div class="cp-role-h">Rotating <span class="pr-rot-hint">— one address per company, replaced at its limit</span></div>
                     <div id="pr-rot-list" class="pr-rot-list"></div>
+                    <div class="pr-rot-add">
+                      <input id="pr-rot-co" class="cp-search" type="text" list="pr-rot-cos"
+                        placeholder="company to rotate — type any name" autocomplete="off" />
+                      <datalist id="pr-rot-cos"></datalist>
+                      <select id="pr-rot-prof" class="cp-search pr-rot-prof"></select>
+                      <input id="pr-rot-limit" class="cp-search pr-narrow" type="number"
+                        min="1" max="50" value="5" title="Applications one address may carry here" />
+                      <button id="pr-rot-bind" class="cp-lk cp-add-btn" type="button">Rotate</button>
+                    </div>
                   </div>
                   <div class="cp-foot">The résumé is re-rendered to match, so the
                     form and the PDF never disagree. <b>Default</b> covers anything

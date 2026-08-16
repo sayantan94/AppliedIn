@@ -2290,6 +2290,13 @@ a.rowlk, button.rowlk { display: inline-block; }
 .pr-rot { border-top: 1px solid var(--border); padding-bottom: 8px; }
 .pr-rot-hint { font-weight: 400; color: var(--faint); font-size: 11px; }
 .pr-rot-list { display: flex; flex-direction: column; gap: 4px; padding: 0 10px; }
+/* Binding a company, from the panel that owns identities. */
+.pr-rot-add { display: flex; gap: 6px; padding: 8px 10px 10px; align-items: center; }
+.pr-rot-add .cp-search { min-width: 0; }
+.pr-rot-add #pr-rot-co { flex: 1 1 auto; }
+.pr-rot-prof { flex: 0 0 auto; max-width: 120px; }
+.pr-rot-prof[hidden] { display: none; }
+
 .prr-row { display: flex; align-items: center; gap: 9px; padding: 5px 9px;
            border-radius: 8px; background: var(--card-2); border: 1px solid transparent; }
 .prr-row:hover { border-color: var(--border); }
