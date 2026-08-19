@@ -129,12 +129,31 @@ INFRA_OPENINGS = (
     "The model API returned",
     "The session was cut off",
     "The daemon was restarted",
+    "The Claude CLI is signed out",
+    "The Claude CLI could not run",
 )
+
+# What an expired or missing login looks like in the CLI's own words. Matched
+# rather than compared, because the wording has changed before and the cost of
+# missing it is the whole queue dead-lettering against a wall.
+_AUTH_RX = re.compile(
+    r"oauth|authenticat|\bsign(ed)? ?in\b|\blog(ged)? ?in\b|credential|"
+    r"session expired|unauthorized|401", re.I)
 
 
 def is_infrastructure(detail: str) -> bool:
     """Whether a failure detail is about the plumbing, not the application."""
     return (detail or "").strip().startswith(INFRA_OPENINGS)
+
+
+def is_signed_out(detail: str) -> bool:
+    """Whether this failure was the CLI having no valid login.
+
+    Separate from `is_infrastructure` because the response differs: every other
+    infrastructure fault is worth retrying, and this one repeats until a human
+    signs in. The apply path uses it to stop the queue rather than feed it.
+    """
+    return (detail or "").strip().startswith("The Claude CLI is signed out")
 
 
 # SIGTERM. Every cluster of these in the log is followed within seconds by
@@ -200,6 +219,30 @@ def _envelope_reason(stdout: str, returncode: int | None = None) -> str:
                 + (f" after {turns} steps" if turns else "")
                 + ". That is a connection failure rather than a problem with the "
                   "application, so nothing was submitted and it is worth retrying.")
+
+    # An envelope can carry `subtype: "success"` and still be a failure: the CLI
+    # means "the run completed" by it, not "the work succeeded". `is_error` and
+    # `terminal_reason` are the honest fields, and `result` holds the sentence
+    # the CLI itself would print. Reading none of them is why an expired login
+    # was reported as "the session ended without a structured result, check the
+    # browser" — sending the owner to look at a browser that was never the
+    # problem, while the envelope said exactly what was wrong.
+    said = str(env.get("result") or "").strip()
+    failed = bool(env.get("is_error")) or reason == "api_error"
+
+    # Auth is its own case because it is the one that does NOT clear by itself.
+    # Every other fault here is worth retrying; this one repeats until a human
+    # logs in, so it must say so rather than invite a retry.
+    if failed and _AUTH_RX.search(said):
+        return ("The Claude CLI is signed out, so the browser session could not "
+                "start. Nothing was submitted and this is not a problem with the "
+                "application. Applying stays paused until you run `claude` and "
+                "sign in again, because every queued job would fail the same way.")
+    if failed:
+        return ("The Claude CLI could not run this session"
+                + (f": {said}" if said else "")
+                + ". Nothing was submitted; this is the plumbing rather than the "
+                  "application.")
     if subtype and subtype != "success":
         return f"The session ended as {subtype!r} without reporting what it did."
     return ""
@@ -901,7 +944,29 @@ honest:
    because he is on it; and, only if the field asks for motivation, one on why
    this team's problem is the one he wants next. Do not summarise the résumé they
    already have.
-5. When a question offers OPTIONS and several approved answers would each be
+5. Acknowledgements and agreements REQUIRED to submit are accepted. The owner
+   has decided this: arbitration agreements, terms of use, privacy notices,
+   background-check authorisations, at-will statements, e-signature consent, and
+   "I certify this application is accurate". Tick them, sign where a typed name
+   is asked for, and carry on. Nearly every US application carries one and none
+   of them can be submitted without it, so stopping to ask turned every such
+   posting into a question the owner had already answered.
+
+   The line is what the box CLAIMS, not how serious it sounds:
+
+   - "I agree / I consent / I acknowledge / I authorise / I have read" is a
+     DECISION, and the owner has delegated it. An arbitration agreement waives
+     the right to sue and is still theirs to accept; accept it.
+   - "I am / I have / I hold" is a FACT, and no one may assert one on the owner's
+     behalf. Citizenship, a security clearance, a degree, years of experience, a
+     licence, an age, a protected characteristic: if it is not in the approved
+     answers above, stop and ask. Rules 2 and 3 still bind absolutely.
+
+   Record every box of this kind in `filled`, quoting the label and the link if
+   one was given, so what was agreed to on the owner's behalf is on the record
+   rather than only in the employer's database.
+
+6. When a question offers OPTIONS and several approved answers would each be
    true, pick the one closest to THIS role, which is described on the page in
    front of you. The owner's answers deliberately cover more than one option for
    the same question — a preferred technical domain, an area of expertise — and
@@ -916,8 +981,8 @@ honest:
    API role Back End, and for a role about scale, consistency or data movement
    Distributed Systems. All three are approved answers; the posting decides.
 
-6. Remember to click each text box / radio button / checkbox after selecting
-7. If the portal offers "Continue with Google" (or Sign in with Google), PREFER IT
+7. Remember to click each text box / radio button / checkbox after selecting
+8. If the portal offers "Continue with Google" (or Sign in with Google), PREFER IT
    over creating an account, but ONLY when the Google account it is already signed
    in as matches the email this application is going out under, shown in the
    answers above. Check the account it names before clicking through.

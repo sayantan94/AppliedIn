@@ -227,10 +227,26 @@ def retarget(pk: str, profile: Profile | None, stores=None) -> bool:  # noqa: AN
         return False
     try:
         pdf = render_pdf(updated)
-    except Exception:  # noqa: BLE001 — keep the good PDF rather than break the job
-        log.warning("retarget render failed for %s — keeping the previous PDF", pk,
-                    exc_info=True)
-        return False
+    except Exception:  # noqa: BLE001
+        # Repair and retry ONCE, exactly as the tailoring path does. Without
+        # this, rotation re-rendered through a plainer path than the one that
+        # wrote the document: a résumé the tailor had already repaired past a
+        # bare `&` would fail here, keep its OLD address on the PDF, and go out
+        # against a form carrying the new one.
+        from tools.render import sanitize_latex
+
+        pdf = None
+        repaired = sanitize_latex(updated)
+        if repaired != updated:
+            try:
+                pdf = render_pdf(repaired)
+                updated = repaired
+            except Exception:  # noqa: BLE001
+                pdf = None
+        if pdf is None:
+            log.warning("retarget render failed for %s — the PDF still carries the "
+                        "previous address", pk, exc_info=True)
+            return False
     stores.artifacts.put("resumes", f"{pk}.tex", updated.encode(), "text/x-tex")
     key = stores.artifacts.put("resumes", f"{pk}.pdf", pdf, "application/pdf")
     stores.tracking.set_status(pk, row.get("status", "tailored"),

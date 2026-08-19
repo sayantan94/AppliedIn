@@ -547,7 +547,27 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # this job: the form was never reached, nothing was filled, and the same job
     # succeeds once the browser is free. Recording it as failed burns a good
     # application and hides it in the Unable lane, so hand it back to the queue.
-    from tools.claude_chrome import _is_browser_conflict
+    from tools.claude_chrome import _is_browser_conflict, is_signed_out
+
+    # A signed-out CLI is the same KIND of fault as a busy browser — nothing was
+    # reached, nothing was filled — but it differs in one way that matters: it
+    # does not clear on its own. Every remaining job would fail against the same
+    # wall, and at three attempts each, a queue of two hundred dead-letters in
+    # about a minute while the owner is away from the screen. So the job goes back
+    # on the queue untouched AND applying is paused, which is the only thing that
+    # stops the rest of the board following it down.
+    if is_signed_out(reason):
+        from core import flags
+
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                                   fail_reason="", fail_kind="")
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        if not flags.paused():
+            flags.set_flag("paused", "yes")
+            flags.set_flag("paused_reason", "signed out of the Claude CLI")
+            log.warning("PAUSED applying: the Claude CLI is signed out")
+        emit("gate", pk=pk, agent="applier", url=jd_url, detail=reason)
+        return {"result": "requeued", "pk": pk, "reason": "signed_out"}
 
     if _is_browser_conflict(reason):
         stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",

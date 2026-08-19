@@ -524,7 +524,20 @@ def ensure(pk: str, company: str, stores) -> object | None:  # noqa: ANN001
         raise RuntimeError(
             f"{company} rotates its address but none could be assigned — "
             f"nothing was submitted. Check the rotating profile and the ledger.")
-    _profiles.retarget(pk, alias, stores)
+    # The return value is CHECKED. The row now says this application goes out
+    # under `alias`, and the form is filled from that; if the résumé could not be
+    # re-rendered to match, the PDF still carries the previous address and the
+    # two disagree — which is the one thing this pipeline must never send. It is
+    # not a judgement about the job, so nothing is marked failed; the run stops
+    # and the owner is told which document is stale.
+    row_now = stores.tracking.get(pk) or {}
+    if not _profiles.retarget(pk, alias, stores):
+        key = str(row_now.get("resume_s3_key") or "")
+        if key.endswith(".pdf") and not alias_of_company(previous, company):
+            raise RuntimeError(
+                f"the résumé for this job could not be re-rendered to {alias.email}, "
+                "so the attached PDF and the form would show different addresses. "
+                "Nothing was submitted. Re-tailor this job and try again.")
     return alias
 
 

@@ -126,14 +126,32 @@ class ApplyQueue:
 
     def retry(self, item: dict, reason: str) -> bool:
         """Re-queue after a retryable failure. False when it has run out of tries
-        and has gone to the dead letter queue instead."""
-        attempts = int(item.get("attempts", 0)) + 1
+        and has gone to the dead letter queue instead.
+
+        An INFRASTRUCTURE fault does not spend an attempt. The three attempts
+        exist to stop a job that genuinely cannot be applied to from being tried
+        forever; a signed-out CLI, a rate limit, or the daemon being restarted
+        say nothing about the job at all. Counting them meant an outage could
+        dead-letter work that had never actually been tried: one OpenAI role
+        reached the dead letter queue having burned two attempts on an expired
+        login and a third on a restart, without a browser ever opening.
+
+        The retry still happens, and the backoff still grows, so a permanent
+        outage cannot spin — it just does not consume the job's budget.
+        """
+        from tools.claude_chrome import is_infrastructure
+
+        infra = is_infrastructure(reason)
+        attempts = int(item.get("attempts", 0)) + (0 if infra else 1)
+        if infra:
+            log.info("infrastructure fault for %s (%s) — retrying without "
+                     "spending an attempt", item["pk"], reason[:60])
         history = list(item.get("history") or []) + [
             {"at": time.time(), "attempt": attempts, "reason": reason[:200]}]
         if attempts >= MAX_ATTEMPTS:
             self.dead_letter(item, reason, history)
             return False
-        wait = BACKOFF_S[min(attempts - 1, len(BACKOFF_S) - 1)]
+        wait = BACKOFF_S[min(max(len(history) - 1, 0), len(BACKOFF_S) - 1)]
         self.put(item["pk"], item.get("company", ""), attempts=attempts,
                  not_before=time.time() + wait, history=history)
         log.info("apply retry %d/%d for %s in %ds (%s)",
