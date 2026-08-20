@@ -83,4 +83,4 @@ max_new_per_run: 15
 
 # Candidate's public GitHub — the tailor reads the repos (names, languages,
 # topics) as extra context to reword bullets toward each JD.
-github: https://github.com/your-handle
+github: https://github.com/sayantan94

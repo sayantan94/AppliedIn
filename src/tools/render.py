@@ -76,12 +76,27 @@ def sanitize_latex(tex: str) -> str:
     body = re.sub(r"(?<!\\)\$", r"\\$", body)          # $500K → \$500K
     body = re.sub(r"(?<=\d)\s?%", r"\\%", body)        # 30% → 30\% (digit-bound only)
     body = re.sub(r"(?<!\\)#(?=\d)", r"\\#", body)     # #1 → \#1
-    # & is text (AT&T, "Open Source & Projects") EXCEPT in tabular rows, where
-    # it's the alignment tab — those lines end with \\ (the header block).
-    fixed_lines = []
+    # & is text (AT&T, "Applied AI & Agents") EXCEPT inside a tabular, where it
+    # is the alignment tab. Which one it is depends on the ENVIRONMENT, so the
+    # environment is tracked.
+    #
+    # This used to guess from the line ending — "a row ends with \\\\, body text
+    # does not" — and the guess was wrong for the résumé it mattered most on.
+    # The Skills block ends every line with \\\\ as an ordinary line break, so a
+    # bare & in "Applied AI & Agents" was read as a tabular separator and left
+    # alone. The repair pass ran, reported that it had changed the document, and
+    # the compile failed on the identical error: no PDF, and the applier gated
+    # with "no tailored résumé exists for this job".
+    envs = r"tabular\*?|array|longtable|tabularx|matrix|align\*?|aligned|cases"
+    begin_rx = re.compile(r"\\begin\{(?:" + envs + r")\}")
+    end_rx = re.compile(r"\\end\{(?:" + envs + r")\}")
+    depth, fixed_lines = 0, []
     for ln in body.splitlines():
-        if "tabular" not in ln and not ln.rstrip().endswith("\\\\"):
+        opens, closes = len(begin_rx.findall(ln)), len(end_rx.findall(ln))
+        # A line that opens one counts as inside: its own & are separators.
+        if depth <= 0 and opens == 0:
             ln = re.sub(r"(?<!\\)&", r"\\&", ln)
+        depth = max(0, depth + opens - closes)
         fixed_lines.append(ln)
     return head + "\n".join(fixed_lines) + ("\n" if body.endswith("\n") else "")
 

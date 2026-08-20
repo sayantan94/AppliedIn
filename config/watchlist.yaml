@@ -184,3 +184,7 @@ companies:
   - name: Applied Intuition
     careers_url: https://www.appliedintuition.com/careers
     mode: gated
+
+  - name: Robinhood
+    careers_url: https://careers.robinhood.com/
+    mode: gated

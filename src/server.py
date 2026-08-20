@@ -642,7 +642,8 @@ def create_app() -> FastAPI:
         items, default = prof.load()
         return {"default": default,
                 "profiles": [{"id": x.id, "label": x.label, "email": x.email,
-                              "phone": x.phone} for x in items]}
+                              "phone": x.phone, "kind": x.kind, "limit": x.limit,
+                              "style": x.style} for x in items]}
 
     @app.post("/profiles")
     def set_profiles(body: dict):
@@ -657,7 +658,153 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "default": default,
                 "profiles": [{"id": x.id, "label": x.label, "email": x.email,
-                              "phone": x.phone} for x in items]}
+                              "phone": x.phone, "kind": x.kind, "limit": x.limit,
+                              "style": x.style} for x in items]}
+
+    @app.get("/rotation")
+    def get_rotation():
+        """Which companies rotate their address, and how much of the current one
+        is left. The count is derived from the rows themselves, so it is what
+        actually happened rather than a number something remembered to update."""
+        from core import rotation
+
+        stores = make_stores(settings)
+        out = []
+        for company in rotation.bindings():
+            state = rotation.state(company, stores)
+            if state:
+                state["aliases"] = rotation.aliases(company)
+                out.append(state)
+        return {"companies": out, "styles": list(rotation.STYLES)}
+
+    @app.post("/actions/rotation")
+    def set_rotation(body: dict):
+        """Bind a company to a rotating profile, or unbind it with an empty id.
+
+        Unbinding never deletes an alias: the ledger is the record of which
+        address received which employer's mail, and a job already stamped with
+        one keeps applying under it.
+        """
+        from core import rotation
+
+        company = str((body or {}).get("company") or "").strip()
+        if not company:
+            return {"ok": False, "error": "no company"}
+        profile_id = str((body or {}).get("profile_id") or "").strip()
+        if not profile_id:
+            return {"ok": True, "company": company, "bound": rotation.unbind(company)}
+        try:
+            row = rotation.bind(company, profile_id,
+                                limit=int((body or {}).get("limit") or 0),
+                                style=str((body or {}).get("style") or ""))
+        except ValueError as exc:   # a combination that could not work, said plainly
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "company": company, **row}
+
+    @app.post("/actions/rotation-backfill")
+    def backfill_rotation(body: dict):
+        """Re-point this company's un-sent jobs at its rotating address.
+
+        Turning rotation on only changes what happens NEXT, and a board with
+        three hundred tailored OpenAI roles on it is mostly already-decided work
+        still pointing at the original address. This moves what can be moved —
+        as many as the current alias has room for — and re-renders each résumé
+        from its saved .tex, so no model is called.
+        """
+        from core import rotation
+
+        company = str((body or {}).get("company") or "").strip()
+        if not company:
+            return {"ok": False, "error": "no company"}
+        return rotation.backfill(company, make_stores(settings))
+
+    @app.post("/actions/rotate-and-approve")
+    def rotate_and_approve(body: dict, background: BackgroundTasks):
+        """One company, one press: re-point what is in flight at the rotating
+        address, then approve and queue it.
+
+        The three steps have to happen together or they fight each other. Jobs
+        already sitting in the apply queue were queued under the OLD address, and
+        the queue item is what gets dispatched — so they are dropped first and
+        re-queued after the re-point, or the very applications this was meant to
+        fix go out under the address being retired.
+
+        It cannot run away: the re-point stops at whatever the current alias has
+        room for, so this approves at most that many. A row still gated on a REAL
+        question — a portal exercise, a clearance answer — is left alone, because
+        "no questions asked" is about not asking again for an approval already
+        implied by this press, not about answering something nobody has.
+        """
+        from core import rotation
+        from core.apply_queue import ApplyQueue
+
+        company = str((body or {}).get("company") or "").strip()
+        if not company:
+            return {"ok": False, "error": "no company"}
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+
+        # "__all__" is every company that rotates — the one press that re-points,
+        # tailors, queues and runs the lot. Each company is still handled on its
+        # own terms: its own address, its own limit, its own queue lease.
+        if company == "__all__":
+            names = list(rotation.bindings())
+            if not names:
+                return {"ok": False, "error": "no company rotates yet"}
+            runs = [rotation.rotate_and_approve(n, stores, q) for n in names]
+            runs = [r for r in runs if r.get("ok")]
+            work = [(r["company"], r.pop("untailored", [])) for r in runs]
+            run_now = bool((body or {}).get("run"))
+
+            def _work_all() -> None:
+                for name, pks in work:
+                    _tailor_and_queue(name, pks, stores, q)
+                    if run_now:
+                        _flush_loop(name, q)
+
+            if any(pks for _, pks in work) or run_now:
+                background.add_task(_work_all)
+            total = {k: sum(int(r.get(k) or 0) for r in runs)
+                     for k in ("moved", "queued", "left", "blocked", "dequeued",
+                               "tailoring")}
+            return {"ok": True, "company": "__all__", "companies": len(runs),
+                    "running": run_now, **total,
+                    "each": [{"company": r["company"], "email": r["email"],
+                              "queued": r["queued"], "left": r["left"]} for r in runs]}
+
+        out = rotation.rotate_and_approve(company, stores, q)
+        if not out.get("ok"):
+            return out
+
+        # A job the rotation reached before tailoring has no résumé to send, so
+        # "approve everything" has to include making one. It runs in the
+        # background and queues itself the moment it is tailored, under the same
+        # address — which is why the profile is stamped first.
+        untailored = out.pop("untailored", [])
+        run_now = bool((body or {}).get("run"))
+
+        def _work() -> None:
+            _tailor_and_queue(company, untailored, stores, q)
+            # Only if asked. By default this button ENDS at the queue: queueing is
+            # reversible and reviewable, and starting half an hour of browser
+            # sessions is a separate decision with a separate button.
+            if run_now:
+                _flush_loop(company, q)
+
+        if untailored or run_now:
+            background.add_task(_work)
+        out["running"] = run_now and bool(out.get("queued") or untailored)
+        return out
+
+    @app.post("/actions/rotation-retire")
+    def retire_rotation(body: dict):
+        """Retire the address in use so the next application starts on a fresh
+        one. Offered when a board refuses under its own cap while our count was
+        still below the limit: the alias is spent whatever we counted."""
+        from core import rotation
+
+        company = str((body or {}).get("company") or "").strip()
+        return {"ok": bool(company) and rotation.retire(company), "company": company}
 
     @app.post("/actions/job-profile/{pk:path}")
     def set_job_profile(pk: str, body: dict):
@@ -964,6 +1111,54 @@ def create_app() -> FastAPI:
 
         background.add_task(_run)
         return {"ok": True, "status": "running", "pk": pk}
+
+    @app.post("/actions/reopen/{pk:path}")
+    def reopen(pk: str, background: BackgroundTasks):
+        """Put a closed job back in play so it is scored again from scratch.
+
+        The case this exists for: a role was skipped as a low score under
+        preferences that were wrong, and the preferences have since been fixed.
+        `run_job` refuses anything that is not `found`, so "Run now" on a skipped
+        card did nothing at all and looked broken — the job had no way back.
+
+        Reopening clears the verdict, not the history: the score, the skip reason
+        and any failure text are dropped so the next run cannot inherit them, and
+        the row returns to `found` where discovery and scoring can see it again.
+        """
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk)
+        if not row:
+            return {"ok": False, "error": "unknown job"}
+        status = str(row.get("status") or "")
+        # Same rule as skip and retry: what has been sent is not reopened. Running
+        # it again would tailor and queue a role this employer already has.
+        if status in ("applied", "applied_manual") or row.get("confirmation_id"):
+            return {"ok": False, "error": "refused",
+                    "note": f"This one is already '{status or 'applied'}'. Reopening "
+                            "it would send a second application for the same role."}
+        stores.tracking.set_status(pk, Status.FOUND, skip_reason="", fail_reason="",
+                                   fail_kind="", error="", match_score=None,
+                                   gate_reason="", gate_pending=None, gate_call_id=None)
+        from core.events import emit
+
+        emit("running", pk=pk, agent="workflow", url=row.get("jd_url"),
+             detail=f"reopened · {row.get('title','')} @ {row.get('company','')} "
+                    f"(was {status or 'closed'}) — scoring again")
+
+        # Scored immediately rather than left for the next sweep: someone
+        # reopening a job is watching it, and a card that goes quiet for an hour
+        # is the same silence that made this look broken in the first place.
+        def _run() -> None:
+            import logging
+
+            from agent.run import run_job
+            try:
+                run_job(pk, stores)
+            except Exception:  # noqa: BLE001
+                logging.getLogger("server").exception("reopen run failed for %s", pk)
+
+        background.add_task(_run)
+        return {"ok": True, "pk": pk, "was": status, "status": "running"}
 
     @app.post("/actions/tailor-text")
     def tailor_text(body: dict, background: BackgroundTasks):
@@ -1405,6 +1600,70 @@ def create_app() -> FastAPI:
         flags.set_flag("apply_concurrency", str(max(1, min(6, n))))
         return {"ok": True, "concurrency": flags.apply_concurrency()}
 
+    def _tailor_and_queue(company: str, pks: list, stores, q) -> int:  # noqa: ANN001
+        """Tailor the jobs rotation reached before they had a résumé, and queue
+        each as it finishes.
+
+        "Approve everything" has to include making the thing being sent. The
+        profile is already stamped, so the résumé is written under the rotating
+        address from the start — no re-render needed afterwards.
+        """
+        import logging
+
+        from agent.run import run_job
+        from core.events import emit
+
+        done = 0
+        for pk in pks:
+            try:
+                run_job(pk, stores)
+                row = stores.tracking.get(pk) or {}
+                if row.get("status") in ("tailored", "needs_human") and q.put(
+                        pk, row.get("company") or company):
+                    done += 1
+                    emit("running", pk=pk, agent="workflow",
+                         detail=f"rotate & queue → in line at {company}")
+            except Exception:  # noqa: BLE001 — one bad posting must not stop the rest
+                logging.getLogger("server").exception(
+                    "rotate-and-queue: tailoring %s failed", pk)
+        return done
+
+    def _flush_loop(company: str, q, already_claimed: bool = False) -> int:  # noqa: ANN001
+        """Work through ONE company's queue, back to back, and stop there.
+
+        One at a time, because they go to the same employer — the same lease the
+        apply worker obeys, so this cannot open a second session against a company
+        that already has one. The loop re-checks between applications whether the
+        flush is still wanted, since four of them is over half an hour of browser
+        time and Stop applying has to be able to end it.
+
+        Shared by "Process" and by "Rotate & apply", which needs the same loop but
+        only after its own tailoring has finished queueing.
+        """
+        import logging
+
+        from agent.run import run_queued
+
+        log = logging.getLogger("server")
+        co = company.strip().lower()
+        if not already_claimed and not q.start_flush(company):
+            log.info("flush of %s skipped — already being worked through", company)
+            return 0
+        done = 0
+        try:
+            while True:
+                item = q.next(only=company)
+                if item is None:
+                    return done                # drained, or the rest is backing off
+                run_queued(item, q)            # releases the lease in its own finally
+                done += 1
+                if co not in q.flushing():
+                    log.info("flush of %s stopped after %d", company, done)
+                    return done
+        finally:
+            q.stop_flush(company)
+            log.info("flush of %s finished: %d application(s)", company, done)
+
     @app.post("/actions/drain-company")
     def drain_company(body: dict, background: BackgroundTasks):
         """Work through ONE company's queue now, back to back, and stop there.
@@ -1448,23 +1707,7 @@ def create_app() -> FastAPI:
         if not q.start_flush(company):      # atomic claim
             return {"ok": False, "error": f"{company} is already being worked through"}
 
-        def _flush() -> None:
-            done = 0
-            try:
-                while True:
-                    item = q.next(only=company)
-                    if item is None:
-                        return                 # drained, or the rest is backing off
-                    run_queued(item, q)        # releases the lease in its own finally
-                    done += 1
-                    if co not in q.flushing():
-                        log.info("flush of %s stopped after %d", company, done)
-                        return
-            finally:
-                q.stop_flush(company)
-                log.info("flush of %s finished: %d application(s)", company, done)
-
-        background.add_task(_flush)
+        background.add_task(_flush_loop, company, q, True)  # claimed just above
         log.info("flush: working through %s (%d queued)", company, waiting)
         return {"ok": True, "company": company, "queued": waiting}
 
@@ -1606,13 +1849,34 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue
 
         stores = make_stores(settings)
-        stores.tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
+        row = stores.tracking.get(pk) or {}
+        status = str(row.get("status") or "")
+
+        # An application that WENT OUT is a fact about the world, and skip is the
+        # one action that would overwrite it with "you did not want this". Retry
+        # has refused an applied row for a long time; skip never did, so a stray
+        # click — or any bulk action reaching this endpoint — could erase the
+        # record of something an employer had already received. The row is worth
+        # more than the click.
+        if status in ("applied", "applied_manual") or row.get("confirmation_id"):
+            return {"ok": False, "error": "refused",
+                    "note": f"This one is already '{status or 'applied'}' — it went "
+                            "out and cannot be un-sent, so it will not be marked "
+                            "skipped. Use the drawer if the record itself is wrong."}
         q = ApplyQueue(stores.tracking.r)
+        # Mid-submission is the other case where the status is not ours to set:
+        # the form may go through a second after this call, and a skipped row that
+        # then submits reads as an application nobody made.
+        if status == "submitting" or pk in q.in_flight():
+            return {"ok": False, "error": "in_flight",
+                    "note": "It is being applied to right now, so it cannot be "
+                            "skipped from here — the submit may land a moment from "
+                            "now. Use Stop applying, then skip it."}
+
+        stores.tracking.set_status(pk, Status.SKIPPED, skip_reason="user_skipped")
         removed = q.remove(pk)
         q.drop_dead_letter(pk)
-        return {"ok": True, "dequeued": removed,
-                "note": ("It is being applied to right now — use Stop applying to "
-                         "end that.") if pk in q.in_flight() else ""}
+        return {"ok": True, "dequeued": removed}
 
     @app.post("/actions/apply-now/{pk}")
     def apply_now(pk: str, background: BackgroundTasks):

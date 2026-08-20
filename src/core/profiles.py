@@ -42,6 +42,13 @@ class Profile:
     label: str
     email: str
     phone: str = ""
+    # "fixed"    — an address the owner typed in, used exactly as written
+    # "rotating" — a TEMPLATE: never submitted itself, it mints one alias per
+    #              company and rotates at `limit` (see core/rotation.py)
+    # "alias"    — one address minted from a rotating template
+    kind: str = "fixed"
+    limit: int = 0        # rotating only: applications one alias may carry
+    style: str = "plus"   # rotating only: plus-addressing or the Gmail dot
 
     def as_facts(self) -> dict[str, str]:
         """The canonical keys, for a bank that has none of its own yet."""
@@ -108,7 +115,10 @@ def load() -> tuple[list[Profile], str]:
             continue  # a profile without an address cannot answer anything
         pid = str(row.get("id") or email.split("@")[0]).strip()
         profiles.append(Profile(id=pid, label=str(row.get("label") or pid),
-                                email=email, phone=clean(row.get("phone"))))
+                                email=email, phone=clean(row.get("phone")),
+                                kind=str(row.get("kind") or "fixed"),
+                                limit=int(row.get("limit") or 0),
+                                style=str(row.get("style") or "plus")))
     default = str(data.get("default") or (profiles[0].id if profiles else ""))
     return profiles, default
 
@@ -122,10 +132,17 @@ def save(profiles: list[dict], default: str = "") -> tuple[list[Profile], str]:
         if not email:
             continue
         pid = str(p.get("id") or email.split("@")[0]).strip()
-        rows.append({"id": pid, "label": clean(p.get("label")) or pid,
-                     "email": email, "phone": clean(p.get("phone"))})
-    ids = {r["id"] for r in rows}
-    chosen = default if default in ids else (rows[0]["id"] if rows else "")
+        row = {"id": pid, "label": clean(p.get("label")) or pid,
+               "email": email, "phone": clean(p.get("phone"))}
+        if str(p.get("kind") or "fixed") == "rotating":
+            row.update(kind="rotating", limit=int(p.get("limit") or 5),
+                       style=str(p.get("style") or "plus"))
+        rows.append(row)
+    # A rotating profile is a template whose base address must never reach a
+    # form, so it can never be the default. Falling back to it would send every
+    # unassigned job out under the one address rotation exists to protect.
+    usable = [r["id"] for r in rows if r.get("kind") != "rotating"]
+    chosen = default if default in usable else (usable[0] if usable else "")
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump({"default": chosen, "profiles": rows},
@@ -139,15 +156,28 @@ def get(profile_id: str) -> Profile | None:
 
 
 def resolve(profile_id: str = "") -> Profile | None:
-    """The profile to use: the one asked for, else the default, else none."""
+    """The profile an application actually goes out under.
+
+    Two rules beyond "the one asked for, else the default". A minted alias lives
+    in the rotation ledger rather than profiles.yaml, and a row stamped with one
+    must resolve to it — that stamp is what the résumé's contact line and the
+    form's answers are both read from. And a ROTATING profile is a template whose
+    base address is the very one being protected, so it is never returned: asking
+    for one, or falling back to one, yields nothing rather than the address that
+    every alias exists to keep off a form.
+    """
     profiles, default = load()
-    if not profiles:
-        return None
     if profile_id:
         hit = next((p for p in profiles if p.id == profile_id), None)
         if hit:
-            return hit
-    return next((p for p in profiles if p.id == default), profiles[0])
+            return None if hit.kind == "rotating" else hit
+        from . import rotation
+
+        return rotation.profile_for(profile_id)
+    usable = [p for p in profiles if p.kind != "rotating"]
+    if not usable:
+        return None
+    return next((p for p in usable if p.id == default), usable[0])
 
 
 def apply_to_latex(tex: str, profile: Profile | None) -> str:
@@ -197,10 +227,26 @@ def retarget(pk: str, profile: Profile | None, stores=None) -> bool:  # noqa: AN
         return False
     try:
         pdf = render_pdf(updated)
-    except Exception:  # noqa: BLE001 — keep the good PDF rather than break the job
-        log.warning("retarget render failed for %s — keeping the previous PDF", pk,
-                    exc_info=True)
-        return False
+    except Exception:  # noqa: BLE001
+        # Repair and retry ONCE, exactly as the tailoring path does. Without
+        # this, rotation re-rendered through a plainer path than the one that
+        # wrote the document: a résumé the tailor had already repaired past a
+        # bare `&` would fail here, keep its OLD address on the PDF, and go out
+        # against a form carrying the new one.
+        from tools.render import sanitize_latex
+
+        pdf = None
+        repaired = sanitize_latex(updated)
+        if repaired != updated:
+            try:
+                pdf = render_pdf(repaired)
+                updated = repaired
+            except Exception:  # noqa: BLE001
+                pdf = None
+        if pdf is None:
+            log.warning("retarget render failed for %s — the PDF still carries the "
+                        "previous address", pk, exc_info=True)
+            return False
     stores.artifacts.put("resumes", f"{pk}.tex", updated.encode(), "text/x-tex")
     key = stores.artifacts.put("resumes", f"{pk}.pdf", pdf, "application/pdf")
     stores.tracking.set_status(pk, row.get("status", "tailored"),

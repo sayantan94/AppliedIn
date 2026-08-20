@@ -18,6 +18,37 @@ log = get_logger(__name__)
 
 _CANNOT = "CANNOT_ANSWER"
 
+# "Additional information" and its cousins: an open invitation rather than a
+# question. Nothing is being asked, so the generic instructions produce a summary
+# of the résumé the recruiter has already read. What the space is actually for is
+# the case the form never asked for: why this candidate fits THIS role, and what
+# the team gets by hiring him, said briefly enough that it gets read.
+_OPEN_INVITATION_RX = re.compile(
+    r"additional (information|comments?|details?|notes?)"
+    r"|anything else|is there anything|other information"
+    r"|(would like|want) us to know"
+    r"|optional (note|message|cover)", re.I)
+
+_OPEN_INVITATION_BRIEF = (
+    "\n\nTHIS FIELD IS AN OPEN INVITATION, NOT A QUESTION. Nothing specific is being "
+    "asked, so do NOT summarise the résumé, which the reader already has. Every "
+    "sentence must answer one thing: what does this team GET by hiring him. Write "
+    "THREE sentences at most.\n"
+    "1. The fit: the one piece of his professional record that matches what this "
+    "posting actually needs, named concretely, with the scale or outcome attached.\n"
+    "2. The value he adds: what the team can do sooner, or stop worrying about, "
+    "because he is on it. Point at a problem this posting implies they have and at "
+    "the time he has already solved it. Value delivered, never adjectives about "
+    "himself.\n"
+    "3. Only if the field asks for motivation (many say 'such as your motivation to "
+    "apply'), one line on why this team's problem is the one he wants next, tied to "
+    "something specific in the posting. Never flattery, never 'I am passionate "
+    "about', never praise of the company's reputation.\n"
+    "Short and confident. No preamble, no sign off, no restating the job title back "
+    "at them. WRITE NO DASHES OF ANY KIND anywhere in the answer, not even in "
+    "compound words. If there is nothing true and specific to add beyond the résumé, "
+    f"reply with {_CANNOT} rather than padding.")
+
 
 def _strip_dashes(text: str) -> str:
     """The candidate never wants dashes in written answers (a common AI tell).
@@ -78,6 +109,7 @@ def draft_answer(question: str, company: str, jd_text: str, *,
         f"GITHUB (supporting color only):\n{github[:1500]}\n\n"
         "Write only the answer text (2 to 5 sentences unless the form clearly wants "
         f"more), or {_CANNOT}. No preamble, no quotes, no dashes."
+        + (_OPEN_INVITATION_BRIEF if _OPEN_INVITATION_RX.search(question or "") else "")
     )
     try:
         resp = completion(model=model, messages=[{"role": "user", "content": prompt}])

@@ -169,6 +169,12 @@ def run_job(pk: str, stores: Any = None) -> dict:
     # recovered back to found on restart.
     if status == "found":
         stores.tracking.set_status(pk, Status.TAILORING)
+    # NOTE: no address is chosen here. Tailoring is not sending, and an address
+    # claimed at tailoring is an address spent on a résumé that may never go
+    # anywhere: one OpenAI backlog burned eight of them before a single
+    # application existed. `rotation.ensure()` picks one at dispatch instead —
+    # the only moment the count of five means what it says — and re-renders the
+    # contact line from the saved .tex so the PDF still matches the form.
     emit("running", pk=pk, detail=f"{row.get('title','')} @ {row.get('company','')}",
          url=row.get("jd_url"))
     try:
@@ -463,6 +469,17 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         return {"result": "failed", "pk": pk, "reason": "no_sponsorship"}
 
     facts = stores.answer_bank.all_facts(company)
+    # Last call on which address this goes out under. A job tailored before this
+    # company started rotating still carries the old one, and this is the last
+    # moment to fix it — the résumé is re-rendered from its saved .tex, so the
+    # PDF and the form still agree.
+    from core import rotation as _rotation
+
+    # Deliberately NOT wrapped. If this company rotates and no address can be
+    # assigned, the application must not go out at all — falling back to the base
+    # address is the one outcome rotation exists to prevent, and it cannot be
+    # undone. The failure is loud and nothing is submitted.
+    _rotation.ensure(pk, company, stores)
     # Whichever profile this application is going out under supplies the contact
     # details, overriding the bank's defaults for this job only.
     from core import profiles as _profiles
@@ -513,6 +530,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     if status == "applied":
         conf = result.get("confirmation") or "submitted"
         stores.tracking.set_status(pk, Status.APPLIED, confirmation_id=conf)
+        _note_rotation_use(pk, stores)
         emit("applied", pk=pk, detail=conf, url=jd_url)
         return {"result": "done", "pk": pk, "confirmation": conf}
     if status == "gate":
@@ -529,7 +547,27 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # this job: the form was never reached, nothing was filled, and the same job
     # succeeds once the browser is free. Recording it as failed burns a good
     # application and hides it in the Unable lane, so hand it back to the queue.
-    from tools.claude_chrome import _is_browser_conflict
+    from tools.claude_chrome import _is_browser_conflict, is_signed_out
+
+    # A signed-out CLI is the same KIND of fault as a busy browser — nothing was
+    # reached, nothing was filled — but it differs in one way that matters: it
+    # does not clear on its own. Every remaining job would fail against the same
+    # wall, and at three attempts each, a queue of two hundred dead-letters in
+    # about a minute while the owner is away from the screen. So the job goes back
+    # on the queue untouched AND applying is paused, which is the only thing that
+    # stops the rest of the board following it down.
+    if is_signed_out(reason):
+        from core import flags
+
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                                   fail_reason="", fail_kind="")
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        if not flags.paused():
+            flags.set_flag("paused", "yes")
+            flags.set_flag("paused_reason", "signed out of the Claude CLI")
+            log.warning("PAUSED applying: the Claude CLI is signed out")
+        emit("gate", pk=pk, agent="applier", url=jd_url, detail=reason)
+        return {"result": "requeued", "pk": pk, "reason": "signed_out"}
 
     if _is_browser_conflict(reason):
         stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
@@ -557,6 +595,23 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # outcome had the same fault — a duplicate, a guardrail refusal and a
     # no-sponsorship close were all retried too. The sentence moves to `detail`.
     return {"result": "failed", "pk": pk, "reason": code, "detail": reason}
+
+
+
+def _note_rotation_use(pk: str, stores: Any) -> None:
+    """Record against the rotating address that it carried a real application.
+
+    Written to the ledger file, so the count of five survives a lost board. It
+    happens HERE — where a submission is confirmed — and not where one is
+    dispatched, because five gated attempts that submitted nothing once retired
+    an address that had never been used.
+    """
+    try:
+        from core import rotation
+
+        rotation.record_submission(pk, (stores.tracking.get(pk) or {}).get("profile_id", ""))
+    except Exception:  # noqa: BLE001 — bookkeeping must not disturb a done application
+        log.warning("could not record the address used for pk=%s", pk, exc_info=True)
 
 
 def _resume_pdf_path(row: dict) -> str:
@@ -893,6 +948,7 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
     if outcome.get("status") == "applied":
         confirmation = outcome.get("confirmation") or "submitted"
         stores.tracking.set_status(pk, Status.APPLIED, confirmation_id=confirmation)
+        _note_rotation_use(pk, stores)
         emit("applied", pk=pk, detail=confirmation, url=final.get("jd_url"),
              screenshot=_art_url(final.get("screenshot_s3_key")))
         return {"result": "done", "pk": pk}

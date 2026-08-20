@@ -32,7 +32,10 @@ facts.seed.yaml
 resume/preview.pdf
 
 # your real résumé — keep it out of git
-resume/base.tex
+# Every .tex in here is the owner's real résumé, not just base.tex: a copy
+# made while editing (base_copy.tex) carries the same name, address and
+# history, and was one `git add .` away from a public repo.
+resume/*.tex
 resume/*.pdf
 output/
 .gstack/
