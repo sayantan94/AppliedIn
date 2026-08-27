@@ -95,7 +95,7 @@ class ApplyQueue:
     # --- writing ----------------------------------------------------------
     def put(self, pk: str, company: str, *, attempts: int = 0,
             not_before: float = 0.0, history: list | None = None,
-            queued_at: float = 0.0) -> bool:
+            queued_at: float = 0.0, priority: bool = False) -> bool:
         """Queue an application. False when that job is already waiting.
 
         The same pk can be offered more than once — approve-all clicked twice, a
@@ -119,7 +119,13 @@ class ApplyQueue:
                 "not_before": not_before, "history": history or [],
                 # Kept so dispatch can be first come first served ACROSS companies
                 # while the lists stay grouped by company for visibility.
-                "queued_at": queued_at or time.time()}
+                "queued_at": queued_at or time.time(),
+                # An application the owner has just answered a question for. It is
+                # not new work: it was already running, already filled, and stopped
+                # on one field. Re-queuing stamps queued_at NOW, which put it last
+                # behind 344 jobs spanning 712 hours — so the answer looked like it
+                # had done nothing. See `next`.
+                "priority": bool(priority)}
         self.r.sadd(f"{_KEY}:companies", co)
         self.r.rpush(f"{_KEY}:co:{co}", json.dumps(item))
         return True
@@ -152,8 +158,11 @@ class ApplyQueue:
             self.dead_letter(item, reason, history)
             return False
         wait = BACKOFF_S[min(max(len(history) - 1, 0), len(BACKOFF_S) - 1)]
+        # A resumed application that hits a flaky browser keeps its place. Losing
+        # it here is the same disappearance as before, one step later.
         self.put(item["pk"], item.get("company", ""), attempts=attempts,
-                 not_before=time.time() + wait, history=history)
+                 not_before=time.time() + wait, history=history,
+                 priority=bool(item.get("priority")))
         log.info("apply retry %d/%d for %s in %ds (%s)",
                  attempts, MAX_ATTEMPTS, item["pk"], wait, reason[:80])
         return True
@@ -166,7 +175,7 @@ class ApplyQueue:
                     item.get("pk"), int(item.get("attempts", 0)) + 1, reason[:120])
 
     # --- reading ----------------------------------------------------------
-    def next(self, only: str = "") -> dict | None:
+    def next(self, only: str = "", *, priority_only: bool = False) -> dict | None:
         """Lease the next application, or None when nothing can start.
 
         `only` restricts the lease to one company, which is how a single employer's
@@ -178,12 +187,24 @@ class ApplyQueue:
         hit the same employer at once. The caller MUST call `done()` afterwards,
         success or failure, to release the lease.
 
+        An application the owner has just answered a question for is taken FIRST,
+        ahead of everything queued before it. It is not new work — it was already
+        running, the form was already filled, and it stopped on a single field. Re
+        queuing stamped it with the current time, so it sorted behind every other
+        job and the owner's answer looked like it had done nothing at all.
+
+        `priority_only` takes ONLY those. That is what lets the apply worker keep
+        its hands off the queue in gated mode while still resuming an application
+        the owner is sitting in front of: the decision to apply was already made
+        when that job was started, and answering the field it stopped on continues
+        it rather than authorising anything new.
+
         None is a normal idle state: everything left may belong to a busy company
         or still be inside its retry backoff.
         """
         now = time.time()
         busy = set(self.r.smembers(_BUSY) or [])
-        best: tuple[float, str, str] | None = None      # (queued_at, company, raw)
+        best: tuple[tuple[int, float], str, str] | None = None
 
         want = _norm(only) if only else ""
         for co in list(self.r.smembers(f"{_KEY}:companies") or []):
@@ -199,9 +220,14 @@ class ApplyQueue:
                 item = json.loads(raw)
                 if float(item.get("not_before") or 0) > now:
                     continue                            # still backing off
-                when = float(item.get("queued_at") or 0)
-                if best is None or when < best[0]:
-                    best = (when, co, raw)
+                answered = bool(item.get("priority"))
+                if priority_only and not answered:
+                    continue
+                # Answered gates first, then first come first served within each
+                # group — two answered gates still run in the order they were.
+                rank = (0 if answered else 1, float(item.get("queued_at") or 0))
+                if best is None or rank < best[0]:
+                    best = (rank, co, raw)
 
         if best is None:
             return None

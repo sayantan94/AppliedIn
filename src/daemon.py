@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from typing import Any
 
 from core.logging import get_logger
 from core.stores import make_stores
@@ -194,6 +195,22 @@ def auto_dispatch_allowed(mode: str) -> bool:
     return mode == "auto"
 
 
+def next_dispatchable(q: Any, mode: str) -> dict | None:
+    """The next application this worker may start, given the board's mode.
+
+    In gated (and assisted) mode this is restricted to an application the owner
+    has just answered a question for. Everything else keeps waiting for Process,
+    which is the whole point of gated mode: the tailor queues every finished job,
+    so draining the queue by itself would submit applications nobody approved.
+
+    An answered question is not that. That job was already started by the owner,
+    the browser already filled the form, and it stopped on a single field with no
+    approved answer. Continuing it authorises nothing new — and leaving it to sit
+    is what made answering a gate look like it did nothing at all.
+    """
+    return q.next(priority_only=not auto_dispatch_allowed(mode))
+
+
 def _apply_loop() -> None:
     """APPLY worker — its own thread, so a slow browser apply never blocks the
     evaluate worker.
@@ -246,13 +263,13 @@ def _apply_loop() -> None:
             # left the queue, and nothing ever put it back. That is the failure
             # that looks like a company quietly disappearing from the queue.
             _reclaim_orphans(stores, q)
-            if not auto_dispatch_allowed(flags.apply_mode()):
-                time.sleep(POLL_INTERVAL)
-                continue
             if len(running) >= flags.apply_concurrency():
                 time.sleep(POLL_INTERVAL)      # at the limit; let one finish
                 continue
-            item = q.next()
+            # Gated mode no longer means "do not look at the queue". It means the
+            # worker may take ONLY what the owner has already acted on — an
+            # application that stopped to ask a question and has been answered.
+            item = next_dispatchable(q, flags.apply_mode())
             if not item:
                 time.sleep(POLL_INTERVAL)
                 continue
