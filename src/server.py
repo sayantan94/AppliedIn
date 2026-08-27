@@ -209,10 +209,19 @@ def _to_ui(row: dict, artifacts) -> dict:
         # them — a local file:// presign can't be shown from an http page. Keys
         # contain '#' (pk = company#job_id), so URL-encode it (# starts a
         # fragment) while keeping the path slashes.
+        #
+        # The key alone is not proof the bytes are still there. A row keeps its
+        # key forever, but `.local/artifacts/` was recreated once while the rows
+        # lived on in Redis and 127 of them lost their PDF. Linking regardless
+        # put a 404 inside the viewer's iframe — a blank white panel, no error,
+        # while the "No PDF stored for this application" message that says
+        # exactly what happened sat unreachable behind a truthy resume_url.
         from urllib.parse import quote
 
         k = row.get(key)
-        return f"/artifact/{quote(k, safe='/')}" if k else None
+        if not k or not artifacts.exists(k):
+            return None
+        return f"/artifact/{quote(k, safe='/')}"
 
     events = row.get("events") or []
     return {

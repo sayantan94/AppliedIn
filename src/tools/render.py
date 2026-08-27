@@ -101,6 +101,34 @@ def sanitize_latex(tex: str) -> str:
     return head + "\n".join(fixed_lines) + ("\n" if body.endswith("\n") else "")
 
 
+_DOC_MARKER = "\\begin{document}"
+
+
+def restore_preamble(seed_latex: str, tailored_latex: str) -> str:
+    r"""Give the tailored résumé the SEED's preamble back, verbatim.
+
+    Nothing above ``\begin{document}`` is the tailor's to write — packages,
+    lengths and the ``\resumeSubheading`` macros are document machinery, not
+    content — but it re-emits the whole file, so a copy slip lands there too and
+    no other guard sees it. `validate()` anchors on ``\resumeSubheading{...}``
+    call sites, never on the macro's definition; a mangled definition keeps the
+    bullet count and, if it still parses, compiles clean.
+
+    That is not hypothetical: one résumé had ``#2 \\\textit{\small#3}`` doubled
+    into ``#2 \\\\textit{...}`` — legal LaTeX for two row breaks and the literal
+    word "textit" — and every job title on the PDF read "textitSenior System /
+    Software Engineer". It compiled, it passed, it was queued for an employer.
+
+    Returns the tailored body under the seed's head. If either side lacks the
+    marker we cannot tell head from body, so the tailored text is returned
+    unchanged and the compile stays the backstop.
+    """
+    i, j = seed_latex.find(_DOC_MARKER), tailored_latex.find(_DOC_MARKER)
+    if i == -1 or j == -1:
+        return tailored_latex
+    return seed_latex[: i + len(_DOC_MARKER)] + tailored_latex[j + len(_DOC_MARKER):]
+
+
 def render_pdf(latex_source: str) -> bytes:
     """Compile LaTeX source to PDF bytes (pdflatex if available, else Tectonic)."""
     if (pdflatex := shutil.which("pdflatex")) is not None:

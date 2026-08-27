@@ -49,7 +49,7 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     truthfulness violation the tool returns the missing facts so the agent can
     restore them (emphasis only) and re-save."""
     from core.stores import make_stores
-    from tools.render import render_pdf
+    from tools.render import render_pdf, restore_preamble
     from tools.truthfulness import validate
 
     base_latex = tool_context.state.get("base_latex") or ""
@@ -64,6 +64,17 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
                 "message": "The seed résumé is missing from this run, so nothing "
                            "can be checked against it. Stop and report this rather "
                            "than saving."}
+    # Nothing above \begin{document} is the tailor's to write, and a slip there is
+    # invisible to every check below — a doubled backslash in the \resumeSubheading
+    # macro once put the literal word "textit" in front of every job title on a PDF
+    # that compiled, validated, and was queued for an employer. Put the seed's
+    # preamble back rather than spending a turn asking the model to try again.
+    restored = restore_preamble(base_latex, tailored_latex)
+    if restored != tailored_latex:
+        log.warning("tailor altered the preamble for %s — restored it from the seed",
+                    tool_context.state.get("pk", "?"))
+        tailored_latex = restored
+
     # Keep every bullet: dropping \resumeItem lines is the #1 over-tailoring failure.
     base_items, new_items = base_latex.count("\\resumeItem"), tailored_latex.count("\\resumeItem")
     if new_items < base_items:
