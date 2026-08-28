@@ -426,3 +426,27 @@ def test_every_backoff_tier_is_reachable():
     assert highest_index_used == len(BACKOFF_S) - 1, (
         f"BACKOFF_S has {len(BACKOFF_S)} tiers but only "
         f"{highest_index_used + 1} can ever be waited")
+
+
+def test_an_outage_does_not_spend_the_job_s_attempts(q):
+    """Three attempts exist to stop a job that cannot be applied to from being
+    tried forever. A signed-out CLI says nothing about the job, and counting it
+    dead-lettered a real OpenAI role that had never had a browser opened for it:
+    two attempts on an expired login, a third on a daemon restart."""
+    infra = ("The Claude CLI is signed out, so the browser session could not "
+             "start. Nothing was submitted.")
+    item = {"pk": "openai#1", "company": "OpenAI", "attempts": 0}
+    for _ in range(5):
+        assert q.retry(item, infra) is True, "an outage must not dead-letter a job"
+        item = next(i for i in q.pending() if i["pk"] == "openai#1")
+        q.remove("openai#1")
+        item = {**item, "history": item.get("history") or []}
+    assert int(item.get("attempts", 0)) == 0
+
+
+def test_a_real_failure_still_spends_them(q):
+    """The budget still exists — it is only outages that are exempt."""
+    item = {"pk": "acme#1", "company": "Acme", "attempts": 0}
+    assert q.retry(item, "the form could not be filled") is True
+    got = next(i for i in q.pending() if i["pk"] == "acme#1")
+    assert got["attempts"] == 1

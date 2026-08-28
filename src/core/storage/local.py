@@ -43,6 +43,9 @@ class FileArtifactStore(AbstractArtifactStore):
     def presign(self, key: str, *, expires: int = 3600) -> str:
         return (self.root / key).resolve().as_uri()
 
+    def exists(self, key: str) -> bool:
+        return (self.root / key).is_file()
+
 
 class RedisTracking(AbstractTracking):
     """DynamoDB TrackingStore analogue on Redis.

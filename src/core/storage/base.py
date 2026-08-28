@@ -73,6 +73,16 @@ class AbstractArtifactStore(ABC):
     @abstractmethod
     def presign(self, key: str, *, expires: int = 3600) -> str: ...
 
+    def exists(self, key: str) -> bool:
+        """Are the bytes for this key actually there?
+
+        A tracking row keeps its artifact key forever; the bytes are not
+        guaranteed to. Anything that turns a key into something the owner can
+        click has to ask first. Defaults to True so a backend that cannot answer
+        cheaply keeps the old behaviour.
+        """
+        return True
+
 
 class AbstractQueue(ABC):
     """Work queue (cloud: SQS; local: Redis list)."""

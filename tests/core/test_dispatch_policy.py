@@ -40,6 +40,10 @@ def test_recovery_is_not_gated_behind_dispatch():
     job whose worker was killed stayed leased, left the queue, and nothing put it
     back — which reads as a company quietly disappearing from the queue.
 
+    The mode check now lives inside `next_dispatchable`, so that is what recovery
+    has to come before. The guarantee is unchanged: nothing about which jobs this
+    mode may start can decide whether an orphan gets put back.
+
     This pins the ORDER by reading the source, because the behaviour lives in a
     `while True` that cannot be called directly.
     """
@@ -49,5 +53,8 @@ def test_recovery_is_not_gated_behind_dispatch():
 
     src = inspect.getsource(daemon._apply_loop)
     reclaim = src.index("_reclaim_orphans(stores, q)")
-    gate = src.index("if not auto_dispatch_allowed(")
+    gate = src.index("next_dispatchable(q, flags.apply_mode())")
     assert reclaim < gate, "recovery must run before the dispatch mode check"
+    assert "auto_dispatch_allowed" not in src, \
+        "the mode check belongs in next_dispatchable, where gated mode can still " \
+        "let an answered question through"

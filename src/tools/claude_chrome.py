@@ -620,6 +620,37 @@ def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
 # working when it was killed. Better to wait than to redo.
 TIMEOUT_S = 2700  # 45 minutes
 
+def _answer_block(facts: dict) -> str:
+    """Every approved answer, in full. No budget, no elision, no exceptions.
+
+    This block used to be ``json.dumps(facts, indent=1)[:9000]``. The real block
+    is around 47,000 characters, so 52 of the owner's 137 approved answers were
+    cut off the end and the browser never saw them. Which 52 was not random:
+    ``all_facts`` returns global scope and then company scope, and a new answer is
+    APPENDED to its scope, so the answers cut were always the most recent ones —
+    every reply the owner had just typed into a gate.
+
+    That is what the owner saw. He answered "What is your desired salary range?"
+    at a Replit gate, the answer was banked, the job was re-queued, and five
+    minutes later the same session gated again: "I have no approved desired-salary
+    figure to enter." It had not ignored his answer. His answer was at character
+    46,460 of a string cut at 9,000, and the model was telling the truth about the
+    prompt it was given.
+
+    The cap was there to keep the prompt small. It is not worth what it costs: the
+    whole bank is roughly twelve thousand tokens against a million-token context,
+    and the price of dropping one answer is a gate the owner has already answered,
+    a browser session spent asking it again, and — across a company's queue — the
+    same question on every job. So the block carries all of it, and a fact the
+    owner has approved is a fact the browser gets.
+    """
+    kept = {k: str(v).strip() for k, v in facts.items() if str(v).strip()}
+    # ensure_ascii=False: an em dash in a fact key has to read as an em dash. The
+    # model matches these keys against labels it is reading off the page, and
+    # "Gender (EEO — optional)" is not the label anyone is looking at.
+    return json.dumps(kept, indent=1, ensure_ascii=False)
+
+
 def _certain(facts: dict) -> str:
     """The handful of answers that are the same on every form, pre-mapped.
 
@@ -899,7 +930,7 @@ deliberating and spend your attention on the rest of the form:
 {_certain(facts)}
 
 EVERY APPROVED ANSWER — the only facts you may use:
-{json.dumps(facts, indent=1)[:9000]}
+{_answer_block(facts)}
 {resume_line}{wait_block}{site_rules}
 {_skills_block(resume_skills)}{_history_block(resume_history)}
 

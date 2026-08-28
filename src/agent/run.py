@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -295,7 +296,7 @@ def _save_output(pk: str, row: dict, jd_text: str, stores: Any) -> None:
 
 
 
-def _enqueue_apply(pk: str, stores: Any) -> dict:
+def _enqueue_apply(pk: str, stores: Any, *, priority: bool = False) -> dict:
     """Hand an approved job to the apply queue instead of applying it here.
 
     Approving is a decision; dispatching is the queue's job. When ▶ Apply ran the
@@ -318,12 +319,52 @@ def _enqueue_apply(pk: str, stores: Any) -> dict:
         return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
 
     q = ApplyQueue(stores.tracking.r)
-    fresh = q.put(pk, row.get("company") or "")
+    fresh = q.put(pk, row.get("company") or "", priority=priority)
     stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
                                fail_reason="", fail_kind="")
     ahead = q.depth()["queued"].get((row.get("company") or "").strip().lower(), 0)
-    log.info("queued %s for apply (%s in that company's queue)", pk, ahead)
+    log.info("queued %s for apply%s (%s in that company's queue)",
+             pk, " — NEXT, the owner just answered its question" if priority else "",
+             ahead)
     return {"result": "queued", "pk": pk, "queued": fresh, "company_depth": ahead}
+
+
+# A quoted span that could be a form field label. The lookbehind/lookahead keep
+# an apostrophe out of it: in "Replit's application ... field: 'What is your
+# desired salary range?'" a naive pattern opens at the apostrophe in "Replit's"
+# and closes at the real opening quote, yielding a 90-character span of narrative
+# that beats the actual label on length.
+_QUOTED = re.compile(r"""(?<![^\W_])['‘]([^'‘’]{4,120})['’](?![^\W_])"""
+                     r"""|(?<![^\W_])["“]([^"“”]{4,120})["”](?![^\W_])""")
+
+
+def _gate_label(question: str) -> str | None:
+    r"""The FORM FIELD a gate is really about, if the gate names one.
+
+    The applier does not ask "what is your desired salary range?". It writes a
+    paragraph: which company, which role, which field, what the posting says, and
+    what it needs. That paragraph was the answer-bank key, and the bank is keyed
+    on the normalized form label — so nothing ever looked the answer up again.
+    The owner answered, the job was re-queued, the next session read a field
+    called "What is your desired salary range?", found no key resembling it, and
+    gated a second time with the same question in different words.
+
+    The label inside the quotes is the reusable part; the rest is about one
+    application on one afternoon. Returns None when nothing in the gate looks
+    like a field, and the caller then banks the whole question as before — a key
+    nothing queries is survivable, a wrong key is not, because it puts an
+    unrelated answer into a real field on a real application.
+    """
+    spans = [(m.group(1) or m.group(2) or "").strip() for m in _QUOTED.finditer(question or "")]
+    # A label is a question or at least a phrase. A lone button name ("Submit")
+    # is neither, and is the shape most likely to be quoted for another reason.
+    spans = [s for s in spans if s.endswith("?") or " " in s]
+    if not spans:
+        return None
+    asked = [s for s in spans if s.endswith("?")]
+    # Longest wins: gates quote the role and the field in one breath, and the
+    # field is the longer, more specific of the two.
+    return max(asked or spans, key=len)
 
 
 def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
@@ -354,14 +395,32 @@ def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
         # work auth, …) are GLOBAL; company/role-specific prose ("why this role?")
         # stays scoped to THIS company.
         company = row.get("company", "")
-        personal = question.lower().startswith("why") or "this role" in question.lower() \
-            or (company and company.lower() in question.lower())
+        # File it under the FIELD the gate named, not the paragraph the gate was
+        # written in. Scope is then judged on the label too: "What is your
+        # desired salary range?" is a fact about the owner and belongs to every
+        # employer, even though the paragraph around it said "Replit" three times
+        # and would have locked it to Replit alone.
+        label = _gate_label(question) or question
+        personal = label.lower().startswith("why") or "this role" in label.lower() \
+            or (company and company.lower() in label.lower())
         scope = AnswerScope.COMPANY if personal else AnswerScope.GLOBAL
-        stores.answer_bank.put(question, answer, scope,
+        if label != question:
+            log.info("banking the gate answer for %s under %r (from a %d-char question)",
+                     pk, label, len(question))
+        stores.answer_bank.put(label, answer, scope,
                                company=company or None, source="dashboard")
 
     if approval or row.get("gate_source") == "applier" or call_id == "direct":
-        return _enqueue_apply(pk, stores)
+        # An answered QUESTION resumes an application that is already under way:
+        # the owner started it, the browser filled the form, and it stopped on one
+        # field it had no approved answer for. It goes to the front, and in gated
+        # mode it is the one thing the worker may take without Process, because
+        # the decision to apply was made when the job was started.
+        #
+        # A bare "Ready to apply?" is the opposite — that IS the decision, and in
+        # gated mode the decision belongs to Process. So it queues as ordinary
+        # work, exactly as before.
+        return _enqueue_apply(pk, stores, priority=bool(question) and not approval)
     return _run(_resume_job_async(pk, answer, call_id, stores))
 
 

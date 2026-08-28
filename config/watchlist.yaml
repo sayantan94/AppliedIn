@@ -188,3 +188,11 @@ companies:
   - name: Robinhood
     careers_url: https://careers.robinhood.com/
     mode: gated
+
+  - name: OpenAI Foundation
+    careers_url: https://openaifoundation.org/careers#open-roles
+    mode: gated
+
+  - name: axon
+    careers_url: https://job-boards.greenhouse.io/axon?gh_src=o34afqx73us
+    mode: gated
