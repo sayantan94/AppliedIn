@@ -196,12 +196,7 @@ async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
         return {"result": "failed", "pk": pk, "reason": "no_sponsorship"}
 
     sessions = _session_service()
-    state = {
-        "pk": pk, "company": row.get("company", ""), "ats": row.get("ats", ""),
-        "jd_url": row.get("jd_url", ""), "jd_text": jd_text,
-        "base_latex": _base_latex(), "github_context": _github_context(),
-        "prefs_notes": _prefs_notes() or "(none)",
-    }
+    state = _session_state(row, jd_text)
     # create_session is async; a retry may find it already there.
     existing = await sessions.get_session(app_name=_APP, user_id=_USER, session_id=pk)
     if existing is not None and _stale_seed(existing, state["base_latex"]):
@@ -367,6 +362,141 @@ def _gate_label(question: str) -> str | None:
     return max(asked or spans, key=len)
 
 
+def _session_state(row: dict, jd_text: str) -> dict:
+    """The world the tailor sees, built the same way from either door.
+
+    The pipeline and a hand-driven re-tailor must agree on this, or a note the
+    owner wrote would apply on the button and vanish on the automatic re-tailor
+    that the stale-résumé guard triggers — which is the run that actually goes to
+    the employer.
+    """
+    return {
+        "pk": row.get("pk", ""), "company": row.get("company", ""),
+        "ats": row.get("ats", ""), "jd_url": row.get("jd_url", ""),
+        "jd_text": jd_text,
+        "base_latex": _base_latex(), "github_context": _github_context(),
+        "prefs_notes": _prefs_notes() or "(none)",
+        # The owner's standing guidance for THIS job. Empty for almost every row.
+        "tailor_note": row.get("tailor_note") or "",
+    }
+
+
+_NO_RETAILOR = {"applied", "applied_manual", "submitting"}
+
+
+async def _tailor_only(pk: str, state: dict, title: str, company: str) -> None:
+    """Run the TAILOR agent alone, on a session of its own.
+
+    Not `root_agent`: that ends at the applier, so using it to adjust a résumé
+    would submit an application. A session of its own because the pipeline's
+    session for this pk holds the state it was created with, and reusing it would
+    tailor from the seed as it stood then — the same staleness that once kept a
+    project out of every résumé it was added to.
+    """
+    from google.adk.runners import Runner
+    from google.genai import types
+
+    from .graph import tailor
+
+    sessions = _session_service()
+    sid = f"regen:{pk}"
+    if await sessions.get_session(app_name=_APP, user_id=_USER, session_id=sid):
+        await sessions.delete_session(app_name=_APP, user_id=_USER, session_id=sid)
+    await sessions.create_session(app_name=_APP, user_id=_USER, session_id=sid, state=state)
+    runner = Runner(agent=tailor, app_name=_APP, session_service=sessions)
+    msg = types.Content(role="user", parts=[types.Part(
+        text=f"Tailor the résumé for {title} at {company}.")])
+    async for _ in runner.run_async(user_id=_USER, session_id=sid, new_message=msg):
+        pass
+
+
+def retailor(pk: str, note: str | None = None, stores: Any = None) -> dict:
+    """Re-run the TAILOR for one job, with the owner's guidance folded in.
+
+    The owner reads a tailored résumé, sees it under-plays what the posting is
+    actually about, and until now had nothing to say so with: `retry_job` re-runs
+    the whole pipeline, applier included, so adjusting a résumé with it submits an
+    application. This runs the tailor and nothing else — nothing is submitted and
+    no rotation address is spent.
+
+    The note is STORED on the row rather than used once. Editing base.tex makes
+    every tailored row stale, and the stale-résumé guard re-tailors a row before
+    it applies; a note that lived only for one run would be thrown away by that
+    re-tailor, and the résumé the owner had just corrected would go out
+    uncorrected. `note=None` means "use whatever is stored"; an empty string
+    clears it, because the box the owner types into shows the stored note and
+    sending it back empty is how a person removes one.
+
+    What the note can do is bounded by the guard, not by this function:
+    `save_tailored_resume` still requires every employer, title and date line
+    verbatim and still refuses a dropped bullet. "Lean into Kubernetes" reorders
+    and rewords what is on the résumé; it cannot add what is not.
+
+    APPLIED rows are refused. That document reached an employer and this cannot
+    reproduce it, so writing a fresh one under the row would present a résumé
+    they never received as the one that was sent. A row mid-apply is refused too:
+    a browser is on the form, and swapping the PDF under it is how one job's
+    résumé ends up attached to another job's application.
+    """
+    import asyncio
+
+    stores = stores or make_stores()
+    row = stores.tracking.get(pk)
+    if not row:
+        return {"result": "missing_row", "pk": pk}
+    status = row.get("status") or ""
+    if status in _NO_RETAILOR:
+        why = ("that application has already gone out — a fresh résumé under this "
+               "row would look like the one the employer received"
+               if status != "submitting" else
+               "a browser is filling this form right now")
+        log.warning("refusing to re-tailor %s (%s)", pk, status)
+        return {"result": "refused", "pk": pk, "status": status, "reason": why}
+
+    if note is not None:
+        # Keep the row exactly where it is. A queued row that gets a note must not
+        # fall out of the queue or lose its approval.
+        stores.tracking.set_status(pk, status or Status.FOUND, tailor_note=note.strip())
+        row = stores.tracking.get(pk) or row
+
+    jd_text = row.get("jd_text") or ""
+    if len(jd_text) < 400 and row.get("jd_url"):
+        from tools.jd import fetch_jd
+        try:
+            jd_text = fetch_jd(row["jd_url"]) or jd_text
+        except Exception:  # noqa: BLE001 — a dead posting must not lose the note
+            log.warning("could not re-read the posting for %s; using what we have", pk)
+    if not jd_text.strip():
+        return {"result": "no_jd", "pk": pk}
+
+    state = _session_state(row, jd_text)
+    log.info("re-tailoring %s%s", pk,
+             " with the owner's note" if state["tailor_note"] else "")
+    # Show it working. A click that changes nothing on screen reads as a dead
+    # button — the same complaint the gate answer produced. TAILORING is a real
+    # pipeline status the board already renders as in-progress, so the card moves
+    # to the tailoring view for the duration and the button can show it is busy.
+    #
+    # BORROWED, not reset: the row keeps its queue entry and gets its own status
+    # back at the end. A queued row that gets a note must not fall out of the
+    # queue or lose its approval, and one left on `tailoring` by a failure would
+    # have no Apply button and no way back.
+    stores.tracking.set_status(pk, Status.TAILORING)
+    try:
+        _run(_tailor_only(pk, state, row.get("title", ""), row.get("company", "")))
+    except Exception as exc:  # noqa: BLE001 — the status must come back regardless
+        stores.tracking.set_status(pk, status or Status.FOUND)
+        log.exception("re-tailor failed for %s", pk)
+        return {"result": "error", "pk": pk, "reason": str(exc)}
+    from datetime import datetime, timezone
+    stores.tracking.set_status(pk, status or Status.FOUND,
+                               retailored_at=datetime.now(timezone.utc).isoformat())
+    after = stores.tracking.get(pk) or {}
+    return {"result": "ok", "pk": pk,
+            "resume_key": after.get("resume_s3_key", ""),
+            "note": state["tailor_note"]}
+
+
 def resume_job(pk: str, answer: str, stores: Any = None) -> dict:
     """Human answered the gate: SAVE the answer as a reusable fact, then continue.
 
@@ -476,6 +606,19 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         emit("response", pk=pk, agent="applier", detail=f"🛑 {detail}", url=jd_url)
         log.warning("skipped job reached the applier, refused: pk=%s", pk)
         return {"result": "skipped", "pk": pk, "reason": "user_skipped"}
+
+    # A re-tailor is rewriting this row's .tex and .pdf right now. Uploading a
+    # file while it is being replaced is how one job's résumé ends up attached to
+    # another job's application. `retailor` refuses a row that is already
+    # SUBMITTING, which closes the race from its side; this closes the window
+    # between the queue leasing this row and the claim below. Retryable on
+    # purpose: it will be tailored again in a moment and should apply then.
+    if row.get("status") == Status.TAILORING.value:
+        log.info("apply deferred for %s: a re-tailor is in progress", pk)
+        return {"result": "failed", "pk": pk, "reason": "mid_tailor",
+                "detail": "The résumé is being re-tailored right now — this "
+                          "application waits for it rather than uploading a file "
+                          "that is being rewritten."}
 
     if row.get("status") in ("applied", "applied_manual"):
         detail = (f"Refusing to apply: this job is already '{row.get('status')}'"

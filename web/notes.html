@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101312" />
+  <title>Talk notes: graph workflow &middot; AppliedIn</title>
+  <meta name="description" content="Notes for a short talk on graph workflows for AI agents, using AppliedIn as the working example: what a graph is, what each node should control, and where a human keeps authority." />
+  <link rel="icon" href="/logo.svg" />
+  <link rel="stylesheet" href="/landing.css" />
+  <style>
+    /* The sketches are raster, and several are narrower than the prose column.
+       Upscaling them softens the ink, so each is capped at its own width and
+       centred rather than stretched to fill. */
+    .diagram.sketch img { width: 100%; height: auto; margin: 0 auto; display: block; }
+    .diagram.sketch.n475 img { max-width: 475px; }
+    .diagram.sketch.n290 img { max-width: 290px; }
+    .diagram.sketch.n770 img { max-width: 770px; }
+    .diagram.sketch.n476 img { max-width: 476px; }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/"><img src="/logo.svg" alt="" width="24" height="24" />AppliedIn</a>
+  <nav class="topnav">
+    <a href="/#architecture">Workflow</a>
+    <a href="/#product">Product</a>
+    <a href="/#guarantees">Guardrails</a>
+    <a href="/notes">Notes</a>
+    <button class="btn btn_quiet theme_toggle" id="theme-toggle" type="button"
+            aria-label="Switch theme">
+      <span class="theme_icon" aria-hidden="true">&#9686;</span>
+      <span class="theme_label">Theme</span>
+    </button>
+    <a class="btn btn_quiet demo_link" href="/demo">Demo</a>
+    <a class="btn btn_primary" href="https://github.com/sayantan94/AppliedIn">GitHub</a>
+  </nav>
+</header>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <p class="side_h">The idea</p>
+    <a href="#top">Why this term, why now</a>
+    <a href="#ladder">The engineering ladder</a>
+    <a href="#what">What a graph is</a>
+    <a href="#legend">How to read the diagram</a>
+    <p class="side_h">The workflow</p>
+    <a href="#workflow">The AppliedIn graph</a>
+    <a href="#loop">The bounded loop</a>
+    <p class="side_h">The design rules</p>
+    <a href="#control">What each node controls</a>
+    <a href="#properties">Properties of this graph</a>
+    <a href="#guards">Deterministic guards</a>
+    <p class="side_h">Close</p>
+    <a href="#closing">What to take away</a>
+  </aside>
+
+  <main class="doc">
+    <article>
+
+      <p class="eyebrow" id="top">Talk notes</p>
+      <h1>Graph workflow: AppliedIn</h1>
+      <p class="lede">
+        Notes for a short talk on graph workflows for AI agents, using a job
+        application tool as the working example. What a graph is, what each node
+        should control, and where a person keeps authority.
+      </p>
+
+      <h2>Why this term, and why now</h2>
+      <p>
+        Graph is not a new word. Anyone who has touched data structures has met one,
+        and AWS shipped Step Functions years ago. Every company with a standard
+        operating procedure has been drawing graphs on paper for decades.
+      </p>
+      <p>
+        What changed is the models. They got capable enough that the harness around
+        them matters more than the prompt inside them. The interesting question moved
+        from what to say to how the work is arranged.
+      </p>
+
+      <h2 id="ladder">The engineering ladder</h2>
+      <p>
+        Each rung answered a complaint about the one below it.
+      </p>
+      <div class="code"><pre>prompt    say it well
+context   feed it facts
+skills    follow a fixed procedure
+loops     here is a goal, work it out
+graphs    some of each</pre></div>
+      <p>
+        A prompt had no facts. Context meant repeating the same procedure every time.
+        A skill could not handle a job whose steps you cannot know in advance. A loop
+        could, but total freedom leaves nowhere to put a rule and nowhere to stop.
+      </p>
+      <p>
+        A graph is the mixture: fixed order where the order is known, freedom where it
+        is not. It does not replace the loop. It contains it.
+      </p>
+
+      <p>
+        AppliedIn is the example throughout: it finds postings, scores them, tailors a
+        resume, and applies in a real browser. A good test case, because most of it is
+        recoverable and one step is not.
+      </p>
+
+      <h2 id="what">What a graph is</h2>
+      <p>
+        A graph is a representation of the possible paths through a workflow. Three
+        building blocks.
+      </p>
+      <div class="cards cols_3">
+        <div class="card">
+          <p class="card_n">Nodes</p>
+          <p>Agents, tools, or deterministic operations. A step that does one job.</p>
+        </div>
+        <div class="card">
+          <p class="card_n">Edges</p>
+          <p>Where execution goes next. Fixed, or chosen from the state.</p>
+        </div>
+        <div class="card">
+          <p class="card_n">State</p>
+          <p>The information carried between steps, and what survives a pause.</p>
+        </div>
+      </div>
+
+      <figure class="diagram sketch n475">
+        <img src="/img/notes/01_what_is_a_graph.png" width="475" height="550"
+             loading="lazy" decoding="async"
+             alt="Sketch defining a graph as nodes, edges and state, with a simple linear pipeline of search jobs, score fit, tailor resume and apply" />
+        <figcaption>
+          A straight pipeline is already a graph. Score the job, tailor the resume,
+          apply.
+        </figcaption>
+      </figure>
+
+      <p>
+        Real workflows are rarely that linear. A low score should skip. A draft may
+        need another pass. A submission may need approval. Once those decisions and
+        pauses exist, drawing the graph pays for itself.
+      </p>
+
+      <div class="code"><pre>Job
+ &darr;
+Score fit
+ &#9500;&#9472;&#9472; Low fit  &rarr; Skip
+ &#9492;&#9472;&#9472; Good fit &rarr; Tailor resume
+                  &darr;
+                Critic
+                 &#9500;&#9472;&#9472; Needs work &rarr; Tailor again
+                 &#9492;&#9472;&#9472; Approved   &rarr; Ask human
+                                  &darr;
+                              Browser apply
+                               &#9500;&#9472;&#9472; Blocked &rarr; Ask human
+                               &#9492;&#9472;&#9472; Complete</pre></div>
+
+      <h2 id="legend">How to read the diagram</h2>
+      <p>
+        The colours carry meaning throughout.
+      </p>
+      <figure class="diagram sketch n290">
+        <img src="/img/notes/04_legend.png" width="290" height="310"
+             loading="lazy" decoding="async"
+             alt="Legend: purple is an agent or LLM node, green is a tool or human node, red is a terminal stop node, a black arrow is an edge, a blue arrow is a loop edge, a dashed green arrow is state flow" />
+        <figcaption>
+          Purple reasons. Green acts or asks. Red stops. Blue repeats. Dashed green
+          is state moving between steps.
+        </figcaption>
+      </figure>
+
+      <h2 id="workflow">The AppliedIn graph</h2>
+      <p>
+        A deterministic outer flow with loops, branches and a human gate. Score,
+        tailor, apply never changes. What varies is which edges fire.
+      </p>
+
+      <figure class="diagram sketch">
+        <img src="/img/notes/02_appliedin_graph_workflow.png" width="1061" height="550"
+             loading="lazy" decoding="async"
+             alt="The AppliedIn agentic graph: a scorer with structured output, a tailor and critic loop, an applier that delegates to a browser tool, an ask human long running tool, and state flowing underneath" />
+        <figcaption>
+          One job in, one of several terminal states out. The arrows that go
+          backwards are the design.
+        </figcaption>
+      </figure>
+
+      <p>
+        The scorer returns a typed score, not a paragraph, so nothing downstream has
+        to read prose to decide what happens next. Below the threshold the job is
+        skipped. Above it, the work moves on.
+      </p>
+      <p>
+        The applier delegates to a browser tool, and can call a long running tool to
+        ask a person when blocked or before submitting. State runs underneath: the
+        job, the resume, the score, the approved answers.
+      </p>
+
+      <h2 id="loop">The bounded loop</h2>
+      <p>
+        Revision genuinely is a loop. The design work is the bound on it.
+      </p>
+
+      <figure class="diagram sketch n770">
+        <img src="/img/notes/03_how_the_loop_works.png" width="770" height="310"
+             loading="lazy" decoding="async"
+             alt="The tailor and critic loop, bounded at two iterations, with the critic validating alignment, truthfulness and bullet preservation" />
+        <figcaption>
+          Two exits: the critic is satisfied, or the iteration cap is reached. Only
+          one of those is the critic's decision.
+        </figcaption>
+      </figure>
+
+      <p>
+        The critic checks alignment, truthfulness and bullet preservation, and can end
+        the loop early. It cannot create a third round. That cap is not a safety net
+        you hope never fires. It fires.
+      </p>
+
+      <h2 id="control">What each node should control</h2>
+      <p>
+        For every node, five things are worth writing down before any code exists.
+      </p>
+
+      <div class="cards cols_2">
+        <div class="card">
+          <p class="card_n">Responsibility</p>
+          <p>What is this node allowed to do?</p>
+        </div>
+        <div class="card">
+          <p class="card_n">Input and output</p>
+          <p>What state does it consume, and what structured state does it produce?</p>
+        </div>
+        <div class="card">
+          <p class="card_n">Routing</p>
+          <p>Which conditions determine the next node?</p>
+        </div>
+        <div class="card">
+          <p class="card_n">Failure behaviour</p>
+          <p>Does it retry, stop, skip, fall back, or ask a person?</p>
+        </div>
+        <div class="card">
+          <p class="card_n">Authority</p>
+          <p>Can it read data, change data, or take an irreversible action?</p>
+        </div>
+      </div>
+
+      <p>
+        Authority is the one people skip, and it matters most:
+      </p>
+      <ul>
+        <li>The tailor can edit a resume draft but cannot submit an application.</li>
+        <li>The browser agent can fill a form but cannot invent an unknown answer.</li>
+        <li>The critic can request another edit but cannot loop indefinitely.</li>
+        <li>The human can approve submission.</li>
+      </ul>
+      <p>
+        Every one of those is a sentence you can check code against.
+      </p>
+
+      <h2 id="properties">Properties of this graph</h2>
+      <figure class="diagram sketch n476">
+        <img src="/img/notes/05_key_properties.png" width="476" height="310"
+             loading="lazy" decoding="async"
+             alt="Key properties: deterministic outer flow with explicit branches, a bounded improvement loop, a human in the loop before irreversible actions, durable state for pause and resume, and deterministic validations" />
+        <figcaption>
+          Five properties, and each one is a decision rather than an accident.
+        </figcaption>
+      </figure>
+
+      <h2 id="guards">Deterministic guards</h2>
+      <p>
+        The model proposes. Code decides whether the proposal becomes an effect.
+      </p>
+
+      <figure class="diagram sketch">
+        <img src="/img/notes/06_deterministic_guards.png" width="1536" height="164"
+             loading="lazy" decoding="async"
+             alt="Four deterministic guards: a truthfulness guard, bullet preservation, PDF compilation, and a duplicate guard, with the principle that agents propose and deterministic systems enforce invariants" />
+        <figcaption>
+          Agents propose. Deterministic systems enforce invariants.
+        </figcaption>
+      </figure>
+
+      <div class="callout callout_info">
+        <p>
+          A check is not a gate until every path to the effect runs through it. Trace
+          every route that reaches the action. If one goes around, it is a check.
+        </p>
+      </div>
+
+      <h2 id="closing">What to take away</h2>
+      <p class="lede">
+        Graph engineering is deciding where the model may reason, where software must
+        decide, where execution may repeat, and where a person must keep control.
+      </p>
+      <p>
+        A reliable agentic system is usually not one highly autonomous model. It is
+        probabilistic reasoning where flexibility helps, deterministic checks where
+        correctness matters, bounded loops, persistent state, and human gates before
+        consequential actions.
+      </p>
+      <p>
+        The graph is not there to look sophisticated. It is there to make behaviour
+        understandable, testable, recoverable and safe. That is the move from an agent
+        demo to an agent system.
+      </p>
+
+    </article>
+
+    <footer class="doc_foot">
+      <p class="foot_links">
+        <a href="https://github.com/sayantan94/AppliedIn">GitHub</a>
+        <a href="https://github.com/sayantan94/AppliedIn/blob/main/LICENSE">MIT licence</a>
+        <a href="/demo">Demo</a>
+        <a href="https://sayantan.sh/">Contact</a>
+      </p>
+      <p class="muted">For details, visit sayantan.sh</p>
+    </footer>
+
+  </main>
+</div>
+
+<script src="/landing.js?v=4" defer></script>
+</body>
+</html>

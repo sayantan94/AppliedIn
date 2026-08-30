@@ -935,6 +935,11 @@ function laneCard(r) {
   const aged = r.tailored_at && canApply(r)
     ? `<span class="kc-age" title="résumé written ${esc(new Date(r.tailored_at).toLocaleString())}">${esc(ageLabel(r.tailored_at))}</span>`
     : "";
+  const rt = r.retailored_at
+    ? `<span class="kc-rt${(Date.now() - new Date(r.retailored_at).getTime()) < 36e5 ? " fresh" : ""}"
+        title="You re-tailored this résumé ${esc(new Date(r.retailored_at).toLocaleString())}${
+          r.tailor_note ? ` — “${esc(r.tailor_note)}”` : ""}">↻ re-tailored ${esc(ago(r.retailored_at))}</span>`
+    : "";
   const act = state.activity[r.pk];
   const live = (["tailoring", "submitting"].includes(r.status) && act && act.detail)
     ? `<div class="kc-live"><span class="kc-live-dot"></span>${esc(act.detail.replace(/^[^\w]+/, "").slice(0, 70))}</div>` : "";
@@ -945,7 +950,7 @@ function laneCard(r) {
     ${locHtml(r.location)}
     ${profHtml(r.profile_id, r.company)}
     ${live}
-    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${aged}${retry}</div>
+    <div class="kc-foot">${scoreHtml(r.match_score)}${tagHtml(r.status)}${rt}${aged}${retry}</div>
   </div>`;
 }
 /* Group the approval queue by the DAY the résumé was written.
@@ -1303,9 +1308,15 @@ function queuedSec(rows) {
       <span class="un-pos mono" title="position in the whole queue">${it.pos}</span>
       <span class="un-title" data-open="${esc(it.pk)}" role="button" tabindex="0">${esc(r.title || it.pk)}</span>
       <span class="un-rank mono" title="position within ${esc(it.company)}">#${it.company_rank}</span>
-      <span class="un-aged mono" title="${r.tailored_at
-        ? `résumé written ${esc(new Date(r.tailored_at).toLocaleString())}`
-        : "no tailoring date recorded"}">${esc(ageLabel(r.tailored_at) || "")}</span>
+      ${r.retailored_at
+        ? `<span class="un-aged mono" title="You re-tailored this ${
+            esc(new Date(r.retailored_at).toLocaleString())}${
+            r.tailor_note ? ` — “${esc(r.tailor_note)}”` : ""}"><span class="un-rt${
+            (Date.now() - new Date(r.retailored_at).getTime()) < 36e5 ? " fresh" : ""
+          }">↻</span> ${esc(ago(r.retailored_at))}</span>`
+        : `<span class="un-aged mono" title="${r.tailored_at
+            ? `résumé written ${esc(new Date(r.tailored_at).toLocaleString())}`
+            : "no tailoring date recorded"}">${esc(ageLabel(r.tailored_at) || "")}</span>`}
       <span class="un-why">${why}</span>
       <span class="un-acts">
         <button class="un-x" data-act="apply-now" data-pk="${esc(it.pk)}"
@@ -3226,6 +3237,77 @@ function markBusy(pk, detail) {
   scheduleLive(pk);    // and show the live line, same path the SSE feed uses
 }
 
+let rtTimer = null;
+let rtT0 = 0;
+let rtSeen = false;
+
+function rtStop() {
+  if (rtTimer) { clearInterval(rtTimer); rtTimer = null; }
+}
+
+function rtSet(pk, busy) {
+  const box = $("#rt");
+  if (!box) { rtStop(); return; }
+  const kept = ($("#rt-note")?.value || "").trim();
+  box.dataset.busy = String(busy);
+  box.setAttribute("aria-busy", String(busy));
+  const note = $("#rt-note");
+  if (note) note.disabled = busy;
+  $("#rt-foot").innerHTML = retailorFoot(pk, busy, kept);
+  $("#rt-clock").hidden = !busy;
+  $("#rt-kept").hidden = busy || !kept;
+  $("#rt-live").hidden = !busy;
+}
+
+function rtTick(pk) {
+  const box = $("#rt");
+  if (!box || state.openPk !== pk) { rtStop(); return; }
+
+  const secs = Math.max(0, Math.round((Date.now() - rtT0) / 1000));
+  const clock = $("#rt-clock");
+  if (clock) clock.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+
+  const act = state.activity[pk];
+  const line = $("#rt-live-t");
+  if (line && act && act.detail) {
+    line.textContent = act.detail.replace(/^[^\w]+/, "").slice(0, 90);
+  }
+
+  const row = state.apps.find((a) => a.pk === pk);
+  if (row && row.status === "tailoring") rtSeen = true;
+  const done = rtSeen && row && row.status !== "tailoring";
+  if (done || secs > 300) {
+    rtStop();
+    rtSet(pk, false);
+    const n = $("#rt-foot .rt-note");
+    if (n && done) { n.textContent = "Résumé updated."; n.classList.add("ok"); }
+  }
+}
+
+function rtBegin(pk) {
+  rtStop();
+  rtT0 = Date.now();
+  rtSeen = false;
+  rtSet(pk, true);
+  const line = $("#rt-live-t");
+  if (line) line.textContent = "starting the tailor…";
+  rtTimer = setInterval(() => rtTick(pk), 1000);
+  rtTick(pk);
+}
+
+function retailorFoot(pk, busy, kept) {
+  if (busy) {
+    return `<span class="rt-status"><span class="rt-dot"></span>Re-tailoring…</span>
+      <span class="rt-note">Rebuilding the résumé. It keeps its place in the queue,
+        and nothing is being applied.</span>`;
+  }
+  return `<button class="btn btn-primary" data-act="retailor" data-pk="${esc(pk)}">
+      Re-tailor résumé</button>
+    <span class="rt-note">${kept
+      ? "This note is reapplied every time the résumé is rebuilt. Clear the box to drop it."
+      : "Takes about a minute and a half. Nothing is applied."}</span>`;
+}
+
 function paneAction(act, pk, el) {
   if (demoGuard()) return;
   if (act === "answer") {
@@ -3454,6 +3536,31 @@ function openDrawer(pk) {
     `<div class="tl"><div class="tl-dot ${t.done ? "done" : ""}"></div>
       <div><div class="tl-label">${esc(t.label)}</div><div class="tl-time">${when(t.at)}</div></div></div>`).join("");
 
+  const canRetailor = !["applied", "applied_manual", "submitting"].includes(r.status);
+  const retailoring = r.status === "tailoring";
+  const kept = (r.tailor_note || "").trim();
+  const retailor = canRetailor ? `
+    <div class="section">
+      <div class="section-t">tailoring</div>
+      <div class="rt" id="rt" data-busy="${retailoring}" aria-busy="${retailoring}">
+        <div class="rt-sweep"></div>
+        <div class="rt-head">
+          <span class="rt-t">steer the tailor</span>
+          <span class="rt-clock" id="rt-clock" ${retailoring ? "" : "hidden"}>0:00</span>
+          <span class="rt-kept" id="rt-kept" ${kept && !retailoring ? "" : "hidden"}>● note kept</span>
+        </div>
+        <div class="rt-help">Say what this résumé should lead with. The tailor
+          reorders and rewords what you already have — it cannot add a skill,
+          an employer or a title that is not on it.</div>
+        <textarea class="rt-input" id="rt-note" rows="2" ${retailoring ? "disabled" : ""}
+          placeholder="Lead with the distributed-systems work."
+          >${esc(r.tailor_note || "")}</textarea>
+        <div class="rt-foot" id="rt-foot">${retailorFoot(r.pk, retailoring, kept)}</div>
+        <div class="rt-live" id="rt-live" hidden>
+          <span class="rt-dot"></span><span id="rt-live-t"></span></div>
+      </div>
+    </div>` : "";
+
   const gate = (r.status === "needs_human" || canApply(r)) ? `
     <div class="section gate-box">
       <div class="section-t">⏸ ${esc(gateLabel(r.gate_reason))}</div>
@@ -3549,6 +3656,8 @@ function openDrawer(pk) {
       ${r.resume_version ? `<button class="btn" style="margin-top:14px" data-resume="${esc(r.pk)}">
         View résumé · ${esc(r.resume_version)}</button>` : ""}</div>
 
+    ${retailor}
+
     <div class="section"><div class="section-t">form answers · ${(r.fields || []).length} fields</div>
       <div class="fields">${fields}</div></div>
 
@@ -3596,6 +3705,8 @@ function openDrawer(pk) {
     $("#drawer").classList.add("show");
   });
   state.openPk = r.pk;
+  rtStop();
+  if (retailoring) rtBegin(r.pk);
   if (r.has_diff) loadDiff(r.pk);
   loadAgentLog(r.pk);
 }
@@ -3666,6 +3777,7 @@ function loadDiff(pk) {
 }
 function closeDrawer() {
   state.openPk = "";
+  rtStop();
   $("#scrim").classList.remove("show");
   $("#drawer").classList.remove("show");
   setTimeout(() => { $("#scrim").hidden = true; $("#drawer").hidden = true; }, 260);
@@ -5157,6 +5269,20 @@ function wire() {
       const answer = ($("#gate-answer")?.value || "").trim() || "approved";
       post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
       toast("Sent — pipeline resuming.");
+    } else if (kind === "retailor") {
+      const note = ($("#rt-note")?.value || "").trim();
+      rtBegin(pk);
+      markTailoring(pk);
+      post(`/actions/retailor/${encodeURIComponent(pk)}`, { note }).then((d) => {
+        if (!d || !d.ok) {
+          rtStop();
+          rtSet(pk, false);
+          toast((d && d.error) || "Couldn't re-tailor this one.");
+          loadApps();
+          return;
+        }
+        toast(note ? "Re-tailoring with your note." : "Re-tailoring.");
+      });
     } else if (kind === "retry") {
       post(`/actions/retry/${encodeURIComponent(pk)}`);
       toast("Retrying — re-running the pipeline.");
