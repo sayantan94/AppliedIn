@@ -46,6 +46,12 @@ class FileArtifactStore(AbstractArtifactStore):
     def exists(self, key: str) -> bool:
         return (self.root / key).is_file()
 
+    def version(self, key: str) -> str:
+        try:
+            return str(int((self.root / key).stat().st_mtime))
+        except OSError:
+            return ""
+
 
 class RedisTracking(AbstractTracking):
     """DynamoDB TrackingStore analogue on Redis.

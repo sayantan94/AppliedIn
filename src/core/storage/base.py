@@ -73,6 +73,17 @@ class AbstractArtifactStore(ABC):
     @abstractmethod
     def presign(self, key: str, *, expires: int = 3600) -> str: ...
 
+    def version(self, key: str) -> str:
+        """A token that changes whenever these bytes change, or "" if unknown.
+
+        An artifact key is stable across re-runs, so the URL built from it is too
+        — and a viewer that has already rendered that URL may keep showing what
+        it rendered. Carrying a version makes a rebuilt document a different
+        address. Empty by default: a backend that cannot answer must not invent a
+        constant, which would be a URL that never changes again.
+        """
+        return ""
+
     def exists(self, key: str) -> bool:
         """Are the bytes for this key actually there?
 

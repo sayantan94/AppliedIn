@@ -400,6 +400,25 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        # RUN IT SOMEWHERE ELSE. Claude Code's auto-memory is keyed on the working
+        # directory, and inheriting the daemon's meant every session opened this
+        # repo's memories. They are notes from other runs — "as of 2026-07-25
+        # Sayantan is at that cap, so further OpenAI applies fail at submit" — and
+        # a session reads them as fact about the application in front of it. A
+        # second instance on another port has its own board, its own answer bank
+        # and its own Redis database, but it shares this directory with the first,
+        # so it started refusing employers it had never applied to and recalling
+        # an identity an earlier run had filled a form under.
+        #
+        # Measured: from the repo, "do your memories mention a Ramp or OpenAI
+        # application cap?" answers YES; from a scratch directory, NO.
+        #
+        # The prompt already argues with this in prose, and a prompt is the one
+        # place this cannot be fixed — a model cannot decline to have been told
+        # something. The scratch directory is the same one the report is written
+        # to and is already on --add-dir, so nothing the session needs moves: the
+        # task is entirely self-contained in its own text.
+        cwd=str(out_dir),
         # `claude -p` waits on stdin before it starts. From a terminal that costs
         # three seconds and a warning; from the daemon there is no terminal, and
         # the session died two and a half minutes in having produced nothing. The

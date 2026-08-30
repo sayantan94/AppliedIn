@@ -48,53 +48,19 @@ def missing_rows(stores) -> list[dict]:  # noqa: ANN001
 
 
 def regenerate(pk: str, stores) -> dict:  # noqa: ANN001
-    """Run the tailor (and only the tailor) for one job."""
-    import asyncio
+    """Run the tailor (and only the tailor) for one job.
 
-    from google.adk.runners import Runner
-    from google.genai import types
+    Delegates to `agent.run.retailor`, which the dashboard's Re-tailor button also
+    calls. The refusals — an applied row, a row mid-apply — live there, so the CLI
+    and the button cannot drift on which rows may be rewritten.
+    """
+    from agent.run import retailor
 
-    from agent.graph import tailor
-    from agent.run import _APP, _USER, _base_latex, _github_context, _prefs_notes, _session_service
-
-    row = stores.tracking.get(pk)
-    if row is None:
-        return {"pk": pk, "result": "missing_row"}
-    if row.get("status") in _APPLIED:
-        return {"pk": pk, "result": "refused_applied", "status": row.get("status")}
-
-    jd_text = row.get("jd_text") or ""
-    if len(jd_text) < 400 and row.get("jd_url"):
-        from tools.jd import fetch_jd
-        jd_text = fetch_jd(row["jd_url"]) or jd_text
-    if not jd_text.strip():
-        return {"pk": pk, "result": "no_jd"}
-
-    state = {
-        "pk": pk, "company": row.get("company", ""), "ats": row.get("ats", ""),
-        "jd_url": row.get("jd_url", ""), "jd_text": jd_text,
-        "base_latex": _base_latex(), "github_context": _github_context(),
-        "prefs_notes": _prefs_notes() or "(none)",
-    }
-
-    async def _go() -> None:
-        sessions = _session_service()
-        sid = f"regen:{pk}"
-        if await sessions.get_session(app_name=_APP, user_id=_USER, session_id=sid):
-            await sessions.delete_session(app_name=_APP, user_id=_USER, session_id=sid)
-        await sessions.create_session(app_name=_APP, user_id=_USER, session_id=sid, state=state)
-        runner = Runner(agent=tailor, app_name=_APP, session_service=sessions)
-        msg = types.Content(role="user", parts=[types.Part(
-            text=f"Tailor the résumé for {row.get('title','')} at {row.get('company','')}.")])
-        async for _ in runner.run_async(user_id=_USER, session_id=sid, new_message=msg):
-            pass
-
-    asyncio.run(_go())
-
-    root = _artifact_root()
-    after = stores.tracking.get(pk) or {}
-    key = after.get("resume_s3_key") or ""
-    ok = bool(key) and (root / key).is_file()
+    out = retailor(pk, None, stores)
+    if out.get("result") != "ok":
+        return {"pk": pk, "result": out.get("result"), "status": out.get("status", "")}
+    key = out.get("resume_key") or ""
+    ok = bool(key) and (_artifact_root() / key).is_file()
     return {"pk": pk, "result": "ok" if ok else "no_pdf_written", "key": key}
 
 

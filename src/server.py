@@ -221,7 +221,12 @@ def _to_ui(row: dict, artifacts) -> dict:
         k = row.get(key)
         if not k or not artifacts.exists(k):
             return None
-        return f"/artifact/{quote(k, safe='/')}"
+        # The key is stable and re-tailoring rewrites it in place, so the URL has
+        # to say which version it is. Chrome's PDF viewer reuses a document it has
+        # already rendered for a URL it has already seen, and the owner read the
+        # previous résumé after re-tailoring one.
+        v = artifacts.version(k)
+        return f"/artifact/{quote(k, safe='/')}" + (f"?v={v}" if v else "")
 
     events = row.get("events") or []
     return {
@@ -234,12 +239,16 @@ def _to_ui(row: dict, artifacts) -> dict:
         "fail_kind": row.get("fail_kind") or "",
         "fail_reason": row.get("fail_reason") or "",
         "tailored_at": row.get("tailored_at") or "",
+        "retailored_at": row.get("retailored_at") or "",
         "posted_at": row.get("posted_at") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
         "closed_reason": _closed_reason(row),
         "resume_version": row.get("resume_version"),
         "resume_url": link("resume_s3_key"),
+        # What the box shows. The note in force IS the note in the box, so the
+        # owner edits it rather than adding to an invisible pile.
+        "tailor_note": row.get("tailor_note") or "",
         "has_diff": bool(row.get("resume_tex_key")),
         "jd_url": row.get("jd_url"),
         # The posting itself, so the owner can read what the résumé was tailored
@@ -1953,6 +1962,59 @@ def create_app() -> FastAPI:
         # instead of vanishing from the board entirely.
         stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval")
         return {"ok": True, "removed": pk}
+
+    @app.post("/actions/retailor/{pk:path}")
+    def retailor_job(pk: str, body: dict, background: BackgroundTasks):
+        """Re-tailor ONE résumé with a note from the owner. Applies nothing.
+
+        The owner reads a tailored résumé, sees it under-plays what the posting is
+        really about, and had no way to say so: Retry re-runs the whole pipeline,
+        applier included, so adjusting a résumé with it submits an application.
+
+        The note is stored on the row, so the automatic re-tailor that the
+        stale-résumé guard triggers — the run that actually reaches the employer —
+        uses it too. Sending an empty note clears it, because the box shows the
+        note in force and blanking it is how a person removes one.
+
+        Refusals live in `retailor`, not here, so the CLI and the button cannot
+        drift on which rows may be rewritten.
+        """
+        from agent.run import retailor
+
+        note = str((body or {}).get("note") or "")
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk) or {}
+        if not row:
+            return {"ok": False, "error": "no such job"}
+        if (st := row.get("status")) in ("applied", "applied_manual"):
+            return {"ok": False,
+                    "error": "This application has already gone out. A fresh "
+                             "résumé here would look like the one they received."}
+        if st == "submitting":
+            return {"ok": False,
+                    "error": "A browser is filling this form right now — try "
+                             "again once it finishes."}
+
+        def _go() -> None:
+            import logging
+
+            from core.events import emit
+
+            try:
+                emit("running", pk=pk, agent="tailor", url=row.get("jd_url"),
+                     detail="re-tailoring with your note…" if note.strip()
+                            else "re-tailoring…")
+                out = retailor(pk, note, stores)
+                emit("response", pk=pk, agent="tailor", url=row.get("jd_url"),
+                     detail=("✅ résumé re-tailored" if out.get("result") == "ok"
+                             else f"re-tailor did not finish: {out.get('result')}"))
+            except Exception:
+                logging.getLogger("server").exception("re-tailor failed for %s", pk)
+                emit("error", pk=pk, agent="tailor", url=row.get("jd_url"),
+                     detail="re-tailoring failed — the previous résumé is kept")
+
+        background.add_task(_go)
+        return {"ok": True, "status": "retailoring", "pk": pk, "note": note.strip()}
 
     @app.post("/actions/retry/{pk}")
     def retry(pk: str, background: BackgroundTasks):
