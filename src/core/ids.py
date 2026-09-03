@@ -47,3 +47,21 @@ def jd_hash(jd_text: str) -> str:
 def make_pk(company: str, job_id: str) -> str:
     """Dedup partition key: lowercased ``company#job_id``."""
     return f"{company.strip().lower()}#{job_id.strip()}"
+
+
+# Bookkeeping rows share the tracking table with jobs and are keyed
+# ``meta#<kind>…``. A job at the company Meta is keyed ``meta#<job_id>`` by
+# `make_pk`, so a prefix test cannot tell them apart — and for as long as it
+# was used, every one of Meta's postings was treated as bookkeeping: hidden from
+# the board, left out of the status index, never swept. The kinds are registered
+# here and a test scans the source so a new one cannot be written unregistered.
+INTERNAL_KINDS = ("watermark", "run", "profiles", "prefs", "dailycap", "undated", "age")
+
+
+def is_internal_pk(pk: str) -> bool:
+    """Whether this tracking key is bookkeeping rather than a job."""
+    pk = str(pk or "")
+    if not pk.startswith("meta#"):
+        return False
+    kind = pk[5:].split("#", 1)[0]
+    return kind in INTERNAL_KINDS

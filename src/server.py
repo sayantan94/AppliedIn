@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import get_settings
 from core.models import Status
 from core.stores import make_stores
+from core.ids import is_internal_pk
 
 _WEB = Path(__file__).resolve().parents[1] / "web"
 
@@ -71,7 +72,7 @@ def _rescreen_company(name: str) -> int:
     rows = [r for r in stores.tracking.all()
             if (r.get("company") or "").lower() == low
             and r.get("status") in ("found", "skipped")
-            and not str(r.get("pk", "")).startswith("meta#")]
+            and not is_internal_pk(r.get("pk", ""))]
     if not rows:
         return 0
 
@@ -199,7 +200,7 @@ def _is_job_row(row: dict) -> bool:
     """Real application rows only. Internal bookkeeping (crawl watermarks,
     `meta#…`) shares the tracking table but isn't a job — hide it from the board
     so it doesn't render as a blank card or inflate the counts."""
-    return not str(row.get("pk") or "").startswith("meta#")
+    return not is_internal_pk(row.get("pk") or "")
 
 
 def _to_ui(row: dict, artifacts) -> dict:
@@ -249,6 +250,10 @@ def _to_ui(row: dict, artifacts) -> dict:
         # What the box shows. The note in force IS the note in the box, so the
         # owner edits it rather than adding to an invisible pile.
         "tailor_note": row.get("tailor_note") or "",
+        "reapplied_from": row.get("reapplied_from") or "",
+        "reapplied_as": row.get("reapplied_as") or [],
+        "reapply_n": row.get("reapply_n") or 0,
+        "profile_id": row.get("profile_id") or "",
         "has_diff": bool(row.get("resume_tex_key")),
         "jd_url": row.get("jd_url"),
         # The posting itself, so the owner can read what the résumé was tailored
@@ -658,10 +663,102 @@ def create_app() -> FastAPI:
         from core import profiles as prof
 
         items, default = prof.load()
+        # What each profile has been used for, counted from the rows. The panel
+        # showed an email and nothing else, so "a new one for Netflix" meant
+        # guessing which had already been spent there.
+        try:
+            used = prof.usage(make_stores(settings))
+        except Exception:  # noqa: BLE001 — the list must render even if counting fails
+            used = {}
         return {"default": default,
+                "company_profiles": prof.bindings(),
                 "profiles": [{"id": x.id, "label": x.label, "email": x.email,
                               "phone": x.phone, "kind": x.kind, "limit": x.limit,
-                              "style": x.style} for x in items]}
+                              "style": x.style,
+                              "usage": used.get(x.id, {"applied": 0, "unsent": 0,
+                                                       "in_flight": 0, "companies": {}})}
+                             for x in items]}
+
+    def _set_company_profile(company: str, profile_id: str, background) -> dict:  # noqa: ANN001
+        """The one place a company's standing profile is set, from either door.
+
+        The company page's "Apply as" and the queue's dropdown used to be two
+        mechanisms: the first wrote a preference only discovery read, so choosing
+        it on Netflix's page stamped postings found later and left the 72 already
+        on the board exactly as they were. Now both come here. Every un-sent row
+        is re-pointed and its résumé re-rendered; queued rows come out and go
+        back in under the new profile; failed ones are revived; already-sent ones
+        keep their identity and are counted. Rows with no résumé yet are tailored
+        under the new profile in the background and queued as they finish, so
+        this ends with something to press Apply on.
+        """
+        from core import profiles as prof
+        from core.apply_queue import ApplyQueue
+        from core.events import emit
+
+        company = (company or "").strip()
+        if not company:
+            return {"ok": False, "error": "no company"}
+        if not profile_id:
+            prof.unbind(company)
+            emit("running", agent="workflow", company=company,
+                 pk=f"meta#run#{company.lower()}",
+                 detail=f"{company}: no standing profile — the default applies again")
+            return {"ok": True, "company": company, "profile": "", "unbound": True}
+        profile = prof.get(profile_id)
+        if not profile:
+            return {"ok": False, "error": "no such profile"}
+        if profile.kind == "rotating":
+            return {"ok": False, "error": "that is a rotating template — use Rotate & queue"}
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+        out = prof.assign_company(company, profile, stores, q)
+        if not out.get("ok"):
+            return out
+        untailored = out.pop("untailored", [])
+        emit("running", agent="workflow", company=company, pk=f"meta#run#{company.lower()}",
+             detail=(f"{company}: every application now goes out as {profile.label} · "
+                     f"{out['repointed']} re-pointed · {out['queued']} queued"
+                     + (f" · {len(untailored)} being tailored" if untailored else "")
+                     + (f" · {out['revived']} revived" if out["revived"] else "")
+                     + (f" · {out['left_alone']} already sent, left alone" if out["left_alone"] else "")))
+        if untailored:
+            background.add_task(_tailor_and_queue, company, untailored, stores, q)
+        out["tailoring"] = len(untailored)
+        return out
+
+    @app.post("/actions/reapply/{pk:path}")
+    def reapply_job(pk: str, body: dict, background: BackgroundTasks):
+        """Apply again to a posting already applied to, under a different profile.
+
+        A new row for the same posting — the applied one is history and keeps
+        its confirmation. The new row is tailored under the new identity in the
+        background and queued as it finishes, then waits at the gate like any
+        other job. Refused when the identity already applied to this posting.
+        """
+        from core import profiles as prof
+        from core.apply_queue import ApplyQueue
+        from core.events import emit
+
+        profile = prof.get(str((body or {}).get("profile_id") or ""))
+        if not profile:
+            return {"ok": False, "error": "no such profile"}
+        stores = make_stores(settings)
+        out = prof.reapply(pk, profile, stores)
+        if not out.get("ok"):
+            return out
+        row = stores.tracking.get(out["pk"]) or {}
+        emit("running", pk=out["pk"], agent="workflow", url=row.get("jd_url"),
+             detail=f"applying again as {profile.label} — tailoring first")
+        q = ApplyQueue(stores.tracking.r)
+        background.add_task(_tailor_and_queue, row.get("company") or "", [out["pk"]], stores, q)
+        return out
+
+    @app.post("/actions/company-profile")
+    def company_profile(body: dict, background: BackgroundTasks):
+        """Set the profile every application at ONE company goes out under."""
+        return _set_company_profile(str((body or {}).get("company") or ""),
+                                    str((body or {}).get("profile_id") or ""), background)
 
     @app.post("/profiles")
     def set_profiles(body: dict):
@@ -872,7 +969,7 @@ def create_app() -> FastAPI:
         done, skipped = 0, 0
         for row in stores.tracking.all():
             pk = row.get("pk", "")
-            if str(pk).startswith("meta#") or not row.get("resume_tex_key"):
+            if is_internal_pk(pk) or not row.get("resume_tex_key"):
                 continue
             if row.get("status") in ("applied", "applied_manual", "submitting"):
                 skipped += 1          # already sent — its identity is history now
@@ -940,7 +1037,7 @@ def create_app() -> FastAPI:
                 "pref_fields": list(flags.COMPANY_PREF_FIELDS)}
 
     @app.post("/actions/company-prefs")
-    def company_prefs(body: dict):
+    def company_prefs(body: dict, background: BackgroundTasks):
         """Override the job preferences for ONE company.
 
         Send only the fields you are changing. A field sent as null, "" or []
@@ -964,7 +1061,21 @@ def create_app() -> FastAPI:
                     over[k] = int(over[k])
                 except (TypeError, ValueError):
                     return {"ok": False, "error": f"{k} must be a number"}
-        flags.set_company_pref(name, over)
+        # "Apply as" on the company page is the standing profile, and setting it
+        # has to reach the rows already on the board — not only postings found
+        # later, which is all it used to do. Same path as the queue's dropdown.
+        profile_change = "profile_id" in over
+        wanted = str(over.pop("profile_id", "") or "")
+        # `{}` means "reset every override to global" and must stay meaning that.
+        # A save that carried ONLY a profile change leaves `over` empty here, and
+        # passing that through would wipe the company's titles and seniority
+        # rules as a side effect of choosing who applies.
+        if over or not profile_change:
+            flags.set_company_pref(name, over)
+        if profile_change:
+            outcome = _set_company_profile(name, wanted, background)
+            if not outcome.get("ok"):
+                return outcome
 
         # Re-screen what is ALREADY on the board. Without this the new rules only
         # governed future finds, so a company kept a backlog screened under rules
@@ -1056,7 +1167,7 @@ def create_app() -> FastAPI:
                 total = sum(1 for r in stores.tracking.all()
                             if (r.get("company") or "").strip().lower()
                             == name.strip().lower()
-                            and not str(r.get("pk", "")).startswith("meta#"))
+                            and not is_internal_pk(r.get("pk", "")))
                 if waiting:
                     msg = f"{name}: {waiting} tailored job(s) awaiting your approval"
                 elif total:
@@ -1528,7 +1639,7 @@ def create_app() -> FastAPI:
 
         rows, undated = [], 0
         for r in make_stores(settings).tracking.all():
-            if str(r.get("pk", "")).startswith("meta#"):
+            if is_internal_pk(r.get("pk", "")):
                 continue
             posted = r.get("posted_at") or ""
             if not posted:
@@ -1576,7 +1687,7 @@ def create_app() -> FastAPI:
         found: Counter = Counter()
         applied: Counter = Counter()
         for r in make_stores(settings).tracking.all():
-            if str(r.get("pk", "")).startswith("meta#"):
+            if is_internal_pk(r.get("pk", "")):
                 continue
             if (k := day(r.get("discovered_at"))):
                 found[k] += 1
@@ -1896,6 +2007,8 @@ def create_app() -> FastAPI:
         q.drop_dead_letter(pk)
         return {"ok": True, "dequeued": removed}
 
+    RETAILOR_DEADLINE_S = 15 * 60
+
     @app.post("/actions/apply-now/{pk}")
     def apply_now(pk: str, background: BackgroundTasks):
         """Run ONE queued job immediately, ahead of its turn.
@@ -1932,9 +2045,53 @@ def create_app() -> FastAPI:
         item = {"pk": pk, "company": company, "attempts": 0, "history": []}
         q.r.sadd("applyq:inflight", (company or "").strip().lower() or "unknown")
         q.r.sadd("applyq:inflight:pks", pk)
-        background.add_task(run_queued, item, q)
-        log.info("apply-now: %s", pk)
-        return {"ok": True, "started": pk}
+
+        # A press is an explicit instruction, so a stale résumé is re-tailored
+        # HERE and the apply follows in the same task. The stale guard inside
+        # _apply_direct hands the row to the tailor queue instead — right for the
+        # worker, wrong for a button: with the board paused that queue is asleep,
+        # so the row went back to `found` and the press looked like nothing at all.
+        from agent.run import run_job, seed_fingerprint
+        from core.events import emit
+        from core.models import Status
+
+        stale = bool(row.get("resume_tex_key")) and row.get("resume_seed") != seed_fingerprint()
+
+        def _go() -> None:
+            try:
+                if stale:
+                    stores.tracking.set_status(pk, Status.FOUND, gate_reason="", fail_reason="")
+                    emit("running", pk=pk, agent="tailor", url=row.get("jd_url"),
+                         detail="base résumé changed — re-tailoring first, then applying")
+                    # With a deadline. A model call stuck behind a rate limit once
+                    # held Netflix's lease for three and a half hours from here.
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        try:
+                            pool.submit(run_job, pk, stores).result(timeout=RETAILOR_DEADLINE_S)
+                        except concurrent.futures.TimeoutError:
+                            stores.tracking.set_status(pk, Status.FOUND, gate_reason="", fail_reason="")
+                            emit("error", pk=pk, agent="tailor", url=row.get("jd_url"),
+                                 detail=f"re-tailoring did not finish in {RETAILOR_DEADLINE_S // 60} min "
+                                        "(the model API may be rate limiting) — not applied, press Apply again later")
+                            log.warning("apply-now: re-tailor of %s hit the %ds deadline", pk, RETAILOR_DEADLINE_S)
+                            q.done(item)
+                            return
+                    q.remove(pk)     # run_job queued it again; this press owns the turn
+                    after = stores.tracking.get(pk) or {}
+                    if after.get("status") not in ("tailored", "needs_human"):
+                        log.info("apply-now: %s did not come back tailored (%s) — not applying",
+                                 pk, after.get("status"))
+                        q.done(item)
+                        return
+                run_queued(item, q)
+            except Exception:
+                log.exception("apply-now failed for %s", pk)
+                q.done(item)
+
+        background.add_task(_go)
+        log.info("apply-now: %s%s", pk, " (re-tailoring first)" if stale else "")
+        return {"ok": True, "started": pk, "retailoring": stale}
 
     @app.post("/actions/queue-remove/{pk}")
     def queue_remove(pk: str):
@@ -2254,7 +2411,7 @@ def _recover_stuck(settings) -> None:  # noqa: ANN001
     try:
         stores = make_stores(settings)
         rows = [r for r in stores.tracking.all()
-                if not str(r.get("pk", "")).startswith("meta#")]
+                if not is_internal_pk(r.get("pk", ""))]
         from agent.run import release_claim
 
         stuck = [r for r in rows if r.get("status") == "submitting"]

@@ -36,8 +36,13 @@ def test_a_key_whose_file_exists_yields_a_url(tmp_path):
     store = _store(tmp_path)
     store.put("resumes", "robinhood#8120101.pdf", b"%PDF-1.4\n", "application/pdf")
     row = {"pk": "robinhood#8120101", "resume_s3_key": "resumes/robinhood#8120101.pdf"}
-    # '#' must stay percent-encoded — it starts a fragment otherwise.
-    assert _to_ui(row, store)["resume_url"] == "/artifact/resumes/robinhood%238120101.pdf"
+    # '#' must stay percent-encoded — it starts a fragment otherwise. The URL also
+    # carries the artifact's version, so a re-tailored résumé is a new address and
+    # Chrome's PDF viewer cannot serve the one it rendered last time.
+    url = _to_ui(row, store)["resume_url"]
+
+    assert url.startswith("/artifact/resumes/robinhood%238120101.pdf?v=")
+    assert "#" not in url
 
 
 def test_a_missing_screenshot_is_dropped_the_same_way(tmp_path):

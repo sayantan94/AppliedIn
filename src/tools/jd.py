@@ -73,7 +73,7 @@ def _from_ats(url: str) -> dict | None:
     return None
 
 
-def fetch_jd_meta(url: str) -> dict:
+def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     """{'title', 'text'} for a posting, or empty strings when it cannot be read."""
     if not url:
         return {"title": "", "text": ""}
@@ -81,12 +81,14 @@ def fetch_jd_meta(url: str) -> dict:
         return hit
     from discovery.resolver import BROWSER_HEADERS
 
-    try:
-        with httpx.Client(headers=BROWSER_HEADERS, follow_redirects=True,
-                          timeout=25) as client:
-            html = client.get(url).text
-    except httpx.HTTPError as exc:
-        log.error("JD fetch failed for %s: %s", url, exc)
+    # The disguise first, then bare. metacareers.com answers 400 to a request
+    # that carries browser-like headers and 200 to one that carries none — the
+    # imitation is what trips it — so a refusal is retried once, undisguised,
+    # before this gives up.
+    html = _get(url, BROWSER_HEADERS)
+    if html is None:
+        html = _get(url, {})
+    if html is None:
         return {"title": "", "text": ""}
 
     raw_title = (m.group(1).strip() if (m := _TITLE_RX.search(html)) else "")
@@ -97,12 +99,122 @@ def fetch_jd_meta(url: str) -> dict:
         # A page that builds itself in the browser gives a plain fetch almost
         # nothing, and a tailor working from nothing writes a worse résumé than
         # one that was never tailored. Read it the way a person would.
-        if (seen := _from_chrome(url)) and len(seen.get("text", "")) > len(text):
+        if (seen := _from_chrome(url, kind)) and len(seen.get("text", "")) > len(text):
             return seen
     return {"title": title[:90], "text": text}
 
 
-def _from_chrome(url: str) -> dict | None:
+def _get(url: str, headers: dict) -> str | None:
+    """The page, or None when the server refused or the request failed.
+
+    A non-2xx response used to be returned as if it were the posting. Meta's
+    400 page — "Sorry, something went wrong" — came back as 126 characters of
+    job description, nothing downstream objected, and the tailor would have
+    written a résumé against it. A refusal is not a page.
+    """
+    try:
+        with httpx.Client(headers=headers, follow_redirects=True, timeout=25) as client:
+            r = client.get(url)
+    except httpx.HTTPError as exc:
+        log.error("JD fetch failed for %s: %s", url, exc)
+        return None
+    if not 200 <= r.status_code < 300:
+        log.warning("JD fetch refused for %s: HTTP %s", url, r.status_code)
+        return None
+    return r.text
+
+
+def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
+                  with_gone: bool = False):
+    """Read several browser-only postings per session. {url: description}.
+
+    Meta's postings cannot be read over HTTP at all, so each needs a real browser.
+    Read one per session that cost ~5 minutes × 55 rows, serialised, each session
+    waiting on any application in flight. The cost is session start-up, not page
+    reads, so one session reads a handful.
+
+    Two rules keep a batch honest. An entry is accepted only if its URL is one we
+    asked for: a session that attributes one posting's text to another's URL is
+    worse than one that fails, and it is the failure mode a batch invites. And a
+    batch that comes back malformed loses only itself — the sweep carries on.
+    """
+    from tools.claude_chrome import TAB_HYGIENE
+
+    ok, _ = available()
+    if not ok or not urls:
+        return {}
+
+    out: dict[str, str] = {}
+    gone: set[str] = set()
+    for i in range(0, len(urls), batch):
+        chunk = urls[i:i + batch]
+        listing = "\n".join(f"- {u}" for u in chunk)
+        task = (f"Read these {len(chunk)} job postings, one at a time. For each: open the "
+                f"URL, wait for it to load, read the whole posting — responsibilities, "
+                f"requirements, everything — then close its tab.\n\n{listing}\n\n"
+                f"{TAB_HYGIENE}\n"
+                "Write this JSON to the file you are told about and repeat it in your "
+                "reply, with one entry per URL EXACTLY as given above. If a posting has "
+                "been removed — the page says the job is no longer available, or "
+                "redirects to a not-available page — set \"gone\": true for it and "
+                "leave its description empty:\n"
+                '{"postings": [{"url": "<the url, verbatim>", "title": "<role title>", '
+                '"gone": false, "description": "<the full posting text, verbatim>"}]}')
+        try:
+            report, problem = _run(run_task(task, report_key="postings",
+                                            timeout_s=120 * len(chunk), kind=kind))
+        except Exception as exc:  # noqa: BLE001 — one bad batch must not stop the sweep
+            log.warning("posting batch failed: %s", exc)
+            continue
+        if problem or not isinstance(report.get("postings"), list):
+            log.warning("posting batch returned nothing usable: %s", problem or "no list")
+            continue
+        wanted = set(chunk)
+        for entry in report["postings"]:
+            if not isinstance(entry, dict):
+                continue
+            u = str(entry.get("url") or "").strip()
+            text = str(entry.get("description") or "").strip()
+            if u not in wanted:
+                log.warning("posting batch returned a URL that was not asked for: %s", u[:80])
+                continue
+            if entry.get("gone") is True or _GONE_RX.search(text[:400]):
+                gone.add(u)
+                continue
+            if len(text) < 400:
+                continue
+            out[u] = text
+    return (out, gone) if with_gone else out
+
+
+_GONE_RX = re.compile(r"no longer available|position[- ]not[- ]available|has been removed|"
+                      r"job (?:posting )?(?:is )?closed", re.I)
+
+
+def run_task(*args, **kwargs):
+    from tools.claude_chrome import run_task as _rt
+
+    return _rt(*args, **kwargs)
+
+
+def available():
+    from tools.claude_chrome import available as _av
+
+    return _av()
+
+
+def _run(coro):
+    import asyncio
+
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:  # already inside a loop
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro)).result()
+
+
+def _from_chrome(url: str, kind: str = "jd") -> dict | None:
     """Read the posting in the owner's own browser. Last resort, and slow."""
     import asyncio
 
@@ -121,13 +233,13 @@ def _from_chrome(url: str) -> dict | None:
             'verbatim: responsibilities, requirements, everything>"}')
     try:
         report, problem = asyncio.run(
-            run_task(task, report_key="description", timeout_s=300, kind="jd"))
+            run_task(task, report_key="description", timeout_s=300, kind=kind))
     except RuntimeError:  # already inside a loop
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             report, problem = pool.submit(
                 lambda: asyncio.run(run_task(task, report_key="description",
-                                             timeout_s=300, kind="jd"))).result()
+                                             timeout_s=300, kind=kind))).result()
     if problem or not report:
         log.warning("could not read %s in the browser: %s", url, problem)
         return None
@@ -135,6 +247,7 @@ def _from_chrome(url: str) -> dict | None:
             "text": str(report.get("description", ""))}
 
 
-def fetch_jd(url: str) -> str:
-    """Just the text."""
-    return fetch_jd_meta(url).get("text", "")
+def fetch_jd(url: str, kind: str = "jd") -> str:
+    """Just the text. `kind` says whether a browser read may wait for a live
+    application ("jd_sweep") or is part of one ("jd")."""
+    return fetch_jd_meta(url, kind=kind).get("text", "")

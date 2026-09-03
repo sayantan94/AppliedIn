@@ -18,6 +18,7 @@ from typing import Any
 
 from .config import get_settings
 from .logging import get_logger
+from .ids import is_internal_pk
 
 log = get_logger(__name__)
 
@@ -42,7 +43,7 @@ def remember(kind: str, *, pk: str | None = None, detail: str = "",
     """Append one outcome to the markdown memory. No-op for non-outcome kinds
     and for a (job, outcome) already logged today. Never raises."""
     label = _LABEL.get(kind)
-    if not label or (pk and str(pk).startswith("meta#")):
+    if not label or is_internal_pk(pk):
         return
     try:
         from datetime import datetime

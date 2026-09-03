@@ -234,10 +234,16 @@ def test_applied_is_never_recorded_without_the_page_saying_so():
     applying" off a page whose form was still empty. So claiming success is not
     enough — the page has to have said something.
     """
+    from core.apply_queue import is_retryable
     from tools.claude_chrome import classify
 
-    assert classify({"outcome": "applied"})["status"] == "unknown"
-    assert classify({"outcome": "applied", "confirmation": "   "})["status"] == "unknown"
+    out = classify({"outcome": "applied"})
+    assert out["status"] != "applied"
+    # And not merely "unknown": the session SAYS it clicked Submit, so a retry
+    # could send a second application. It is uncertain — terminal, to the owner.
+    assert out["status"] == "uncertain"
+    assert is_retryable({"result": "failed", "reason": out["status"]})[0] is False
+    assert classify({"outcome": "applied", "confirmation": "   "})["status"] == "uncertain"
 
     ok = classify({"outcome": "applied", "confirmation": "Application Success"})
     assert ok["status"] == "applied" and ok["confirmation"] == "Application Success"

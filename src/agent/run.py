@@ -129,6 +129,16 @@ def _claim(pk: str, stores: Any) -> bool:
         return True
 
 
+def _claimed(pk: str, stores: Any) -> bool:
+    client = getattr(stores.tracking, "r", None)
+    if client is None:
+        return False
+    try:
+        return bool(client.exists(f"lock:job:{pk}"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _release(pk: str, stores: Any) -> None:
     client = getattr(stores.tracking, "r", None)
     if client is None:
@@ -147,6 +157,10 @@ def _release(pk: str, stores: Any) -> None:
 release_claim = _release
 
 
+_ALREADY_RUNNING = ("An earlier run is still working on this job. Wait for it to "
+                    "finish; if it never does, restart the daemon and it frees itself.")
+
+
 def run_job(pk: str, stores: Any = None) -> dict:
     """Run the pipeline for one discovered job through the ADK agent graph."""
     stores = stores or make_stores()
@@ -159,11 +173,13 @@ def run_job(pk: str, stores: Any = None) -> dict:
     status = row.get("status")
     if status not in ("found", "tailoring", None, ""):
         return {"result": "already_done", "pk": pk, "status": status}
+    from core.events import emit
     if not _claim(pk, stores):
         log.info("skipping %s — already being processed", pk)
+        emit("response", pk=pk, url=row.get("jd_url"),
+             detail=_ALREADY_RUNNING)
         return {"result": "already_running", "pk": pk}
 
-    from core.events import emit
     # Mark it in-progress so the board shows it WORKING (yellow, in Tailored)
     # instead of sitting silently in Found. The graph resets it to
     # tailored/skipped/gated when it finishes; an orphan (killed mid-run) is
@@ -186,6 +202,20 @@ def run_job(pk: str, stores: Any = None) -> dict:
 
 async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
     jd_text = await _jd_text(row)  # fetch the FULL JD (discovery only had the title)
+
+    if _unreadable(jd_text):
+        # A posting we could not read is a posting we must not tailor for. The
+        # alternative was a résumé written against an error page and queued for
+        # an employer. Closed, not skipped: Retry puts it back through, so a page
+        # that was down for an hour, or a site that needs the browser, gets
+        # another chance once that is fixed.
+        from core.events import emit
+        why = ("Could not read the posting — the page returned an error or almost "
+               "no text. Nothing was tailored. Retry once the site is reachable.")
+        stores.tracking.set_status(pk, Status.FAILED, fail_reason=why, fail_kind="no_jd")
+        emit("failed", pk=pk, detail="posting unreadable — not tailored", url=row.get("jd_url"))
+        log.warning("unreadable posting for pk=%s (%d chars) — closed as no_jd", pk, len(jd_text or ""))
+        return {"result": "failed", "pk": pk, "reason": "no_jd"}
 
     if _no_sponsorship(jd_text):  # dead end before we waste tailoring / an application
         from core.events import emit
@@ -223,20 +253,97 @@ async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
     return result
 
 
-async def _jd_text(row: dict) -> str:
+async def _jd_text(row: dict, *, yielding: bool = True) -> str:
     """The full JD. Discovery stores only a title, so fetch the posting text from
-    its URL; fall back to whatever discovery captured."""
+    its URL; fall back to whatever discovery captured.
+
+    `yielding` is True for the evaluate sweep, where a browser read is bulk work
+    and must wait for a live application; the apply passes False, because there
+    the read is part of the application's own flow."""
     import asyncio
 
-    from tools.jd import fetch_jd
+    from tools import jd as _jd
 
-    captured = row.get("jd_text", "") or ""
+    captured = (row.get("jd_text", "") or "").strip()
     url = row.get("jd_url", "")
     if url and len(captured) < 400:  # looks like just a title — fetch the real thing
-        fetched = await asyncio.to_thread(fetch_jd, url)
-        if fetched:
+        kind = "jd_sweep" if yielding else "jd"
+        fetched = ((await asyncio.to_thread(_jd.fetch_jd, url, kind)) or "").strip()
+        # Never a downgrade. This used to return whatever the fetch produced, so a
+        # refusal page replaced a perfectly good listing summary.
+        if len(fetched) > len(captured):
             return fetched
     return captured
+
+
+def _browser_companies() -> set[str]:
+    """Companies whose postings can only be read in a browser."""
+    from pathlib import Path as _P
+
+    from core.models import DiscoveryMode
+    from discovery.watchlist import load_watchlist
+
+    try:
+        cfg = _P(get_settings().config_dir) / "watchlist.yaml"
+        return {c.name.strip().lower() for c in load_watchlist(cfg)
+                if c.discovery is DiscoveryMode.BROWSER}
+    except Exception:  # noqa: BLE001 — no watchlist means no browser-only companies
+        return set()
+
+
+def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
+    """Fill in descriptions for browser-only postings before the sweep runs them.
+
+    Demand-driven: only rows about to be evaluated, only companies whose site
+    refuses a plain fetch, only rows with nothing usable yet. Read a batch per
+    browser session, and store what came back on the row so the per-row read
+    finds it and skips the browser entirely. Returns how many rows were filled.
+    """
+    from tools import jd as _jd
+
+    browser = _browser_companies()
+    need = [r for r in rows
+            if (r.get("company") or "").strip().lower() in browser
+            and r.get("jd_url") and _unreadable(r.get("jd_text") or "")]
+    if not need:
+        return 0
+    log.info("reading %d browser-only posting(s) before the sweep", len(need))
+    got, gone = _jd.read_postings([r["jd_url"] for r in need], with_gone=True)
+    filled = closed = 0
+    for r in need:
+        if r["jd_url"] in gone:
+            # The browser read the employer's own "no longer available" page.
+            # That is an answer: close the row rather than read it again next
+            # sweep, and rather than tailor for a job that does not exist.
+            stores.tracking.set_status(r["pk"], Status.JOB_GONE,
+                                       fail_reason="The posting has been removed.")
+            closed += 1
+            continue
+        text = got.get(r["jd_url"])
+        if not text:
+            continue
+        stores.tracking.set_status(r["pk"], r.get("status") or Status.FOUND, jd_text=text)
+        filled += 1
+    log.info("browser prefetch filled %d and closed %d of %d posting(s)", filled, closed, len(need))
+    return filled
+
+
+_JD_FLOOR = 80
+_JD_NOISE = ("something went wrong", "page not found", "access denied", "enable javascript")
+
+
+def _unreadable(jd_text: str) -> bool:
+    """Too little to tailor from.
+
+    Empty, a bare title, or an error page. The floor is low on purpose — a
+    three-line posting from a small company is real and must pass — so this
+    catches what is plainly not a posting, and nothing more. A row it stops is
+    closed as `no_jd` and can be retried, because the owner may know better.
+    """
+    t = " ".join((jd_text or "").lower().split())
+    if len(t) < _JD_FLOOR:
+        return True
+    return any(n in t for n in _JD_NOISE) and len(t) < 400
 
 
 # Phrases that mean the employer will NOT sponsor a work visa. You require
@@ -570,7 +677,13 @@ def run_queued(item: dict, q: Any) -> dict:
         log.info("apply: %s", result)
         again, why = is_retryable(result)
         if again:
-            q.retry(item, why)
+            # The DETAIL, not the code. `retry()` decides whether a failure spends
+            # one of the job's attempts by reading the opening of what it is told,
+            # and "Rate limited by the model API…" is an outage that must not.
+            # Passed the code "unknown" instead, it read as an ordinary fault and
+            # a rate-limited Netflix job burned attempt 2 of 3 without a browser
+            # ever reaching the form.
+            q.retry(item, str(result.get("detail") or why))
         return result
     except Exception as exc:  # noqa: BLE001 — one bad apply must not kill the worker
         log.exception("apply crashed for %s", pk)
@@ -650,7 +763,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     emit("running", pk=pk, agent="applier", detail="reading the posting…", url=jd_url)
 
     try:
-        jd_text = await _jd_text(row)
+        jd_text = await _jd_text(row, yielding=False)
     except Exception as exc:  # noqa: BLE001
         # The row was claimed as SUBMITTING a moment ago, and SUBMITTING has no
         # Apply button — leaving it there would turn a transient read failure into
@@ -685,7 +798,21 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # Whichever profile this application is going out under supplies the contact
     # details, overriding the bank's defaults for this job only.
     from core import profiles as _profiles
-    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    _row = stores.tracking.get(pk) or {}
+    _prof = _profiles.resolve_for(_row)
+    # The PDF is rendered for the profile it is SENT under, here, every time.
+    # Not only when the stamp changed: a board-wide re-render was once cut off by
+    # a restart at 141 of 378 rows, leaving 237 rows stamped with a profile whose
+    # address their PDF did not carry — a form saying one address while the
+    # résumé says another is the mismatch a recruiter notices. Two seconds of
+    # LaTeX per application buys the invariant outright. Rotating companies did
+    # this in ensure() already; for them it is a second, harmless render.
+    if _prof and _row.get("resume_tex_key"):
+        if _prof.id != str(_row.get("profile_id") or ""):
+            stores.tracking.set_status(pk, _row.get("status") or Status.SUBMITTING,
+                                       profile_id=_prof.id)
+            log.info("dispatching %s under %s's standing profile %s", pk, company, _prof.id)
+        _profiles.retarget(pk, _prof, stores)
     if _prof:
         facts = _prof.override(facts)
     facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date
@@ -749,7 +876,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     # this job: the form was never reached, nothing was filled, and the same job
     # succeeds once the browser is free. Recording it as failed burns a good
     # application and hides it in the Unable lane, so hand it back to the queue.
-    from tools.claude_chrome import _is_browser_conflict, is_signed_out
+    from tools.claude_chrome import _is_browser_conflict, is_disconnected, is_signed_out
 
     # A signed-out CLI is the same KIND of fault as a busy browser — nothing was
     # reached, nothing was filled — but it differs in one way that matters: it
@@ -770,6 +897,24 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
             log.warning("PAUSED applying: the Claude CLI is signed out")
         emit("gate", pk=pk, agent="applier", url=jd_url, detail=reason)
         return {"result": "requeued", "pk": pk, "reason": "signed_out"}
+
+    if is_disconnected(reason):
+        # Same fault class as a signed-out CLI: every queued job would fail the
+        # same way until a person reconnects the extension. The job goes back
+        # untouched — no attempt spent — and the board pauses with the reason on
+        # it, rather than three doomed sessions dead-lettering a job that never
+        # reached a form.
+        from core import flags
+
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                                   fail_reason="", fail_kind="")
+        stores.queue.enqueue(stores.apply_queue, {"pk": pk})
+        if not flags.paused():
+            flags.set_flag("paused", "yes")
+            flags.set_flag("paused_reason", "the Claude browser extension is disconnected")
+            log.warning("PAUSED applying: the browser extension is not connected")
+        emit("gate", pk=pk, agent="applier", url=jd_url, detail=reason)
+        return {"result": "requeued", "pk": pk, "reason": "extension_disconnected"}
 
     if _is_browser_conflict(reason):
         stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
@@ -851,6 +996,12 @@ def retry_job(pk: str, stores: Any = None) -> dict:
         emit("response", pk=pk, agent="applier", url=row.get("jd_url"),
              detail=f"🛑 Retry refused — this job is already '{row.get('status')}'.")
         return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
+    if _claimed(pk, stores):
+        # Wiping a row to `found` under a run that still owns it leaves the row
+        # unrunnable once that run dies: found, claimed, and skipped by recovery.
+        from core.events import emit
+        emit("response", pk=pk, url=row.get("jd_url"), detail=_ALREADY_RUNNING)
+        return {"result": "already_running", "pk": pk}
     _run(_reset_session(pk))  # drop the finished session so the re-run starts clean
     stores.tracking.set_status(pk, Status.FOUND, fail_reason="", fail_kind="",
                                gate_pending=None, gate_call_id=None, skip_reason="")

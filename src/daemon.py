@@ -21,6 +21,7 @@ from typing import Any
 
 from core.logging import get_logger
 from core.stores import make_stores
+from core.ids import is_internal_pk
 
 log = get_logger(__name__)
 
@@ -61,7 +62,7 @@ def _sweep_found(stores) -> None:  # noqa: ANN001
     from core.models import Status
 
     waiting = [r for r in stores.tracking.query_status(Status.FOUND)
-               if not str(r.get("pk", "")).startswith("meta#")]
+               if not is_internal_pk(r.get("pk", ""))]
     for row in waiting[:3]:  # small batches — pace the LLM spend
         stores.queue.enqueue(stores.tailor_queue, {"pk": row["pk"]})
         log.info("sweep: queued waiting job %s", row["pk"])
@@ -144,6 +145,10 @@ _LAST_RECLAIM = [0.0]
 RECLAIM_EVERY_S = 120
 
 
+LEASE_GRACE_S = 20 * 60      # a re-tailor is ~2 min; a model call stuck on a rate limit is not
+_LEASE_SEEN: dict = {}       # pk -> when a lease was first seen with no application behind it
+
+
 def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
     """Re-queue applications the store calls in flight that nobody is running.
 
@@ -167,9 +172,11 @@ def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
 
     live = q.in_flight()
     n = 0
-    for r in stores.tracking.all():
+    rows = stores.tracking.all()
+    by_pk = {str(r.get("pk", "")): r for r in rows}
+    for r in rows:
         pk = str(r.get("pk", ""))
-        if pk.startswith("meta#") or r.get("status") != Status.SUBMITTING.value:
+        if is_internal_pk(pk) or r.get("status") != Status.SUBMITTING.value:
             continue
         if pk in live:
             continue                       # genuinely being filled right now
@@ -179,6 +186,29 @@ def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
     if n:
         log.warning("reclaimed %d application(s) that were marked in flight with no "
                     "worker running them", n)
+
+    # The mirror case: a LEASE with no application behind it. An Apply press
+    # re-tailors a stale row before applying and holds the company's lease while
+    # it does; a model call that never returns then holds it forever, the row
+    # reads `tailoring` for hours, and every other job at that company waits on
+    # a ghost — Netflix sat like that for three and a half hours. A lease whose
+    # row is not `submitting` gets a grace period for the re-tailor, then goes.
+    for pk in list(live):
+        r = by_pk.get(pk)
+        st = str((r or {}).get("status") or "")
+        if st == Status.SUBMITTING.value:
+            _LEASE_SEEN.pop(pk, None)
+            continue
+        first = _LEASE_SEEN.setdefault(pk, now)
+        if now - first < LEASE_GRACE_S:
+            continue
+        company = (r or {}).get("company", "") or pk.split("#", 1)[0]
+        q.done({"pk": pk, "company": company})
+        _LEASE_SEEN.pop(pk, None)
+        if r and st == Status.TAILORING.value:
+            stores.tracking.set_status(pk, Status.FOUND, gate_reason="", fail_reason="")
+        log.warning("released %s's lease held by %s for %d min with no application "
+                    "running (row was %r)", company, pk, int((now - first) / 60), st)
 
 
 def auto_dispatch_allowed(mode: str) -> bool:
@@ -338,7 +368,7 @@ def process_backlog_once(companies: list | None = None,
     loops are running. Blocking — run it in a background thread."""
     import asyncio
 
-    from agent.run import _apply_direct, run_job
+    from agent.run import _apply_direct, prefetch_browser_jds, run_job
     from core import flags as _flags
     from core.config import get_settings
     from core.models import Status
@@ -356,9 +386,17 @@ def process_backlog_once(companies: list | None = None,
     # 1) EVALUATE — score + tailor every waiting `found` job. Qualifying jobs are
     #    enqueued to the apply queue by run_job; low scorers are skipped there.
     found = [r for r in stores.tracking.query_status(Status.FOUND)
-             if not str(r.get("pk", "")).startswith("meta#")]
+             if not is_internal_pk(r.get("pk", ""))]
     if sel or skipped:
         found = [r for r in found if _in_scope(r.get("company"))]
+    # Browser-only postings (Meta) are read a batch per session HERE, before the
+    # per-row pass, so each row below finds its description already on the row
+    # and never opens a browser of its own. Without this every Meta row cost a
+    # five-minute session that yielded to any application in flight.
+    try:
+        prefetch_browser_jds(found, stores)
+    except Exception:
+        log.exception("process: browser prefetch failed — rows will be read one at a time")
     evaluated = 0
     # Captured before the first job, so only a Stop pressed after this point ends
     # the pass. A board already paused does not.
@@ -417,7 +455,7 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
     n = t = 0
     for r in stores.tracking.all():
         pk = r.get("pk", "")
-        if str(pk).startswith("meta#"):
+        if is_internal_pk(pk):
             continue
         st = r.get("status")
         if st == "submitting":
@@ -429,6 +467,13 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
             stores.tracking.set_status(pk, Status.FOUND)
             release_claim(pk, stores)  # else every retry is refused until the TTL
             t += 1
+        elif st == "found":
+            # A Retry pressed mid-run resets the row to found and bounces off the
+            # run's own claim. If the restart then kills that run, the row is
+            # `found` with a live claim nobody will ever release: every Apply is
+            # refused as "already being processed" until the TTL. Nothing runs
+            # before this pass, so any claim here is an orphan.
+            release_claim(pk, stores)
     if n:
         log.info("recovered %d orphaned 'submitting' job(s) → re-queued to apply", n)
     if t:

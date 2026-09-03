@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError
 
 from ..models import JobRecord, Status
 from .base import AbstractTracking
+from ..ids import is_internal_pk
 
 JD_HASH_INDEX = "jd_hash-index"
 STATUS_INDEX = "status-index"
@@ -92,7 +93,7 @@ class TrackingStore(AbstractTracking):
         rows, kwargs = [], {}
         while True:
             resp = self._table.scan(**kwargs)
-            rows += [r for r in resp.get("Items", []) if not str(r.get("pk", "")).startswith("meta#")]
+            rows += [r for r in resp.get("Items", []) if not is_internal_pk(r.get("pk", ""))]
             if "LastEvaluatedKey" not in resp:
                 return rows
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]

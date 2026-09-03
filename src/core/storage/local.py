@@ -13,7 +13,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
-from ..ids import normalize_label
+from ..ids import is_internal_pk, normalize_label
 from ..models import AnswerScope, JobRecord, Status
 from .base import (
     AbstractAnswerBank,
@@ -75,7 +75,7 @@ class RedisTracking(AbstractTracking):
         # markers) carry a status too, and letting them in meant any count taken
         # from the sets was wrong by however many of them existed. Keeping them out
         # here is what lets /stats count with SCARD instead of reading every row.
-        is_job = not str(pk).startswith("meta#")
+        is_job = not is_internal_pk(pk)
         if prev_status and prev_status != status:
             pipe.srem(f"status:{prev_status}", pk)
         if status and is_job:

@@ -196,3 +196,15 @@ companies:
   - name: axon
     careers_url: https://job-boards.greenhouse.io/axon?gh_src=o34afqx73us
     mode: gated
+
+  - name: HRT
+    careers_url: https://www.hudsonrivertrading.com/hrt-job/systems-engineer-enterprise-technology-2/
+    mode: gated
+
+  - name: OpenAI Deploy Co
+    careers_url: https://deploy.co/careers#open-roles
+    mode: gated
+
+  - name: Doordash
+    careers_url: https://careersatdoordash.com/job-search/
+    mode: gated

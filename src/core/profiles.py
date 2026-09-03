@@ -150,6 +150,77 @@ def save(profiles: list[dict], default: str = "") -> tuple[list[Profile], str]:
     return load()
 
 
+def bindings() -> dict[str, str]:
+    """Every company with a standing profile: {company (lower) → profile id}.
+
+    Stored as the company's `profile_id` preference — the same value the company
+    page's "Apply as" writes and discovery has always read. One value, one place:
+    it used to reach only discovery, so choosing it on the company page stamped
+    postings found later and did nothing for the rows already on the board.
+    """
+    from . import flags
+
+    return {co: str(pref["profile_id"]) for co, pref in flags.company_prefs().items()
+            if pref.get("profile_id")}
+
+
+def binding(company: str) -> str:
+    """The profile id every application at this company goes out under, or ""."""
+    from . import flags
+
+    return str(flags.company_pref(company).get("profile_id") or "")
+
+
+def bind(company: str, profile_id: str) -> None:
+    """Make a profile the standing rule for a company.
+
+    Not the rows that exist right now, but every application at that company
+    from here on — including postings discovered next week that nobody has
+    looked at. Rotation works the same way; this is that shape for a profile
+    the owner chose.
+    """
+    from . import flags
+
+    key = (company or "").strip().lower()
+    if not key:
+        raise ValueError("no company")
+    p = get(profile_id)
+    if not p:
+        raise ValueError(f"no profile {profile_id!r}")
+    if p.kind == "rotating":
+        raise ValueError("a rotating template cannot be a company's profile")
+    flags.set_company_pref(company, {"profile_id": p.id})
+
+
+def unbind(company: str) -> None:
+    from . import flags
+
+    flags.set_company_pref(company, {"profile_id": None})
+
+
+def resolve_for(row: dict) -> Profile | None:
+    """The profile THIS row goes out under: the row's own choice, else its
+    company's standing rule, else the default. Every place that turns a row
+    into an identity goes through here, so the form and the PDF cannot disagree
+    about who is applying."""
+    own = str((row or {}).get("profile_id") or "")
+    if own:
+        return resolve(own)
+    company = str((row or {}).get("company") or "")
+    bound = binding(company)
+    if bound:
+        hit = resolve(bound)
+        if hit:
+            return hit
+        # The rule names a profile that has since been removed. Falling through
+        # to the default is the honest outcome; returning nothing would send the
+        # bank's raw contact details, which is the default by another name but
+        # without the résumé being rendered to match.
+        log.warning("standing profile %r for %s no longer exists — using the default",
+                    bound, company)
+    return resolve("")
+
+
 def get(profile_id: str) -> Profile | None:
     profiles, _ = load()
     return next((p for p in profiles if p.id == profile_id), None)
@@ -280,3 +351,155 @@ def expand_dates(value: str, today=None) -> str:  # noqa: ANN001
 def expand_all(facts: dict) -> dict:
     """Resolve relative dates across a whole answer set."""
     return {k: expand_dates(v) for k, v in facts.items()}
+
+
+_SENT = ("applied", "applied_manual")
+_IN_FLIGHT = ("submitting",)
+
+
+def usage(stores) -> dict[str, dict]:  # noqa: ANN001
+    """What each profile has actually been used for, derived from the rows.
+
+    The profile panel showed an email and nothing else, so choosing "a new one
+    for Netflix" meant guessing which had already been spent there. Counted from
+    the rows rather than remembered, so it is what happened.
+    """
+    from .ids import is_internal_pk
+
+    out: dict[str, dict] = {}
+    for row in stores.tracking.all():
+        pid = str(row.get("profile_id") or "")
+        if not pid or is_internal_pk(row.get("pk", "")):
+            continue
+        st = str(row.get("status") or "")
+        bucket = ("applied" if st in _SENT else "in_flight" if st in _IN_FLIGHT else "unsent")
+        u = out.setdefault(pid, {"applied": 0, "unsent": 0, "in_flight": 0, "companies": {}})
+        u[bucket] += 1
+        co = str(row.get("company") or "?")
+        c = u["companies"].setdefault(co, {"applied": 0, "unsent": 0, "in_flight": 0})
+        c[bucket] += 1
+    return out
+
+
+def assign_company(company: str, profile: Profile, stores, queue) -> dict:  # noqa: ANN001
+    """Send everything un-sent at one company under this profile.
+
+    The same press rotation offers, for a profile the owner chose. The rules are
+    rotation's rules: anything already sent keeps its identity and is counted
+    so the owner sees it was left alone; a job sitting in the apply queue was
+    queued under the OLD profile and the queue item is what dispatches, so it
+    comes out and goes back in; a failed or errored job is revived under the
+    new profile — that is "apply again" — if it has a résumé, and goes back to
+    `found` for tailoring if it does not.
+    """
+    from . import rotation as _rotation
+    from .ids import is_internal_pk
+    from .models import Status
+
+    key = (company or "").strip().lower()
+    if _rotation.binding(company):
+        return {"ok": False, "company": company,
+                "error": f"{company} rotates its address — retire rotation first, "
+                         f"or use Rotate & queue"}
+    bind(company, profile.id)
+    dequeued = 0
+    for item in queue.pending():
+        if (item.get("company") or "").strip().lower() == key and queue.remove(item.get("pk", "")):
+            dequeued += 1
+
+    repointed = left_alone = queued = revived = 0
+    for row in stores.tracking.all():
+        pk = str(row.get("pk") or "")
+        if (row.get("company") or "").strip().lower() != key or is_internal_pk(pk):
+            continue
+        st = str(row.get("status") or "")
+        if st in _SENT or st in _IN_FLIGHT:
+            left_alone += 1
+            continue
+        has_resume = bool(row.get("resume_tex_key"))
+        new_status = st
+        if st in ("failed", "error"):
+            new_status = Status.TAILORED.value if has_resume else Status.FOUND.value
+            revived += 1
+        stores.tracking.set_status(pk, new_status, profile_id=profile.id,
+                                   fail_reason="", fail_kind="")
+        repointed += 1
+        if has_resume:
+            retarget(pk, profile, stores)
+        question = (row.get("gate_pending") or {}).get("question", "")
+        ready = new_status == Status.TAILORED.value or (
+            st == "needs_human" and (row.get("gate_reason") == "approval"
+                                     or question.startswith("Ready to apply")))
+        if ready and queue.put(pk, row.get("company") or company):
+            queued += 1
+
+    # Rows with no résumé yet cannot be queued; the caller tailors them under
+    # the new profile and queues each as it finishes, so "apply as X" ends with
+    # something to press Apply on rather than a list of found postings.
+    untailored = [str(r.get("pk")) for r in stores.tracking.all()
+                  if (r.get("company") or "").strip().lower() == key
+                  and not is_internal_pk(r.get("pk", ""))
+                  and str(r.get("status") or "") in ("found", "tailoring")]
+    log.info("assign %s -> %s: %d repointed, %d queued, %d revived, %d dequeued, "
+             "%d left alone, %d to tailor", company, profile.id, repointed, queued,
+             revived, dequeued, left_alone, len(untailored))
+    return {"ok": True, "company": company, "profile": profile.id, "email": profile.email,
+            "repointed": repointed, "queued": queued, "revived": revived,
+            "dequeued": dequeued, "left_alone": left_alone, "untailored": untailored}
+
+
+def reapply(pk: str, profile: Profile, stores) -> dict:  # noqa: ANN001
+    """Apply again to a posting already applied to, under a different identity.
+
+    The applied row is history — it holds the confirmation the employer sent
+    back — and is never rewritten. A re-application is a NEW row for the same
+    posting, keyed ``<pk>~2`` (then ``~3``…), stamped with the new profile,
+    linked to the original both ways, and started as `found` so it goes through
+    tailoring and the ordinary gate like any other job.
+
+    The one rule that stays in code: the identity must differ from every one
+    already used on this posting. The same address twice is precisely the
+    duplicate the guard exists to refuse; a different profile is the only thing
+    that makes "again" mean anything.
+    """
+    from .ids import is_internal_pk
+    from .models import JobRecord, Status
+
+    orig = stores.tracking.get(pk)
+    if not orig or is_internal_pk(pk):
+        return {"ok": False, "error": "no such job"}
+    if str(orig.get("status") or "") not in ("applied", "applied_manual"):
+        return {"ok": False, "error": "only a job already applied to can be applied to again"}
+    if profile.kind == "rotating":
+        return {"ok": False, "error": "a rotating template is not an identity — pick a profile"}
+
+    root = pk.split("~", 1)[0]
+    family = [r for r in stores.tracking.all()
+              if str(r.get("pk") or "").split("~", 1)[0] == root]
+    used = set()
+    for r in family:
+        p = resolve_for(r)
+        if p:
+            used.add(p.id)
+    if profile.id in used:
+        return {"ok": False,
+                "error": f"{profile.label} has already applied to this posting — pick a "
+                         "different identity, or this is the same application twice"}
+
+    n = 2
+    while stores.tracking.get(f"{root}~{n}"):
+        n += 1
+    job = JobRecord(company=orig.get("company", ""),
+                    job_id=f"{root.split('#', 1)[1]}~{n}",
+                    title=orig.get("title", ""), jd_url=orig.get("jd_url", ""),
+                    jd_text=orig.get("jd_text") or orig.get("title", ""),
+                    location=orig.get("location", ""), ats=orig.get("ats", ""))
+    if not stores.tracking.put_new(job):
+        return {"ok": False, "error": f"{job.pk} already exists"}
+    stores.tracking.set_status(job.pk, Status.FOUND, profile_id=profile.id,
+                               reapplied_from=root, reapply_n=n)
+    prior = list((stores.tracking.get(root) or {}).get("reapplied_as") or [])
+    stores.tracking.set_status(root, orig.get("status"), reapplied_as=prior + [job.pk])
+    log.info("re-application %s of %s as %s", job.pk, root, profile.id)
+    return {"ok": True, "pk": job.pk, "original": root, "profile": profile.id,
+            "email": profile.email, "n": n}

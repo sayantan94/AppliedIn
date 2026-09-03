@@ -95,7 +95,7 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     # profile's contact details — a form saying one address while the attached
     # résumé says another is the kind of mismatch a recruiter notices.
     from core import profiles as _profiles
-    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    _prof = _profiles.resolve_for(stores.tracking.get(pk) or {})
     tailored_latex = _profiles.apply_to_latex(tailored_latex, _prof)
     artifacts = stores.artifacts  # filesystem (local) or S3 (cloud) — same call
     tex_key = artifacts.put("resumes", f"{pk}.tex", tailored_latex.encode(), "text/x-tex")
@@ -189,7 +189,7 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
     # Same override as the direct-apply path: the chosen profile's contact details
     # win, so the form and the attached résumé always agree.
     from core import profiles as _profiles
-    _prof = _profiles.resolve((stores.tracking.get(pk) or {}).get("profile_id", ""))
+    _prof = _profiles.resolve_for(stores.tracking.get(pk) or {})
     if _prof:
         facts = _prof.override(facts)
     facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date

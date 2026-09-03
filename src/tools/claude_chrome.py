@@ -69,6 +69,22 @@ _CONFLICT_MARKERS = (
     "would not accept clicks on the tab",
 )
 
+# Said by the browser tools when the Claude extension is not talking to Chrome
+# at all. Nothing was opened, so nothing was filled: environment, not job. It
+# does not clear by retrying, only by a person reconnecting the extension, so
+# the apply layer treats it like a signed-out CLI and pauses the board.
+_DISCONNECT_MARKERS = (
+    "browser extension is not connected",
+    "extension is not connected",
+    # Our own wording, below, kept recognisable for the same reason as the
+    # conflict message: the apply layer re-reads it to decide what to do.
+    "extension is not connected to chrome",
+)
+
+DISCONNECT_MESSAGE = ("The browser extension is not connected to Chrome, so no tab "
+                      "could be opened. Nothing was filled or submitted. Reconnect "
+                      "the Claude extension in Chrome, then resume the board.")
+
 # The one phrase the message above must contain, kept next to the markers so the
 # two cannot drift apart.
 CONFLICT_MESSAGE = ("Chrome would not accept clicks on the tab the session was "
@@ -107,10 +123,12 @@ opening a new one. Only report a browser problem if that recovery also fails.
 # form part filled under a real name, and disturbing it can leave a submission
 # nobody can account for. So the crawl waits.
 #
-# Only "crawl" waits. A "jd" read is part of an apply's own flow, so making it
-# wait for other applications would serialise applies and undo the concurrency
-# that is wanted.
-_YIELDS_TO_APPLY = frozenset({"crawl"})
+# A "jd" read inside an apply is part of that apply's own flow, so it does not
+# wait. The SAME read during the evaluate sweep is bulk work — a backlog of
+# browser-only postings would otherwise hold the owner's one Chrome while a
+# form was being filled — so the sweep asks for it as "jd_sweep", which waits
+# like a crawl does.
+_YIELDS_TO_APPLY = frozenset({"crawl", "jd_sweep"})
 _YIELD_POLL_S = 5
 _YIELD_MAX_S = 1800     # give up waiting after 30 minutes and run anyway
 
@@ -124,6 +142,12 @@ def applies_running() -> int:
 # INFRASTRUCTURE rather than the application, so they are complete sentences on
 # their own and must not be introduced as "the agent finished without confirming
 # a submission" — the agent did not finish, it was cut off.
+# The opening of the message a session gets when it is killed at its time
+# ceiling. Named so the apply path can recognise its own words: a session
+# stopped at minute 44 may have clicked Submit at minute 43, and that outcome
+# must reach the owner rather than the retry queue.
+TIMEOUT_OPENING = "The browser session was still working after"
+
 INFRA_OPENINGS = (
     "Rate limited by the model API",
     "The model API returned",
@@ -131,6 +155,7 @@ INFRA_OPENINGS = (
     "The daemon was restarted",
     "The Claude CLI is signed out",
     "The Claude CLI could not run",
+    "The browser extension is not connected",
 )
 
 # What an expired or missing login looks like in the CLI's own words. Matched
@@ -141,9 +166,19 @@ _AUTH_RX = re.compile(
     r"session expired|unauthorized|401", re.I)
 
 
+_KILLED_RX = re.compile(r"claude --chrome failed \(exit (?:143|137|-15|-9)\)")
+
+
 def is_infrastructure(detail: str) -> bool:
-    """Whether a failure detail is about the plumbing, not the application."""
-    return (detail or "").strip().startswith(INFRA_OPENINGS)
+    """Whether a failure detail is about the plumbing, not the application.
+
+    A session that died of SIGTERM or SIGKILL — exit 143 or 137 — was stopped
+    from outside: a daemon restart, a Stop press, the machine. That says nothing
+    about the job, and it must not spend one of its attempts; one restart killed
+    an application six minutes into a form and cost it a third of its budget.
+    """
+    d = (detail or "").strip()
+    return d.startswith(INFRA_OPENINGS) or bool(_KILLED_RX.search(d))
 
 
 def is_signed_out(detail: str) -> bool:
@@ -246,6 +281,12 @@ def _envelope_reason(stdout: str, returncode: int | None = None) -> str:
     if subtype and subtype != "success":
         return f"The session ended as {subtype!r} without reporting what it did."
     return ""
+
+
+def is_disconnected(text: str) -> bool:
+    """Whether this failure was the extension not being connected to Chrome."""
+    low = (text or "").lower()
+    return any(m in low for m in _DISCONNECT_MARKERS)
 
 
 def _is_browser_conflict(text: str) -> bool:
@@ -432,10 +473,9 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
         proc.kill()
         await proc.wait()
         log.warning("chrome session hit the %ds ceiling — killed", timeout_s)
-        return {}, (f"The browser session was still working after "
-                    f"{timeout_s // 60} minutes and was stopped. Check the tab it "
-                    "left open — it may have submitted. Raise the ceiling if this "
-                    "portal is simply slow.")
+        return {}, (f"{TIMEOUT_OPENING} {timeout_s // 60} minutes and was stopped. "
+                    "Check the tab it left open — it may have submitted. Raise the "
+                    "ceiling if this portal is simply slow.")
 
     _LIVE.pop(proc.pid, None)
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
@@ -465,6 +505,15 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
             log.warning("chrome session ignored terminate — killing it")
             proc.kill()
             await proc.wait()
+
+    # Checked BEFORE the no-report handling below, because a disconnected
+    # extension never produces a report: the first tool call fails and the
+    # session ends with the tool's error in its output. Left to the generic path
+    # it reads as "ended without a structured result" — true, and useless.
+    if is_disconnected(stdout) or is_disconnected(json.dumps(report)):
+        log.warning("browser extension disconnected (report_key=%s)\n--- session output ---\n%s",
+                    report_key, stdout[-2000:] or "(empty)")
+        return {}, DISCONNECT_MESSAGE
 
     if not report:
         # Log everything before deciding it failed. "It produced nothing" is not a
@@ -1158,7 +1207,7 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
         # — Chrome closed, the extension disconnected, a ceiling hit — is useless
         # to them as a status word they have to go digging behind.
         emit("error", pk=pk, agent="browser", url=url, detail=problem)
-        return {"status": "unknown", "detail": problem}
+        return {"status": problem_status(problem), "detail": problem}
 
     # The whole account, into the job's feed. The one-line outcome says whether it
     # worked; this says what it did, which is what you want when it did not.
@@ -1168,6 +1217,20 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
             emit("running", pk=pk, agent="browser", url=url, detail=para[:400])
 
     return classify(report)
+
+
+def problem_status(problem: str) -> str:
+    """What a session that produced no report means for the queue.
+
+    Most such failures never reached a form — the extension was disconnected,
+    the CLI was signed out, the process died on launch — and retrying them cannot
+    double-apply. One did reach it: a session killed at its time ceiling, which
+    may have clicked Submit before it was stopped. That one is `uncertain`, the
+    terminal outcome that goes to the owner, because a retry could send a second
+    application under a real name. `core.apply_queue` promises exactly this and
+    the label "unknown" was quietly breaking the promise.
+    """
+    return "uncertain" if (problem or "").startswith(TIMEOUT_OPENING) else "unknown"
 
 
 def classify(report: dict) -> dict:
@@ -1192,9 +1255,13 @@ def classify(report: dict) -> dict:
     if outcome == "applied":
         confirmation = str(report.get("confirmation") or "").strip()
         if not confirmation:
-            return {"status": "unknown",
+            # The session says it clicked Submit; we could not read the page
+            # afterwards. That is the definition of uncertain, and it is terminal:
+            # the owner checks the portal, the queue never tries it again.
+            return {"status": "uncertain",
                     "detail": "It reported applying but captured no confirmation "
-                              "from the page, so this is not recorded as applied.",
+                              "from the page, so this is not recorded as applied. "
+                              "Check the portal before applying again.",
                     "fields": fields}
         return {"status": "applied", "confirmation": confirmation[:120],
                 "fields": fields}

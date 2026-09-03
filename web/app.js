@@ -9,6 +9,12 @@ import { auth } from "./auth.js";
 const CONFIG = window.APPLIEDIN_CONFIG || {};
 const DEMO = CONFIG.demo === true || new URLSearchParams(location.search).has("demo");
 
+const INTERNAL_KINDS = new Set(["watermark", "run", "profiles", "prefs", "dailycap", "undated", "age"]);
+const isInternalPk = (pk) => {
+  const s = String(pk || "");
+  if (!s.startsWith("meta#")) return false;
+  return INTERNAL_KINDS.has(s.slice(5).split("#")[0]);
+};
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const api = (p) => (CONFIG.apiUrl || "").replace(/\/$/, "") + p;
@@ -1142,11 +1148,30 @@ function foundRow(r) {
       title="Score and tailor this job now. It stops before applying">▶ Run now</button>
   </div>`;
 }
+function againHtml(r) {
+  if (r.reapplied_from) return `<span class="jr-prof again" title="a second application to this posting — the first is ${esc(r.reapplied_from)}">↩ again #${esc(String(r.reapply_n || r.pk.split("~").pop() || 2))}</span>`;
+  if ((r.reapplied_as || []).length) return `<span class="jr-prof again def" title="applied again ${r.reapplied_as.length} more time(s) under other identities">↩ ×${r.reapplied_as.length + 1}</span>`;
+  return "";
+}
+
+function appliedProfHtml(r) {
+  const id = r.profile_id || "";
+  const p = id ? (state.profiles.find((x) => x.id === id) || aliasById(id)) : null;
+  const def = state.profiles.find((x) => x.id === state.profileDefault);
+  const local = ((p && p.email) || id).split("@")[0];
+  const tag = local.includes("+") ? "+" + local.split("+").slice(1).join("+") : local;
+  const label = p ? ((p.label && p.label !== p.email) ? p.label : tag)
+                  : (def ? def.label : "default");
+  const email = (p && p.email) || (def && def.email) || "";
+  const rot = !!(id && !state.profiles.some((x) => x.id === id) && aliasById(id));
+  return `<span class="jr-prof mono${rot ? " rot" : ""}${p ? "" : " def"}" title="applied as ${esc(email || label)}">${rot ? "↻ " : "◐ "}${esc(label)}</span>`;
+}
+
 function appliedRow(r) {
   return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
     <span class="jr-mark">✓</span>
     <span class="jr-co">${esc(r.company)}</span>
-    <span class="jr-title">${esc(r.title)}</span>
+    <span class="jr-title"><span class="jr-title-t">${esc(r.title)}</span>${appliedProfHtml(r)}${againHtml(r)}</span>
     ${r.status === "applied_manual" ? `<span class="ps-chip">manual</span>` : ""}
     <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
   </div>`;
@@ -1357,6 +1382,17 @@ function queuedSec(rows) {
           ? `<button class="ps-link un-rot" data-act="rot-co" data-company="${esc(co)}"
               title="Re-point ${esc(co)}'s un-sent jobs at its rotating address — including these, which were queued under the old one — and put every tailored one in line. It stops at the queue; Process runs them."
             >↻ Rotate &amp; queue</button>` : ""}
+        ${(state.profiles || []).some((p) => p.kind !== "rotating") ? (() => {
+            const bound = (state.companyProfiles || {})[(co || "").trim().toLowerCase()] || "";
+            return `<select class="ps-link un-as${bound ? " on" : ""}" data-co-prof="${esc(co)}"
+              title="${bound
+                ? `Every application at ${esc(co)} goes out as this profile — including ones discovered later. Pick another to change it, or 'Default' to clear.`
+                : `Set the profile every application at ${esc(co)} goes out under, from now on. Existing un-sent jobs are re-pointed; already-sent ones keep theirs.`}">
+              <option value="">${bound ? `as ${esc((state.profiles.find((p) => p.id === bound) || {}).label || bound)}` : "Apply as…"}</option>
+              ${(state.profiles || []).filter((p) => p.kind !== "rotating").map((p) =>
+                `<option value="${esc(p.id)}"${p.id === bound ? " selected" : ""}>${esc(p.label)}${p.id === bound ? " ✓" : ""}</option>`).join("")}
+            </select>`;
+          })() : ""}
         <button class="ps-link un-go${busy ? "" : " on"}" data-act="drain-co"
           data-company="${esc(co)}"${busy ? " disabled" : ""}
           title="${busy ? `${esc(co)} already has one running`
@@ -1594,7 +1630,7 @@ function viewApps() {
     return `<tr data-pk="${esc(r.pk)}">
       <td>${tagHtml(r.status)}</td>
       <td class="t-co">${esc(r.company)}</td>
-      <td class="t-role" title="${esc(r.title)}">${esc(r.title)}</td>
+      <td class="t-role" title="${esc(r.title)}"><span class="t-role-t">${esc(r.title)}</span>${["applied", "applied_manual"].includes(r.status) ? appliedProfHtml(r) : ""}${againHtml(r)}</td>
       <td>${scoreHtml(r.match_score)}</td>
       <td><span class="t-links">${cv}${jd}${sc}</span></td>
       <td class="t-when">${ago(r.updated_at)}</td>
@@ -2468,6 +2504,131 @@ function appsSig() {
   return s;
 }
 
+const coKey = (c) => String(c || "").trim().toLowerCase();
+
+function viewProfiles() {
+  const profs = state.profiles || [];
+  const fixed = profs.filter((p) => p.kind !== "rotating");
+  const rots = profs.filter((p) => p.kind === "rotating");
+  const rules = state.companyProfiles || {};
+  const rot = state.rotation || [];
+  const rotBy = Object.fromEntries(rot.map((r) => [coKey(r.company), r]));
+  const display = {};
+  for (const a of state.apps) if (a.company) display[coKey(a.company)] = a.company;
+  for (const c of (state.companies || [])) { const n = (c && c.name) || c; if (n) display[coKey(n)] ||= n; }
+  for (const p of profs) for (const c of Object.keys((p.usage || {}).companies || {})) display[coKey(c)] ||= c;
+  const name = (k) => display[k] || k;
+  const stats = {};
+  for (const a of state.apps) {
+    const k = coKey(a.company); if (!k) continue;
+    const st = stats[k] ||= { applied: 0, waiting: 0 };
+    if (a.status === "applied" || a.status === "applied_manual") st.applied++;
+    else if (["tailored", "needs_human", "found", "tailoring", "submitting"].includes(a.status)) st.waiting++;
+  }
+  const ruledTo = (pid) => Object.entries(rules).filter(([, v]) => v === pid).map(([k]) => k);
+
+  const card = (p) => {
+    const u = p.usage || {};
+    const isDef = p.id === state.profileDefault;
+    const cos = Object.entries(u.companies || {}).sort((a, b) => b[1].applied - a[1].applied || b[1].unsent - a[1].unsent);
+    const ruled = new Set(ruledTo(p.id));
+    const used = (u.applied || 0) + (u.unsent || 0) + (u.in_flight || 0);
+    const chips = cos.slice(0, 6).map(([c, n]) =>
+      `<button class="pv-chip${ruled.has(coKey(c)) ? " rule" : ""}" data-pv-chip="${esc(coKey(c))}"
+        title="${esc(c)}: ${n.applied} applied · ${n.unsent} waiting${ruled.has(coKey(c)) ? " · standing rule → this profile" : ""}">${esc(c)} ${n.applied}</button>`)
+      .concat(cos.length > 6 ? [`<span class="pv-chip more">+${cos.length - 6}</span>`] : []).join("");
+    return `<div class="pv-card${isDef ? " is-default" : ""}">
+      <div class="pv-l1">
+        <span class="pv-name">${esc(p.label)}</span>
+        ${isDef ? `<span class="pr-tag">DEFAULT</span>` : ""}
+        <span class="pv-acts">
+          ${isDef ? "" : `<button class="pv-act" data-prof-default="${esc(p.id)}" title="Make this the default identity">Default</button>`}
+          <button class="pv-act" data-prof-all="${esc(p.id)}" title="Re-render every tailored résumé on the whole board with this identity. No model is called.">Whole board</button>
+          <button class="pv-act del" data-prof-del="${esc(p.id)}" title="Remove this identity">✕</button>
+        </span>
+      </div>
+      <div class="pv-l2">${esc(p.email)}${p.phone ? ` · ${esc(p.phone)}` : ""}</div>
+      ${used ? `<div class="pv-l3"><b>${u.applied || 0} applied</b> · ${u.unsent || 0} waiting${u.in_flight ? ` · ${u.in_flight} in flight` : ""}</div>`
+             : `<div class="pv-l3 none">never used</div>`}
+      ${chips ? `<div class="pv-chips">${chips}</div>` : ""}
+    </div>`;
+  };
+
+  const rotCard = (p) => {
+    const mine = rot.filter((r) => r.profile === p.id || rots.length === 1);
+    const applied = mine.reduce((n, r) => n + (r.used || 0), 0);
+    const waitingFor = (co) => (stats[coKey(co)] || {}).waiting || 0;
+    return `<div class="pv-card is-rot">
+      <div class="pv-l1">
+        <span class="pv-name">${esc(p.label)}</span>
+        <span class="pr-tag rot">ROTATING · ${p.limit || 5} each · ${esc(p.style === "dot" ? "gmail dot" : "+tag")}</span>
+        <span class="pv-acts">
+          ${mine.length ? `<button class="pv-act" data-act="rot-co" data-company="__all__" title="Re-point every rotating company's un-sent jobs at its current address and queue them">↻ Rotate &amp; queue all</button>` : ""}
+          <button class="pv-act del" data-prof-del="${esc(p.id)}" title="Remove this template">✕</button>
+        </span>
+      </div>
+      <div class="pv-l2">base ${esc(p.email)}${p.phone ? ` · ${esc(p.phone)}` : ""}</div>
+      <div class="pv-l3${mine.length ? "" : " none"}">${mine.length
+        ? `<b>${mine.length} compan${mine.length === 1 ? "y rotates" : "ies rotate"}</b> · ${mine.reduce((n, r) => n + (r.minted || 0), 0)} addresses minted · ${applied} applied on current addresses`
+        : "no company rotates yet — pick this template for one in the table below"}</div>
+      ${mine.length ? `<div class="pv-rot-rows">${mine.map((r) => `
+        <div class="pv-rot-row">
+          <span class="co">${esc(name(coKey(r.company)))}</span>
+          <span class="mono" title="${esc(r.style || "")} · ${r.minted || 0} minted">${r.email ? esc(r.email) : "first address on the next application"}</span>
+          <span class="used">${r.used || 0}/${r.limit || 0}</span>
+          <span class="n">${waitingFor(r.company)} waiting</span>
+          <button class="pv-act" data-rot-retire="${esc(r.company)}" title="Retire this address so the next application starts on a fresh one">retire</button>
+          <button class="pv-act del" data-rot-unbind="${esc(r.company)}" title="Stop rotating for this company. Addresses already used are kept.">✕</button>
+        </div>`).join("")}</div>` : ""}
+    </div>`;
+  };
+
+  const optionsFor = (bound, rotB) => {
+    const cur = rotB ? `rot:${rotB.profile}` : (bound || "");
+    return [`<option value=""${cur === "" ? " selected" : ""}>Default${state.profileDefault ? ` (${esc((profs.find((x) => x.id === state.profileDefault) || {}).label || "")})` : ""}</option>`]
+      .concat(fixed.map((p) => `<option value="${esc(p.id)}"${cur === p.id ? " selected" : ""}>${esc(p.label)} · ${esc(p.email)}</option>`))
+      .concat(rots.map((p) => `<option value="rot:${esc(p.id)}"${cur === `rot:${p.id}` ? " selected" : ""}>↻ ${esc(p.label)} — a new address every ${p.limit || 5}</option>`))
+      .join("");
+  };
+  const keys = [...new Set([...Object.keys(rules), ...rot.map((r) => coKey(r.company)),
+    ...profs.flatMap((p) => Object.keys((p.usage || {}).companies || {}).map(coKey))])]
+    .filter(Boolean).sort((a, b) => name(a).localeCompare(name(b)));
+  const ruleRow = (k) => {
+    const st = stats[k] || { applied: 0, waiting: 0 };
+    const rb = rotBy[k];
+    return `<div class="pv-rule" id="rule-${esc(k)}">
+      <span class="co">${esc(name(k))}</span>
+      <span><select class="pv-sel" data-rule-co="${esc(name(k))}">${optionsFor(rules[k], rb)}</select></span>
+      <span class="n"><b>${st.applied} applied</b> · ${st.waiting} waiting${rb ? ` · <span class="cap">${rb.used || 0}/${rb.limit || 0} on this address</span>` : ""}</span>
+    </div>`;
+  };
+  const defLabel = (profs.find((x) => x.id === state.profileDefault) || {}).label || "—";
+  const totalApplied = state.apps.filter((a) => a.status === "applied" || a.status === "applied_manual").length;
+
+  return `<div class="pv">
+    <div class="pv-head"><div class="section-t">identities</div>
+      <button class="btn" data-pv-new="1">＋ New identity</button></div>
+    ${profs.length ? `<div class="pv-grid">${fixed.map(card).join("")}${rots.map(rotCard).join("")}</div>`
+      : `<div class="cp-none">No identities yet — applications use whatever is in your facts. Add one above.</div>`}
+
+    <div class="section-t">who each company hears from</div>
+    <div class="pv-rules">
+      <div class="pv-rule head"><span>Company</span><span>Goes out as</span><span>Applied · waiting there</span></div>
+      <div class="pv-rule"><span class="co rest">Everything else</span>
+        <span><select class="pv-sel" data-rule-default="1">${fixed.map((p) => `<option value="${esc(p.id)}"${p.id === state.profileDefault ? " selected" : ""}>${esc(p.label)} · ${esc(p.email)}</option>`).join("")}</select></span>
+        <span class="n"><b>${totalApplied} applied</b> across the board · default is ${esc(defLabel)}</span></div>
+      ${keys.map(ruleRow).join("")}
+      <div class="pv-rule add">
+        <span><input list="pv-cos" data-rule-add-co="1" placeholder="company…" autocomplete="off" />
+          <datalist id="pv-cos">${Object.values(display).sort().map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist></span>
+        <span class="lbl">goes out as</span>
+        <span><select class="pv-sel" data-rule-add-prof="1">${optionsFor("", null)}</select></span>
+        <span><button class="btn btn-primary" data-rule-add="1">Set</button></span>
+      </div>
+    </div>
+  </div>`;
+}
+
 function paneSig() {
   // A coarse clock so relative ages ("3m ago") refresh eventually even when
   // nothing else moves: at most one background repaint every five minutes.
@@ -2478,6 +2639,10 @@ function paneSig() {
   } else if (state.tab === "activity") {
     const h = state.heat || {};
     parts.push((h.days || []).length, JSON.stringify(h.totals || null), h.error ? "e" : "");
+  } else if (state.tab === "profiles") {
+    parts.push((state.profiles || []).map((p) => p.id + JSON.stringify(p.usage || null)).join(","),
+      JSON.stringify(state.companyProfiles || {}), state.profileDefault,
+      (state.rotation || []).map((r) => `${r.company}${r.email}${r.used}/${r.limit}`).join(","));
   } else if (state.tab === "fresh") {
     const f = state.fresh || {};
     parts.push((f.jobs || []).map((j) => j.pk).join(","), f.undated ?? "",
@@ -2535,6 +2700,7 @@ function renderPane() {
     state.tab === "stuck" ? viewStuck() :
     state.tab === "logs" ? viewLogs() :
     state.tab === "fresh" ? viewFresh() :
+    state.tab === "profiles" ? viewProfiles() :
     state.tab === "activity" ? viewActivity() : viewPipeline();
   for (const [pk, v] of Object.entries(saved)) {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
@@ -2808,8 +2974,7 @@ async function load() {
       fetch(api("/applications"), { headers: auth.header() }).then((r) => r.json()),
       fetch(api("/stats"), { headers: auth.header() }).then((r) => r.json()),
     ]);
-    // Never render internal bookkeeping rows (meta# watermarks) as jobs.
-    state.apps = (apps.items || []).filter((r) => !String(r.pk || "").startsWith("meta#"));
+    state.apps = (apps.items || []).filter((r) => !isInternalPk(r.pk));
     applyStats(stats);
   }
   renderAll();
@@ -2893,7 +3058,7 @@ async function loadApps() {
   if (DEMO) return;
   try {
     const a = await fetch(api("/applications"), { headers: auth.header() }).then((r) => r.json());
-    state.apps = (a.items || []).filter((r) => !String(r.pk || "").startsWith("meta#"));
+    state.apps = (a.items || []).filter((r) => !isInternalPk(r.pk));
     // The heatmap and the Fresh tab ride the same cadence, but only while on screen.
     if (state.tab === "activity") loadActivity();
     if (state.tab === "fresh") loadFresh();
@@ -3355,8 +3520,9 @@ function paneAction(act, pk, el) {
   } else if (act === "apply-now") {
     markBusy(pk, "starting…");
     post(`/actions/apply-now/${encodeURIComponent(pk)}`).then((r) => {
-      toast(r && r.ok ? "Applying to this one now."
-                      : (r && r.error) || "Could not start it.");
+      toast(!r || !r.ok ? (r && r.error) || "Could not start it."
+        : r.retailoring ? "Your base résumé changed since this was tailored — re-tailoring it first (about two minutes), then applying."
+        : "Applying to this one now.");
       loadQueue(); loadApps();
     });
   } else if (act === "qsel-bulk") {
@@ -3657,6 +3823,27 @@ function openDrawer(pk) {
         View résumé · ${esc(r.resume_version)}</button>` : ""}</div>
 
     ${retailor}
+    ${["applied", "applied_manual"].includes(r.status) ? (() => {
+      const usedIds = new Set([r.profile_id || state.profileDefault, ...(state.apps.filter((a) => (a.reapplied_from || "") === r.pk.split("~")[0] || a.pk === r.pk.split("~")[0]).map((a) => a.profile_id || state.profileDefault))]);
+      const choices = (state.profiles || []).filter((p) => p.kind !== "rotating" && !usedIds.has(p.id));
+      const again = (r.reapplied_as || []);
+      return `<div class="section">
+        <div class="section-t">apply again</div>
+        <div class="rt">
+          <div class="rt-head"><span class="rt-t">as a different identity</span></div>
+          <div class="rt-help">This application is done and stays as sent. Applying again makes a
+            new one for the same posting under another profile, tailored fresh, waiting at the gate like any other.
+            The identity it already went out as is not offered.</div>
+          ${again.length ? `<div class="pv-l3">Already applied again as: ${again.map((pk) => `<a href="#" data-open="${esc(pk)}" class="rowlk">${esc(pk.split("~").pop() ? "#" + pk.split("~").pop() : pk)}</a>`).join(" · ")}</div>` : ""}
+          <div class="rt-foot">
+            ${choices.length ? `<select class="pv-sel" data-reapply-prof="${esc(r.pk)}">
+              <option value="">Apply again as…</option>
+              ${choices.map((p) => `<option value="${esc(p.id)}">${esc(p.label)} · ${esc(p.email)}</option>`).join("")}
+            </select>` : `<span class="rt-note">Every identity you have has applied to this posting.</span>`}
+          </div>
+        </div>
+      </div>`;
+    })() : ""}
 
     <div class="section"><div class="section-t">form answers · ${(r.fields || []).length} fields</div>
       <div class="fields">${fields}</div></div>
@@ -4380,6 +4567,7 @@ function wire() {
     // Cached data renders at once; the fetch refreshes it behind the paint.
     if (state.tab === "activity") loadActivity();
     if (state.tab === "fresh") loadFresh();
+    if (state.tab === "profiles") { loadProfiles(); loadRotation(); }
     renderTabs();
     renderPane();
   });
@@ -4468,43 +4656,20 @@ function wire() {
       const d = (await r.json()) || {};
       state.profiles = d.profiles || [];
       state.profileDefault = d.default || "";
-    } catch { state.profiles = []; }
+      state.companyProfiles = d.company_profiles || {};
+    } catch { state.profiles = []; state.companyProfiles = {}; }
     renderProfiles();
     renderProfilePickers();
     loadRotation();
   }
   function renderProfiles() {
-    const list = $("#pr-list");
     const n = state.profiles.length;
     $("#prof-count").hidden = !n;
     $("#prof-count").textContent = String(n);
-    if (!n) {
-      list.innerHTML = `<div class="cp-none">No profiles yet — applications use
-        whatever is in your facts.</div>`;
-      return;
-    }
-    list.innerHTML = state.profiles.map((p) => {
-      // A rotating profile is a template, not an identity: its own address never
-      // reaches a form, so the two buttons that would SEND under it — "use for
-      // all" and "default" — are the wrong offer and are not shown.
-      const rot = p.kind === "rotating";
-      return `
-      <div class="pr-row${p.id === state.profileDefault ? " is-default" : ""}${rot ? " is-rot" : ""}">
-        <div class="pr-main">
-          <div class="pr-label">${esc(p.label)}${p.id === state.profileDefault
-            ? '<span class="pr-tag">DEFAULT</span>' : ""}${rot
-            ? `<span class="pr-tag rot">ROTATING · ${p.limit || 5} each</span>` : ""}</div>
-          <div class="pr-meta" title="${esc(p.email)}${p.phone ? " · " + esc(p.phone) : ""}">${
-            rot ? "base " : ""}${esc(p.email)}</div>
-        </div>
-        ${rot ? "" : `<button class="pr-act use" data-prof-all="${esc(p.id)}"
-          title="Re-render every tailored résumé with this profile's details, ready to apply. No model is called.">use for all</button>`}
-        ${rot || p.id === state.profileDefault ? "" :
-          `<button class="pr-act" data-prof-default="${esc(p.id)}" title="Make default">default</button>`}
-        <button class="pr-act del" data-prof-del="${esc(p.id)}" title="Remove">✕</button>
-      </div>`;
-    }).join("");
+    const tn = $("#tab-n-profiles");
+    if (tn) { tn.hidden = !n; tn.textContent = String(n); }
     renderRotation();
+    if (state.tab === "profiles") { _paneSig = null; renderPane(); }
   }
 
   // --- rotation: which companies get an alias per application ---------------
@@ -4589,10 +4754,43 @@ function wire() {
   }
   pmBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const show = pm.hidden;
-    pm.hidden = !show;
-    pmBtn.setAttribute("aria-expanded", String(show));
-    if (show) { fitPopover(pm); loadProfiles(); }
+    state.tab = "profiles";
+    loadProfiles(); loadRotation();
+    renderTabs();
+    renderPane();
+  });
+  document.addEventListener("click", async (e) => {
+    const add = e.target.closest("[data-rule-add]");
+    if (add) {
+      if (demoGuard()) return;
+      const company = ($("[data-rule-add-co]")?.value || "").trim();
+      const value = $("[data-rule-add-prof]")?.value || "";
+      if (!company) { toast("Name the company first."); return; }
+      const k = coKey(company);
+      const was = (state.companyProfiles || {})[k] || "";
+      const rotB = (state.rotation || []).find((r) => coKey(r.company) === k) || null;
+      add.disabled = true;
+      await setRule(company, value, was, rotB);
+      add.disabled = false;
+      return;
+    }
+    const chip = e.target.closest("[data-pv-chip]");
+    if (chip) {
+      const row = document.getElementById(`rule-${chip.dataset.pvChip}`);
+      if (row) { row.scrollIntoView({ block: "center" }); row.style.outline = "2px solid var(--scan)"; setTimeout(() => { row.style.outline = ""; }, 1200); }
+      else toast("No standing rule for this company yet — add one below.");
+      return;
+    }
+  });
+  document.addEventListener("click", (e) => {
+    const nb = e.target.closest("[data-pv-new]");
+    if (!nb) return;
+    e.stopPropagation();
+    pm.hidden = false;
+    pmBtn.setAttribute("aria-expanded", "true");
+    fitPopover(pm);
+    const f = $("#pr-add-form"); if (f) f.hidden = false;
+    $("#pr-label")?.focus();
   });
   pm.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -4694,7 +4892,7 @@ function wire() {
     if (!form.hidden) $("#pr-label").focus();
   });
 
-  pm.addEventListener("click", (e) => {
+  document.addEventListener("click", (e) => {
     const mk = e.target.closest("[data-prof-default]");
     if (mk) { saveProfiles(state.profiles, mk.dataset.profDefault); return; }
     const all = e.target.closest("[data-prof-all]");
@@ -5242,6 +5440,98 @@ function wire() {
   });
 
   // Choosing an identity for one job — and re-tailoring so the PDF follows.
+  async function setRule(company, value, was, rotB) {
+    let d;
+    if (value.startsWith("rot:")) {
+      if (was) await post("/actions/company-profile", { company, profile_id: "" });
+      d = await post("/actions/rotation", { company, profile_id: value.slice(4) });
+    } else {
+      if (rotB) await post("/actions/rotation", { company, profile_id: "" });
+      d = await post("/actions/company-profile", { company, profile_id: value });
+    }
+    if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that."); return false; }
+    if (value.startsWith("rot:")) toast(`${company}: a new address every ${d.limit || 5} applications.`);
+    else if (d.unbound) toast(`${company}: back to the default.`);
+    else toast(`${company}: every application now goes out as ${d.email} · ${d.repointed} re-pointed · ${d.queued} queued`
+      + (d.tailoring ? ` · ${d.tailoring} being tailored` : "")
+      + (d.revived ? ` · ${d.revived} revived` : "")
+      + (d.left_alone ? ` · ${d.left_alone} already sent, left alone` : ""));
+    await loadProfiles(); await loadRotation(); loadQueue(); loadApps();
+    return true;
+  }
+
+  document.addEventListener("change", async (e) => {
+    const ra = e.target.closest("[data-reapply-prof]");
+    if (ra) {
+      if (!ra.value || demoGuard()) return;
+      const pk = ra.dataset.reapplyProf, profile_id = ra.value;
+      const p = state.profiles.find((x) => x.id === profile_id) || {};
+      if (!confirm(`Apply to this posting again as ${p.label} (${p.email})?\n\nThe employer will receive a second application from a different address. The one already sent is kept as is.`)) { ra.value = ""; return; }
+      ra.disabled = true;
+      const d = await post(`/actions/reapply/${encodeURIComponent(pk)}`, { profile_id });
+      ra.disabled = false;
+      ra.value = "";
+      if (!d || !d.ok) { toast((d && d.error) || "Couldn't apply again."); return; }
+      toast(`Applying again as ${d.email} — tailoring now, then it waits at the gate.`);
+      await loadApps();
+      openDrawer(d.pk);
+      return;
+    }
+    const rd = e.target.closest("[data-rule-default]");
+    if (rd) {
+      if (demoGuard()) return;
+      rd.disabled = true;
+      await saveProfiles(state.profiles, rd.value);
+      rd.disabled = false;
+      return;
+    }
+    const rc = e.target.closest("[data-rule-co]");
+    if (rc) {
+      if (demoGuard()) return;
+      const company = rc.dataset.ruleCo, k = coKey(company);
+      const was = (state.companyProfiles || {})[k] || "";
+      const rotB = (state.rotation || []).find((r) => coKey(r.company) === k) || null;
+      const cur = rotB ? `rot:${rotB.profile}` : was;
+      if (rc.value === cur) return;
+      rc.disabled = true;
+      const ok = await setRule(company, rc.value, was, rotB);
+      rc.disabled = false;
+      if (!ok) rc.value = cur;
+      return;
+    }
+    const pc = e.target.closest("[data-prof-co]");
+    if (pc) {
+      if (!pc.value || demoGuard()) return;
+      const company = pc.value, profile_id = pc.dataset.profCo;
+      const p = state.profiles.find((x) => x.id === profile_id) || {};
+      pc.disabled = true;
+      const d = await post("/actions/company-profile", { company, profile_id });
+      pc.disabled = false;
+      pc.value = "";
+      if (!d || !d.ok) { toast((d && d.error) || "Couldn't set the profile."); return; }
+      toast(`${company}: every application now goes out as ${p.label || d.email} · ${d.repointed} re-pointed · ${d.queued} queued`
+        + (d.tailoring ? ` · ${d.tailoring} being tailored` : "")
+        + (d.revived ? ` · ${d.revived} revived` : "")
+        + (d.left_alone ? ` · ${d.left_alone} already sent, left alone` : ""));
+      await loadProfiles(); loadQueue(); loadApps();
+      return;
+    }
+    const sel = e.target.closest("[data-co-prof]");
+    if (!sel || demoGuard()) return;
+    const co = sel.dataset.coProf, profile_id = sel.value;
+    const was = (state.companyProfiles || {})[(co || "").trim().toLowerCase()] || "";
+    if (profile_id === was) return;
+    sel.disabled = true;
+    const d = await post("/actions/company-profile", { company: co, profile_id });
+    sel.disabled = false;
+    if (!d || !d.ok) { sel.value = was; toast((d && d.error) || "Couldn't set the profile."); return; }
+    if (d.unbound) toast(`${co}: standing profile cleared — the default applies again.`);
+    else toast(`${co}: every application now goes out as ${d.email} · ${d.repointed} re-pointed · ${d.queued} queued`
+      + (d.revived ? ` · ${d.revived} revived` : "")
+      + (d.left_alone ? ` · ${d.left_alone} already sent, left alone` : ""));
+    await loadProfiles(); loadQueue(); loadApps();
+  });
+
   $("#drawer").addEventListener("change", async (e) => {
     const sel = e.target.closest("[data-job-profile]");
     if (!sel || demoGuard()) return;
