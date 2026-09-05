@@ -86,16 +86,50 @@ def seed_fingerprint() -> str:
     return hashlib.sha256(_base_latex().encode()).hexdigest()[:16]
 
 
-def _prefs_notes() -> str:
-    """Hard-constraint brief from preferences.yaml (no clearance, WA/CA only, …) —
-    fed to the scorer so JD-level dealbreakers are caught, not just title ones."""
-    from discovery.watchlist import load_preferences
+def _global_prefs() -> Any:
+    from discovery.watchlist import Preferences, load_preferences
 
     try:
-        cfg = Path(get_settings().config_dir) / "preferences.yaml"
-        return load_preferences(cfg).notes.strip()
-    except Exception:
-        return ""
+        return load_preferences(Path(get_settings().config_dir) / "preferences.yaml")
+    except Exception:  # noqa: BLE001 — a scorer without preferences still works
+        return Preferences()
+
+
+def _effective_prefs(company: str) -> Any:
+    """The preferences that govern THIS company: the global file with the
+    company's own overrides on top. The screen has always read them this way;
+    the scorer read the file alone, so "US only" on one company screened its
+    titles and then scored its postings as if the rule did not exist."""
+    from core import flags as _flags
+
+    return _flags.effective_prefs(company or "", _global_prefs())
+
+
+def _prefs_brief(p: Any) -> str:
+    """What the owner is looking for, for the per-job scorer."""
+    bits = []
+    if p.titles:
+        bits.append(f"Target roles: {', '.join(p.titles)}.")
+    if p.seniority:
+        bits.append(f"Seniority: {', '.join(p.seniority)} or above.")
+    if p.include_keywords:
+        bits.append("Work that RAISES fit (not required, but score it higher): "
+                    + ", ".join(p.include_keywords) + ".")
+    if p.exclude_keywords:
+        bits.append("AVOID: " + ", ".join(p.exclude_keywords) + ".")
+    if p.locations:
+        loc = ", ".join(p.locations)
+        bits.append(f"LOCATION REQUIRED: {loc}. A role based clearly outside of these, "
+                    f"and not remote within them, is a dealbreaker — reject it.")
+    if p.remote_only:
+        bits.append("REMOTE ONLY: an on-site or hybrid role is a dealbreaker.")
+    return " ".join(bits) or "(no stated preferences)"
+
+
+def _prefs_notes(company: str = "") -> str:
+    """Hard-constraint brief (no clearance, WA/CA only, …) for this company —
+    fed to the scorer so JD-level dealbreakers are caught, not just title ones."""
+    return (_effective_prefs(company).notes or "").strip()
 
 
 def _github_context() -> str:
@@ -489,7 +523,8 @@ def _session_state(row: dict, jd_text: str) -> dict:
         "ats": row.get("ats", ""), "jd_url": row.get("jd_url", ""),
         "jd_text": jd_text,
         "base_latex": _base_latex(), "github_context": _github_context(),
-        "prefs_notes": _prefs_notes() or "(none)",
+        "prefs_brief": _prefs_brief(_effective_prefs(row.get("company", ""))),
+        "prefs_notes": _prefs_notes(row.get("company", "")) or "(none)",
         # The owner's standing guidance for THIS job. Empty for almost every row.
         "tailor_note": row.get("tailor_note") or "",
     }

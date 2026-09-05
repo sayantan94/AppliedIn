@@ -55,7 +55,7 @@ def ran(monkeypatch):
     monkeypatch.setattr(R, "_tailor_only", _fake)
     monkeypatch.setattr(R, "_base_latex", lambda: "\\begin{document}seed\\end{document}")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
     return seen
 
 
@@ -143,7 +143,7 @@ def test_the_card_shows_as_tailoring_while_it_runs(monkeypatch):
     monkeypatch.setattr(R, "_tailor_only", _fake)
     monkeypatch.setattr(R, "_base_latex", lambda: "seed")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
     stores = _Stores(_row(status="tailored"))
 
     R.retailor("stripe#1", "more Kubernetes", stores=stores)
@@ -170,7 +170,7 @@ def test_a_failed_re_tailor_still_hands_the_status_back(monkeypatch):
     monkeypatch.setattr(R, "_tailor_only", _boom)
     monkeypatch.setattr(R, "_base_latex", lambda: "seed")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
     stores = _Stores(_row(status="tailored"))
 
     out = R.retailor("stripe#1", "more Kubernetes", stores=stores)
@@ -185,7 +185,7 @@ def test_the_pipeline_sees_the_same_note_as_the_button(monkeypatch):
     send the résumé the owner had just corrected away."""
     monkeypatch.setattr(R, "_base_latex", lambda: "seed")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
 
     state = R._session_state(_row(tailor_note="mention Kubernetes"), "jd text")
 
@@ -197,7 +197,7 @@ def test_a_row_without_a_note_gets_an_empty_one_not_a_missing_key(monkeypatch):
     same as one that is blank."""
     monkeypatch.setattr(R, "_base_latex", lambda: "seed")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
 
     assert R._session_state(_row(), "jd text")["tailor_note"] == ""
 
@@ -255,7 +255,7 @@ def test_a_failed_re_tailor_is_never_stamped(monkeypatch):
     monkeypatch.setattr(R, "_tailor_only", _boom)
     monkeypatch.setattr(R, "_base_latex", lambda: "seed")
     monkeypatch.setattr(R, "_github_context", lambda: "")
-    monkeypatch.setattr(R, "_prefs_notes", lambda: "")
+    monkeypatch.setattr(R, "_global_prefs", lambda: __import__("discovery.watchlist", fromlist=["Preferences"]).Preferences())
     stores = _Stores(_row())
 
     R.retailor("stripe#1", "lead with Kubernetes", stores=stores)

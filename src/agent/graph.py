@@ -277,51 +277,6 @@ def _skill(name: str) -> SkillToolset:
     return SkillToolset(skills=[load_skill_from_dir(_SKILLS / name)])
 
 
-def _prefs_brief_text() -> str:
-    """What the owner is looking for, for the per-job scorer.
-
-    The scorer decides what is worth tailoring, and it was being told only the
-    dealbreakers — never the target roles, the seniority, or the AI and agentic
-    work that raises fit. So it judged every posting against a blank preference
-    and the owner's actual interests never reached the decision.
-    """
-    from pathlib import Path
-
-    from core.config import get_settings
-    from discovery.watchlist import load_preferences
-
-    try:
-        p = load_preferences(Path(get_settings().config_dir) / "preferences.yaml")
-    except Exception:  # noqa: BLE001 — a scorer without preferences still works
-        return ""
-    bits = []
-    if p.titles:
-        bits.append(f"Target roles: {', '.join(p.titles)}.")
-    if p.seniority:
-        bits.append(f"Seniority: {', '.join(p.seniority)} or above.")
-    if p.include_keywords:
-        bits.append("Work that RAISES fit (not required, but score it higher): "
-                    + ", ".join(p.include_keywords) + ".")
-    if p.locations:
-        bits.append(f"Preferred locations: {', '.join(p.locations)}. Remote counts.")
-    return " ".join(bits)
-
-
-def _prefs_notes_text() -> str:
-    """Candidate hard constraints from preferences.yaml, baked into the scorer
-    instruction at construction (they're global, so no per-job session state — and
-    a missing state var would crash the graph). Restart to pick up edits."""
-    try:
-        from pathlib import Path
-
-        from core.config import get_settings
-        from discovery.watchlist import load_preferences
-        notes = load_preferences(Path(get_settings().config_dir) / "preferences.yaml").notes
-        return notes.strip() or "(none)"
-    except Exception:
-        return "(none)"
-
-
 # --- agents ------------------------------------------------------------------
 scorer = LlmAgent(
     name="scorer", model=_model("scorer"),
@@ -330,8 +285,8 @@ scorer = LlmAgent(
         "You are a senior technical recruiter scoring how well ONE candidate fits ONE role.\n\n"
         "CANDIDATE — résumé (LaTeX source):\n{base_latex}\n\n"
         "CANDIDATE HARD CONSTRAINTS — if the role violates ANY of these, it is a "
-        "WHAT THE CANDIDATE IS LOOKING FOR:\n" + _prefs_brief_text() + "\n\n"
-        "DEALBREAKER: score 1-2 and say which one:\n" + _prefs_notes_text() + "\n\n"
+        "WHAT THE CANDIDATE IS LOOKING FOR:\n{prefs_brief}\n\n"
+        "DEALBREAKER: score 1-2 and say which one:\n{prefs_notes}\n\n"
         "ROLE — {company}, job description / title:\n{jd_text}\n\n"
         "Score fit 0-10 weighing skills/stack overlap (highest), seniority fit, domain "
         "relevance, and hard dealbreakers (a real dealbreaker caps at 3). Anchors: "

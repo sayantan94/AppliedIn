@@ -49,10 +49,11 @@ def _intent(prefs: Preferences) -> str:
         loc = ", ".join(prefs.locations)
         lines.append(
             f"LOCATION — REQUIRED: {loc}. Reject any posting whose on-site location "
-            "is clearly OUTSIDE Washington or California. US-remote is acceptable. A "
-            "blank/unknown location is allowed (don't reject on a missing location "
-            "alone)."
+            f"is clearly OUTSIDE of: {loc}. Remote within those counts. A blank or "
+            "unknown location is allowed (don't reject on a missing location alone)."
         )
+    if prefs.remote_only:
+        lines.append("REMOTE ONLY: reject any posting that is clearly on-site or hybrid.")
     if prefs.notes.strip():
         lines.append("HARD CONSTRAINTS (reject any posting that violates these):\n"
                      + prefs.notes.strip())
