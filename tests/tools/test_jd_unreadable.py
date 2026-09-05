@@ -38,6 +38,12 @@ REAL_JD = "<html><body><h1>Staff Engineer</h1><p>" + ("Build distributed systems
 _RealClient = httpx.Client
 
 
+@pytest.fixture(autouse=True)
+def _no_browser(monkeypatch):
+    from tools import jd as _jd
+    monkeypatch.setattr(_jd, "_from_chrome", lambda url, kind="jd": None)
+
+
 def _transport(handler):
     return httpx.MockTransport(handler)
 

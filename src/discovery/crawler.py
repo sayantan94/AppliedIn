@@ -29,6 +29,7 @@ from core.models import DiscoveryMode, JobRecord
 
 from .relevance import relevant
 from .resolver import detect_from_page
+from .sitemap import sitemap_jobs
 from .watchlist import CompanyConfig, Preferences
 
 log = get_logger(__name__)
@@ -258,6 +259,29 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     return enqueued
 
 
+def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any) -> int | None:
+    """Screen and enqueue what the site's sitemap lists; None when it lists nothing.
+
+    Tried before the browser whenever the page itself gave nothing: a sitemap is
+    the whole board in one cheap read, where the browser crawl is minutes of
+    typing searches and may still come back empty behind a bot wall."""
+    from core import flags as _flags
+
+    found = sitemap_jobs(company.careers_url, company.name)
+    if not found:
+        return None
+    jobs = relevant(found, prefs)
+    _note_screened_out(stores, company.name, found, jobs)
+    log.info("%s: the sitemap lists %d posting(s), %d relevant — the browser crawl "
+             "is not needed", company.name, len(found), len(jobs))
+    kws = _flags.company_filter(company.name)
+    if kws:
+        before = len(jobs)
+        jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
+        log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
+    return _enqueue(company, jobs, stores)
+
+
 def crawl_company(
     company: CompanyConfig,
     prefs: Preferences,
@@ -303,12 +327,15 @@ def crawl_company(
             # path, and a warning every run trains the reader to ignore warnings.
             log.info("%s: plain fetch refused (%s) — reading the page in the "
                      "browser instead", company.name, str(exc)[:90])
+            _flags.note_fetch_refused(company.name)
             html = ""
         finally:
             if own_client:
                 client.close()
 
     if not html and extractor is None:
+        if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
+            return listed
         found = _browser_extract(company.careers_url, company.name, prefs)
         jobs = relevant(found, prefs)
         _note_screened_out(stores, company.name, found, jobs)
@@ -352,6 +379,9 @@ def crawl_company(
     #     down the listing were never fetched at all.
     #   nothing relevant — the page may simply not have rendered; worth one look.
     force_browser = company.discovery is DiscoveryMode.BROWSER
+    if extractor is None and not extracted and not force_browser:
+        if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
+            return listed
     if extractor is None and (force_browser or not jobs):
         log.info("%s: %s — reading the full listing in the browser", company.name,
                  "client-rendered careers page" if force_browser

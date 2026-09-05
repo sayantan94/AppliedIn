@@ -132,6 +132,30 @@ def skipped_companies() -> set:
         return set()
 
 
+def fetch_refused() -> set:
+    """Companies (lowercase) whose careers site refused a plain request.
+
+    Their postings cannot be read over HTTP either, so the evaluate sweep reads
+    them in the browser, a batch per session, instead of one session per row."""
+    import json
+
+    try:
+        return {str(x).strip().lower()
+                for x in json.loads(get_flag("fetch_refused", "[]") or "[]") if x}
+    except Exception:
+        return set()
+
+
+def note_fetch_refused(company: str) -> None:
+    import json
+
+    names = fetch_refused()
+    if company.strip().lower() in names:
+        return
+    names.add(company.strip().lower())
+    set_flag("fetch_refused", json.dumps(sorted(names)))
+
+
 def company_filters() -> dict:
     """Per-company title keyword filters: {company_lower: [kw, ...]}. A company
     with a filter only keeps postings whose title contains one of its keywords

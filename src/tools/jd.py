@@ -89,7 +89,10 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     if html is None:
         html = _get(url, {})
     if html is None:
-        return {"title": "", "text": ""}
+        # Refused both ways. A bot wall in front of the page is not a missing
+        # page: the sitemap lists the job, and a person would open it. Read it
+        # the way they would before calling it unreadable.
+        return _from_chrome(url, kind) or {"title": "", "text": ""}
 
     raw_title = (m.group(1).strip() if (m := _TITLE_RX.search(html)) else "")
     h1 = _text(m.group(1)) if (m := _H1_RX.search(html)) else ""

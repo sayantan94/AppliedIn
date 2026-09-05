@@ -208,3 +208,11 @@ companies:
   - name: Doordash
     careers_url: https://careersatdoordash.com/job-search/
     mode: gated
+
+  - name: LinkedIn
+    careers_url: https://www.linkedin.com/company/linkedin/jobs/?src=or-search&veh=www.google.com
+    mode: gated
+
+  - name: pintrest
+    careers_url: https://www.pinterestcareers.com/jobs/
+    mode: gated

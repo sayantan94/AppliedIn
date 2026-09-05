@@ -277,7 +277,14 @@ async def _jd_text(row: dict, *, yielding: bool = True) -> str:
 
 
 def _browser_companies() -> set[str]:
-    """Companies whose postings can only be read in a browser."""
+    """Companies whose postings can only be read in a browser: marked so in the
+    watchlist, or seen refusing a plain request during discovery."""
+    from core import flags as _flags
+
+    return _watchlist_browser_companies() | _flags.fetch_refused()
+
+
+def _watchlist_browser_companies() -> set[str]:
     from pathlib import Path as _P
 
     from core.models import DiscoveryMode
