@@ -1,9 +1,12 @@
 """Career-site crawler for companies with no usable ATS feed.
 
-Two tiers, cheapest first:
+Three tiers, cheapest first:
   1. fetch + extract — plain HTTP GET + one-shot LLM extract. Fast and cheap;
      good for static/simple pages.
-  2. Chrome — the owner's real browser, driven by a `claude --chrome` subprocess
+  2. sitemap — when the page gave nothing (refused, or rendered empty), the
+     site's own sitemap: the whole board in one read, outside the bot wall that
+     hides the page, with a title per posting read off its URL. Skips tier 3.
+  3. Chrome — the owner's real browser, driven by a `claude --chrome` subprocess
      that types the search, applies filters and pages/scrolls. Used when tier 1
      finds nothing, and ALWAYS for a company marked `discovery: browser`, whose
      careers page renders its listing client-side (jobs.apple.com/…/search and

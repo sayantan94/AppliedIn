@@ -142,3 +142,16 @@ def test_crawl_screens_the_sitemap_instead_of_opening_the_browser(monkeypatch):
     assert n == 2
     assert {j.title for j in stores.tracking.put} == {"Senior Software Engineer Java", "Staff Engineer Platform"}
     assert noted == ["Acme"]
+
+
+@pytest.mark.parametrize("url,location", [
+    ("https://jobs.acme.com/ie/jobs/2131328/software-engineer/", "Ireland"),
+    ("https://jobs.acme.com/in/jobs/2131328/software-engineer/", "India"),
+    ("https://jobs.acme.com/en-gb/jobs/2131328/software-engineer/", "United Kingdom"),
+    ("https://jobs.acme.com/en/jobs/2131328/software-engineer/", ""),
+    ("https://jobs.acme.com/en/jobs/2131328/software-engineer-dublin/", ""),
+])
+def test_the_country_in_the_url_becomes_a_location_hint(url, location):
+    job = sitemap.job_from_url("Acme", url)
+    assert job is not None
+    assert job.location == location

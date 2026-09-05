@@ -43,6 +43,17 @@ _NOT_JOB = frozenset({
     "why", "culture", "diversity", "process", "apply", "login", "register", "saved",
     "en", "en-us", "en-gb", "us", "uk", "de", "fr", "ie", "in",
 })
+# A country segment in the path is the only location the sitemap offers, and the
+# screen needs it: without one, Dublin and Bangalore postings read as fits.
+_COUNTRY_SEGMENTS = {
+    "ie": "Ireland", "in": "India", "uk": "United Kingdom", "gb": "United Kingdom",
+    "en-gb": "United Kingdom", "en-uk": "United Kingdom", "de": "Germany", "en-de": "Germany",
+    "fr": "France", "en-fr": "France", "ca": "Canada", "en-ca": "Canada", "au": "Australia",
+    "en-au": "Australia", "sg": "Singapore", "en-sg": "Singapore", "jp": "Japan",
+    "en-jp": "Japan", "nl": "Netherlands", "es": "Spain", "it": "Italy", "pl": "Poland",
+    "br": "Brazil", "mx": "Mexico", "cn": "China", "hk": "Hong Kong", "en-hk": "Hong Kong",
+    "ch": "Switzerland", "se": "Sweden", "en-in": "India", "en-ie": "Ireland",
+}
 _ID_QUERY_KEYS = ("jobid", "job_id", "id", "reqid", "req_id", "requisitionid", "gh_jid",
                   "jid", "jobreqid", "postingid", "posting_id")
 _ID_RX = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -172,7 +183,16 @@ def job_from_url(company: str, url: str, lastmod: str = "") -> JobRecord | None:
         return None
     job_id = _id_from(url) or hashlib.sha1(url.encode()).hexdigest()[:12]
     return JobRecord(company=company, job_id=job_id, title=title, jd_url=url,
-                     jd_text="", ats="sitemap", posted_at=lastmod)
+                     jd_text="", ats="sitemap", posted_at=lastmod,
+                     location=_location_from(url))
+
+
+def _location_from(url: str) -> str:
+    parts = [s.lower() for s in urlparse(url).path.split("/") if s]
+    for s in parts[:2]:
+        if s in _COUNTRY_SEGMENTS:
+            return _COUNTRY_SEGMENTS[s]
+    return ""
 
 
 def sitemap_jobs(careers_url: str, company: str,
