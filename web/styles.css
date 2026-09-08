@@ -4353,3 +4353,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .health-panel[hidden] { display: none; }
 .health-panel .preferences-heading { padding: 0 0 12px; }
 .health-panel .health-item { margin-top: 10px; padding: 12px; }
+
+/* The review step uses the queue's compact rows, with explicit rejection ticks. */
+.review-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+.un-row.review-row { grid-template-columns: 16px minmax(0, 1fr) minmax(0, 160px) max-content max-content; }
+.review-row .un-sel { opacity: 1; }
+.review-later { color: var(--muted); font-size: 11px; }
+.ps-review .ung-head { padding: 8px 14px; }
+.review-location { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#review-queue { scroll-margin-top: 20px; }
+@media (max-width: 600px) {
+  .ps-review .ung-head { flex-wrap: wrap; gap: 8px; }
+  .review-actions { flex: 1 1 100%; margin-left: 0; }
+  .un-row.review-row { grid-template-columns: 16px minmax(0, 1fr); }
+  .review-row .review-location { grid-column: 2; font-size: 11px; }
+  .review-row .un-aged { display: none; }
+  .review-later { grid-column: 2; }
+}

@@ -37,7 +37,7 @@ function harness() {
   const state = vm.runInContext('state', context);
   context.reply = async () => ({ ok: true, prefs: { acme: { titles: ['Staff Engineer'] } } });
   context.request = async (url, body) => {
-    requests.push({ url, body: JSON.parse(JSON.stringify(body)) });
+    requests.push({ url, body: body === undefined ? undefined : JSON.parse(JSON.stringify(body)) });
     return context.reply(url, body);
   };
   vm.runInContext(`post = request; toast = () => {}; loadApps = () => {};
@@ -286,4 +286,81 @@ test('a cancelled approval sends nothing and a second pending click cannot widen
   assert.deepEqual(h.requests[0].body, {company:'Acme',pks:['1']});
   finish({ok:true,queued:1}); await pending;
   assert.equal(h.state.approvingAll, false);
+});
+
+function reviewHarness() {
+  const h = harness();
+  h.state.apps = [
+    {pk:'openai#keep',company:'OpenAI',title:'Staff Engineer',status:'tailored'},
+    {pk:'openai#reject',company:'OpenAI',title:'Senior Engineer',status:'tailored'},
+    {pk:'beta#keep',company:'Beta',title:'Staff Engineer',status:'tailored'},
+  ];
+  h.context.confirm = () => true; h.context.markBusy = () => {};
+  h.context.loadQueue = () => {}; h.context.scheduleReload = () => {};
+  h.context.reply = async () => ({ok:true,queued:1});
+  h.context.renderPane = () => {};
+  return h;
+}
+
+
+test('tailored roles appear in review before anything is queued to submit', () => {
+  const h = reviewHarness(); h.state.queue = {pending:[]};
+  const markup = h.context.reviewQueueSec(h.context.visibleApprovalPicks());
+  assert.match(markup, /data-review-pick="openai#reject"/);
+  assert.match(markup, /data-review-action="reject"/);
+  assert.match(markup, /data-review-action="skip"/);
+  assert.match(markup, /data-review-action="apply"/);
+  assert.doesNotMatch(h.context.readySec(h.state.apps), /kcard/);
+  assert.equal(h.requests.length, 0);
+});
+
+test('checkbox rejection closes only selected roles, then Apply all approves the remainder at that company', async () => {
+  const h = reviewHarness();
+  h.state.reviewPicked.add('openai#reject'); h.state.reviewPicked.add('beta#keep');
+  await h.context.reviewAction('reject','OpenAI');
+  assert.deepEqual(h.requests, [{url:'/actions/skip/openai%23reject',body:undefined}]);
+  await h.context.reviewAction('apply','OpenAI');
+  assert.deepEqual(h.requests.slice(1), [
+    {url:'/actions/approve-all',body:{company:'OpenAI',pks:['openai#keep']}},
+    {url:'/actions/drain-company',body:{company:'OpenAI'}},
+  ]);
+  assert.equal(h.state.reviewPicked.has('beta#keep'), true);
+});
+
+test('Skip leaves selected roles waiting and excludes them from Apply all', async () => {
+  const h = reviewHarness(); h.state.reviewPicked.add('openai#reject');
+  await h.context.reviewAction('skip','OpenAI');
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.state.apps[1].status, 'tailored');
+  assert.equal(h.storage.get('appliedin.reviewSkipped'), '["openai#reject"]');
+  await h.context.reviewAction('apply','OpenAI');
+  assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#keep']});
+});
+
+test('a skipped role can be explicitly selected to apply later without approving others', async () => {
+  const h = reviewHarness(); h.state.reviewSkipped.add('openai#reject'); h.state.reviewPicked.add('openai#reject');
+  await h.context.reviewAction('apply','OpenAI');
+  assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#reject']});
+});
+
+test('a failed approval never starts a company and keeps the selection', async () => {
+  const h = reviewHarness(); h.state.reviewPicked.add('openai#keep');
+  h.context.reply = async () => ({ok:false,error:'Could not approve'});
+  await h.context.reviewAction('apply','OpenAI');
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.state.reviewPicked.has('openai#keep'), true);
+  assert.equal(h.state.approvingAll, false);
+});
+
+test('new roles and double clicks cannot widen a pending Apply selection', async () => {
+  const h = reviewHarness(); h.state.reviewPicked.add('openai#keep');
+  let finish;
+  h.context.reply = (url) => url === '/actions/approve-all'
+    ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ok:true,queued:1});
+  const pending = h.context.reviewAction('apply','OpenAI');
+  h.state.apps.push({pk:'openai#new',company:'OpenAI',title:'New',status:'tailored'});
+  await h.context.reviewAction('apply','Beta');
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#keep']});
+  finish({ok:true,queued:1}); await pending;
 });

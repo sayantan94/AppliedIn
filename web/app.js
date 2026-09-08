@@ -61,6 +61,8 @@ const state = {
   secOpen: { closed: false }, // pipeline stack: which foldable sections are open
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
+  reviewPicked: new Set(), // final review: selection never authorizes submission
+  reviewSkipped: new Set(),
   qPicked: new Set(),  // queued jobs ticked for a bulk Skip / Remove
   page: {},           // pipeline stack: rows revealed per list key
   heat: null,         // /activity payload for the heatmap ({days, totals})
@@ -80,6 +82,11 @@ const state = {
 };
 
 // --- text helpers ----------------------------------------------------------
+try {
+  const skipped = JSON.parse(localStorage.getItem("appliedin.reviewSkipped") || "[]");
+  if (Array.isArray(skipped)) state.reviewSkipped = new Set(skipped.filter((pk) => typeof pk === "string"));
+} catch { /* A damaged browser preference must not prevent the board loading. */ }
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -1260,8 +1267,6 @@ function needsSec(rows) {
 
 function readySec(rows) {
   const n = rows.length;
-  const nApprove = rows.filter(approveAllPicks)
-    .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter).length;
   // Location pills, carried over from the old Tailored lane: only tiers that
   // hold jobs are offered, and the counts read without opening anything.
   let locBar = "";
@@ -1284,13 +1289,119 @@ function readySec(rows) {
       <span class="ps-dot${n ? " on" : ""}"></span>
       <span class="ps-name">Ready to apply</span>
       <span class="ps-n mono">${n}</span>
-      <span class="ps-hint">${n ? "Tailored and waiting for your approval. Apply sends one now, Queue lines it up."
+      <span class="ps-hint">${n ? "Tailored résumés. Review the queue below before approving applications."
                                 : "Nothing is tailored yet. Run jobs from Found below."}</span>
-      ${nApprove ? `<button class="ps-link on" data-approve-all="1"
-        title="Approve all ${nApprove} and put them in the apply queue, one at a time per company">Approve all ${nApprove}</button>` : ""}
+      ${n ? `<a class="ps-link on" href="#review-queue">Review queue ↓</a>` : ""}
     </div>
-    ${n ? `<div class="ps-ready-body">${locBar}${bucketedByDate(rows)}</div>` : ""}
+    ${locBar}
   </section>`;
+}
+
+// Preparation never authorizes submission. Keep the final review visible even
+// with an empty dispatch queue, so rejection does not race an applying worker.
+function reviewRows(company) {
+  return visibleApprovalPicks().filter((r) => r.company === company);
+}
+function reviewActions(company, rows) {
+  const picked = rows.filter((r) => state.reviewPicked.has(r.pk)).length;
+  const remaining = rows.filter((r) => !state.reviewSkipped.has(r.pk)).length;
+  const disabled = state.approvingAll ? " disabled" : "";
+  return `<span class="ps-hint">${picked ? `${picked} selected` : `${remaining} awaiting approval`}</span>
+    <button class="ps-link" data-review-action="reject" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>Reject</button>
+    <button class="ps-link" data-review-action="skip" data-company="${esc(company)}" title="Leave selected roles for later; Apply all will leave them out"${!picked ? " disabled" : disabled}>Skip</button>
+    <button class="ps-link on" data-review-action="apply" data-company="${esc(company)}"${!(picked || remaining) ? " disabled" : disabled}>${picked ? `Apply ${picked}` : `Apply all ${remaining}`}</button>`;
+}
+
+function reviewQueueSec(rows) {
+  rows = rows.filter(approveAllPicks)
+    .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter);
+  if (!rows.length) return "";
+  const groups = new Map();
+  for (const r of rows) {
+    if (!groups.has(r.company)) groups.set(r.company, []);
+    groups.get(r.company).push(r);
+  }
+  return `<section class="psec ps-review has" id="review-queue">
+    <div class="ps-head"><span class="ps-dot on"></span><span class="ps-name">Review queue</span>
+      <span class="ps-n mono">${rows.length}</span>
+      <span class="ps-hint">Résumés tailored. Select roles to reject, skip or apply. Nothing starts until you apply.</span>
+    </div>
+    <div class="un-groups">${[...groups].map(([co, list]) => `<div class="ung open">
+      <div class="ung-head"><span class="un-co">${esc(co)}</span>
+        <button class="ps-link" data-review-select="${esc(co)}">Select all</button>
+        <span class="review-actions" data-review-actions="${esc(co)}">${reviewActions(co, list)}</span></div>
+      <ol class="un-list">${list.map((r) => `<li class="un-row review-row${state.reviewPicked.has(r.pk) ? " un-picked" : ""}">
+        <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"
+          aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll ? " disabled" : ""}>
+        <span class="un-title" data-open="${esc(r.pk)}" role="button" tabindex="0">${esc(r.title)}</span>
+        <span class="review-location">${esc(r.location || "")}</span>
+        ${state.reviewSkipped.has(r.pk) ? `<span class="review-later">Skipped for now</span>` : ""}
+        <span class="un-aged mono">${esc(ageLabel(r.tailored_at) || "")}</span>
+      </li>`).join("")}</ol>
+    </div>`).join("")}</div>
+  </section>`;
+}
+
+function paintReviewSelection(tick) {
+  const pk = tick.dataset.reviewPick;
+  if (tick.checked) state.reviewPicked.add(pk);
+  else state.reviewPicked.delete(pk);
+  tick.closest(".un-row")?.classList.toggle("un-picked", tick.checked);
+  // Keep rows in place so rapid checkbox clicks and keyboard focus survive.
+  $$("[data-review-actions]").forEach((bar) => {
+    const co = bar.dataset.reviewActions;
+    bar.innerHTML = reviewActions(co, reviewRows(co));
+  });
+}
+
+async function reviewAction(action, company) {
+  if (demoGuard() || state.approvingAll) return;
+  const rows = reviewRows(company);
+  const selected = rows.filter((r) => state.reviewPicked.has(r.pk));
+  const picks = selected.length ? selected : action === "apply"
+    ? rows.filter((r) => !state.reviewSkipped.has(r.pk)) : [];
+  if (!picks.length) return;
+  if (action === "skip") {
+    picks.forEach((r) => { state.reviewSkipped.add(r.pk); state.reviewPicked.delete(r.pk); });
+    localStorage.setItem("appliedin.reviewSkipped", JSON.stringify([...state.reviewSkipped]));
+    renderPane();
+    toast(`Skipped ${picks.length} for now. Apply all leaves them out; select them later to apply.`);
+    return;
+  }
+  if (!["reject", "apply"].includes(action)) return;
+  const detail = action === "reject" ? "They move to Closed. Nothing is applied."
+    : "This starts this company's approved queue, including any roles already queued. Skipped and unselected roles in review stay here.";
+  if (!confirm(`${action === "reject" ? "Reject" : "Apply to"} ${picks.length} role${picks.length === 1 ? "" : "s"} at ${company}?\n\n${detail}`)) return;
+  state.approvingAll = true;
+  const controls = $$("[data-review-action], [data-review-pick], [data-review-select], [data-approve-all]");
+  controls.forEach((el) => { el.disabled = true; });
+  try {
+    if (action === "reject") {
+      for (const r of picks) {
+        const result = await post(`/actions/skip/${encodeURIComponent(r.pk)}`);
+        if (!result?.ok) { toast(result?.note || result?.error || "Could not reject this role. Remaining selections are kept."); return; }
+        r.status = "skipped";
+        state.reviewPicked.delete(r.pk);
+        state.reviewSkipped.delete(r.pk);
+      }
+      toast(`Rejected ${picks.length} at ${company}.`);
+    } else {
+      const result = await post("/actions/approve-all", {company, pks: picks.map((r) => r.pk)});
+      if (!result?.ok) { toast(result?.error || "Could not confirm approval. Refresh the queue before retrying."); return; }
+      picks.forEach((r) => { state.reviewPicked.delete(r.pk); state.reviewSkipped.delete(r.pk); });
+      // The existing company worker respects its lease and runs serially even
+      // when automation is paused. Final Apply is explicit authorization to run.
+      const run = await post("/actions/drain-company", {company});
+      toast(run?.ok ? `Applying at ${company} — ${run.queued} queued, one at a time.`
+        : `Approved at ${company}. ${run?.error || "Could not start; use Process in Queued to apply."}`);
+    }
+  } finally {
+    state.approvingAll = false;
+    localStorage.setItem("appliedin.reviewSkipped", JSON.stringify([...state.reviewSkipped]));
+    await loadQueue();
+    renderPane();
+    scheduleReload();
+  }
 }
 
 function flightSec(rows) {
@@ -1637,6 +1748,7 @@ function viewPipeline() {
     ${needsSec(S.needs)}
     ${S.preparing.length ? `<section class="psec ps-preparing"><div class="ps-head"><span class="ps-name">Preparing résumés</span><span class="ps-n mono">${S.preparing.length}</span><span class="ps-hint">Scoring and tailoring. The completion date appears when the résumé is saved.</span></div><div class="ps-grid">${S.preparing.map(laneCard).join("")}</div></section>` : ""}
     ${readySec(S.ready)}
+    ${reviewQueueSec(S.ready)}
     ${queuedSec(S.queued)}
     ${flightSec(S.flight)}
     ${appliedSec(S.applied)}
@@ -5558,6 +5670,17 @@ function wire() {
     }
     const res = e.target.closest("[data-resume]");
     if (res) { openResume(res.dataset.resume); return; }
+    const reviewTick = e.target.closest("[data-review-pick]");
+    if (reviewTick) { paintReviewSelection(reviewTick); return; }
+    const reviewSelect = e.target.closest("[data-review-select]");
+    if (reviewSelect) {
+      const rows = reviewRows(reviewSelect.dataset.reviewSelect);
+      const all = rows.every((r) => state.reviewPicked.has(r.pk));
+      rows.forEach((r) => all ? state.reviewPicked.delete(r.pk) : state.reviewPicked.add(r.pk));
+      renderPane(); return;
+    }
+    const reviewButton = e.target.closest("[data-review-action]");
+    if (reviewButton) { reviewAction(reviewButton.dataset.reviewAction, reviewButton.dataset.company); return; }
     if (e.target.closest("[data-approve-all]")) { approveAll(); return; }
     const runAllBtn = e.target.closest("[data-run-all]");
     if (runAllBtn) { e.stopPropagation(); runProcess(); return; }

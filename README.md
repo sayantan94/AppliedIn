@@ -195,8 +195,11 @@ Then:
 1. Press **Discover** to fetch and queue matching roles.
 2. Press **Prepare résumés** to score and tailor the discovered backlog. This action
    stops before applying, including when automatic mode is enabled.
-3. Review jobs in the **Ready to apply** lane.
-4. Press **Apply** only when the resume and job details look right.
+3. Tailored roles automatically enter the **Review queue**, below **Ready to apply**.
+   Select checkboxes to **Reject** roles or **Skip** them for later. Skips are remembered
+   in this browser and excluded from Apply all; selecting them explicitly includes them again.
+4. Press **Apply** for the selected roles, or **Apply all** for the remaining roles
+   at that company. This starts its approved queue, one application at a time.
 
 The daemon also schedules discovery every six hours by default. Change
 `APPLIEDIN_DISCOVER_INTERVAL_SEC` in `.env` if needed.
@@ -297,7 +300,7 @@ visible and filterable.*
    not dropped, then compile a PDF. A failed validation goes back for repair.
 5. **Critique.** The critic agent evaluates the tailored resume. It either exits
    the loop or sends one focused revision back to the tailor.
-6. **Gate.** The completed resume waits in the **Ready to apply** lane. Gated mode
+6. **Gate.** The completed resume appears in the **Review queue**. Gated mode
    requires a person to approve it; missing facts always become human questions.
 7. **Apply.** After approval, the browser agent opens the posting in the user's
    browser, fills fields from approved facts, uploads the tailored resume, and
