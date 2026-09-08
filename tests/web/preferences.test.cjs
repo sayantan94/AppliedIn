@@ -231,3 +231,59 @@ test('jobs still being tailored are never presented as ready with a missing comp
   assert.equal(h.context.sectionOf({status:'tailoring'}, new Set()), 'preparing');
   assert.equal(h.context.sectionOf({status:'tailored'}, new Set()), 'ready');
 });
+
+test('company Approve all confirms and sends only visible eligible jobs', async () => {
+  const h = harness(), confirmations = [], busy = [];
+  h.state.coFilter = 'Acme'; h.state.query = 'Staff';
+  h.state.apps = [
+    {pk:'acme#1',company:'Acme',title:'Staff Engineer',status:'tailored'},
+    {pk:'acme#2',company:'Acme',title:'Senior Engineer',status:'tailored'},
+    {pk:'beta#1',company:'Beta',title:'Staff Engineer',status:'tailored'},
+    {pk:'acme#3',company:'Acme',title:'Staff Engineer',status:'applied'},
+  ];
+  h.context.confirm = (message) => { confirmations.push(message); return true; };
+  h.context.markBusy = (pk) => busy.push(pk);
+  h.context.loadQueue = () => {}; h.context.scheduleReload = () => {};
+  h.context.reply = async () => ({ok:true,queued:1});
+  await h.context.approveAll();
+  assert.match(confirmations[0], /Approve 1 job at Acme/);
+  assert.deepEqual(h.requests[0].body, {company:'Acme',pks:['acme#1']});
+  assert.deepEqual(busy, ['acme#1']);
+});
+
+test('the Needs you approval never pulls in tailored jobs from another view', () => {
+  const h = harness(); h.state.tab = 'needs'; h.state.coFilter = 'Acme';
+  h.state.apps = [
+    {pk:'acme#1',company:'Acme',title:'Engineer',status:'tailored'},
+    {pk:'acme#2',company:'Acme',title:'Engineer',status:'needs_human',gate_reason:'approval'},
+    {pk:'acme#3',company:'Acme',title:'Engineer',status:'needs_human',gate_reason:'unknown_field'},
+  ];
+  assert.deepEqual(Array.from(h.context.visibleApprovalPicks(), r => r.pk), ['acme#2']);
+});
+
+test('ready approvals exclude jobs already in the queue and honor the location filter', () => {
+  const h = harness(); h.state.locFilter = h.context.locTier('Seattle').key;
+  h.state.apps = [
+    {pk:'1',company:'Acme',title:'Engineer',status:'tailored',location:'Seattle'},
+    {pk:'2',company:'Acme',title:'Engineer',status:'tailored',location:'Seattle'},
+    {pk:'3',company:'Acme',title:'Engineer',status:'tailored',location:'London'},
+  ];
+  h.state.queue = {pending:[{pk:'2'}]};
+  assert.deepEqual(Array.from(h.context.visibleApprovalPicks(), r => r.pk), ['1']);
+});
+
+test('a cancelled approval sends nothing and a second pending click cannot widen it', async () => {
+  const h = harness(); h.state.coFilter = 'Acme';
+  h.state.apps = [{pk:'1',company:'Acme',title:'Engineer',status:'tailored'}];
+  h.context.confirm = () => false;
+  await h.context.approveAll(); assert.equal(h.requests.length, 0);
+  h.context.confirm = () => true; h.context.markBusy = () => {};
+  h.context.loadQueue = () => {}; h.context.scheduleReload = () => {};
+  let finish; h.context.reply = () => new Promise(resolve => { finish = resolve; });
+  const pending = h.context.approveAll();
+  h.state.coFilter = '';
+  await h.context.approveAll(); assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.requests[0].body, {company:'Acme',pks:['1']});
+  finish({ok:true,queued:1}); await pending;
+  assert.equal(h.state.approvingAll, false);
+});

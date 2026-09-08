@@ -2278,14 +2278,28 @@ def create_app() -> FastAPI:
 
         from core.apply_queue import ApplyQueue
 
-        company = (body.get("company") or "").strip().lower()
+        raw_company = body.get("company")
+        if not isinstance(raw_company, str) or not raw_company.strip():
+            return {"ok": False, "error": "Choose a company, or explicitly choose all companies."}
+        company = raw_company.strip().lower()
+        # Explicit IDs bind approval to the jobs the owner actually saw. An empty
+        # list means none, and a new matching job arriving mid-request stays out.
+        pks = body.get("pks")
+        if "pks" in body and (not isinstance(pks, list)
+                              or any(not isinstance(pk, str) or not pk.strip() for pk in pks)):
+            return {"ok": False, "error": "pks must be a list of job IDs."}
+        selected = set(pks) if pks is not None else None
         stores = make_stores(settings)
         picked: list[tuple[str, str]] = []
         # Approval gates live on TAILORED rows (tailoring done, awaiting the
         # go-ahead); stragglers from the old flow may still sit in needs_human.
         for r in [*stores.tracking.query_status(Status.TAILORED),
                   *stores.tracking.query_status(Status.NEEDS_HUMAN)]:
-            if company and company != "__all__" and (r.get("company") or "").lower() != company:
+            if is_internal_pk(r.get("pk", "")):
+                continue
+            if selected is not None and r["pk"] not in selected:
+                continue
+            if company != "__all__" and (r.get("company") or "").strip().lower() != company:
                 continue
             q_ = (r.get("gate_pending") or {}).get("question", "")
             if (r.get("status") == "tailored"

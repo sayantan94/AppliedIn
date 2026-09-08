@@ -1260,7 +1260,8 @@ function needsSec(rows) {
 
 function readySec(rows) {
   const n = rows.length;
-  const nApprove = rows.filter(canApply).length;
+  const nApprove = rows.filter(approveAllPicks)
+    .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter).length;
   // Location pills, carried over from the old Tailored lane: only tiers that
   // hold jobs are offered, and the counts read without opening anything.
   let locBar = "";
@@ -1817,7 +1818,7 @@ function viewNeeds() {
       : `<div class="empty"><div class="empty-big">Nothing needs you</div>
           The pipeline is running clean — questions and approvals will land here.</div>`;
   }
-  const approvable = items.filter((a) => a.gate_reason === "approval").length;
+  const approvable = items.filter(approveAllPicks).length;
   const head = `<div class="pane-note">
     <span>${items.length} waiting on you — answer or approve to continue.</span>
     ${approvable ? `<button class="btn btn-amber" data-approve-all="1">
@@ -3776,40 +3777,53 @@ async function stopRun(what = "discover", ask = true) {
   return true;
 }
 
-/* The confirm has to state the number the SERVER will queue, not a smaller one.
-   This counted only needs_human rows awaiting approval while /actions/approve-all
-   also takes every TAILORED row, so the dialog offered 11 and the press queued
-   328. On a board in auto mode that difference is 300 applications sent under a
-   real name from a dialog that named a tenth of them. The rule below mirrors
-   server.py's selection exactly; if one moves, the other has to move with it. */
+// Confirm and enqueue the same visible jobs. A company filter used to change
+// the button count while the request still approved the entire application list.
 const approveAllPicks = (a) =>
   a.status === "tailored"
   || (a.status === "needs_human"
       && (a.gate_reason === "approval"
           || String(a.gate_question || "").startsWith("Ready to apply")));
 
-function approveAll() {
-  if (demoGuard()) return;
-  const picks = state.apps.filter(approveAllPicks);
+function visibleApprovalPicks() {
+  const queued = queuedPks();
+  return visible(state.apps).filter(approveAllPicks).filter((r) => {
+    if (state.tab === "needs") return r.status === "needs_human";
+    return sectionOf(r, queued) === "ready"
+      && (!state.locFilter || locTier(r.location).key === state.locFilter);
+  });
+}
+
+async function approveAll() {
+  if (demoGuard() || state.approvingAll) return;
+  const picks = visibleApprovalPicks();
+  const company = state.coFilter || "__all__";
   const n = picks.length;
-  if (!n) { toast("Nothing is waiting for approval."); return; }
-  // Gated is a waiting room: the worker only drains the queue in auto mode, so
-  // promising that applications are running would be false in the default mode.
-  const after = state.mode === "auto"
+  if (!n) { toast("Nothing shown here is waiting for approval."); return; }
+  const scope = company === "__all__" ? "shown here across all companies" : `at ${company}`;
+  const after = state.mode === "auto" && !state.paused
     ? "They will be applied for a few at a time — finish any CAPTCHA windows as they open."
     : "They go to the apply queue and wait. Nothing is submitted until you run them.";
-  if (!confirm(`Approve ${n} job${n === 1 ? "" : "s"}?\n\n${after}`)) return;
+  if (!confirm(`Approve ${n} job${n === 1 ? "" : "s"} ${scope}?\n\n${after}`)) return;
+  state.approvingAll = true;
+  const buttons = $$("[data-approve-all]");
+  buttons.forEach((button) => { button.disabled = true; });
   picks.forEach((a) => markBusy(a.pk, "queued…"));
-  post("/actions/approve-all", { company: "__all__" }).then((d) => {
-    loadQueue();
-    if (d && d.ok) {
-      toast(`Queued ${d.queued}${d.already_queued ? `, ${d.already_queued} already there` : ""}.`
-        + (state.mode === "auto" ? " Applying now." : " Waiting for you to run them."));
+  try {
+    const d = await post("/actions/approve-all", { company, pks: picks.map((a) => a.pk) });
+    if (d?.ok) {
+      toast(`Queued ${d.queued}${company === "__all__" ? "" : ` at ${company}`}`
+        + `${d.already_queued ? `, ${d.already_queued} already there` : ""}.`
+        + (state.mode === "auto" && !state.paused ? " Applying now." : " Waiting for you to run them."));
     } else {
-      toast((d && d.error) || "Approve all failed — nothing was queued. See the logs.");
+      toast(d?.error || "Could not confirm approval. Refresh the queue before retrying.");
     }
-  });
-  scheduleReload();
+  } finally {
+    state.approvingAll = false;
+    buttons.forEach((button) => { button.disabled = false; });
+    loadQueue();
+    scheduleReload();
+  }
 }
 
 async function togglePause() {
