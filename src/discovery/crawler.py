@@ -295,8 +295,8 @@ def crawl_company(
 ) -> int:
     """Crawl one custom career page; returns the number of jobs newly enqueued.
 
-    Renders the page with a headless browser (JS career sites need it); falls
-    back to a plain HTTP fetch if the browser isn't available."""
+    Browser-mode boards go straight to Chrome; other boards try HTTP and a
+    sitemap first. An injected extractor keeps tests offline."""
     from core import flags as _flags
 
     # This company's own preferences, before anything reads them. The feed path
@@ -310,7 +310,10 @@ def crawl_company(
         log.info("%s: using company preference overrides %s",
                  company.name, sorted(_flags.company_pref(company.name)))
 
-    html = _render_page(company.careers_url)
+    # Browser mode must bypass BOTH cheap readers. Previously a refused fetch
+    # still tried the sitemap and returned before reaching the browser override.
+    force_browser = company.discovery is DiscoveryMode.BROWSER and extractor is None
+    html = "" if force_browser else _render_page(company.careers_url)
     if html is None:  # no browser / render failed -> plain fetch (static pages)
         own_client = client is None
         from .resolver import BROWSER_HEADERS
@@ -337,8 +340,12 @@ def crawl_company(
                 client.close()
 
     if not html and extractor is None:
-        if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
-            return listed
+        if force_browser:
+            log.info("%s: client-rendered careers page — reading the full listing "
+                     "in the browser", company.name)
+        else:
+            if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
+                return listed
         found = _browser_extract(company.careers_url, company.name, prefs)
         jobs = relevant(found, prefs)
         _note_screened_out(stores, company.name, found, jobs)
@@ -356,6 +363,9 @@ def crawl_company(
         else:
             log.info("%s: browser read %d posting(s), %d relevant",
                      company.name, len(found), len(jobs))
+        kws = _flags.company_filter(company.name)
+        if kws:
+            jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         return _enqueue(company, jobs, stores)
 
     # If the page actually embeds a known ATS, we shouldn't be here — log it so
@@ -371,24 +381,14 @@ def crawl_company(
 
     jobs = relevant(extracted, prefs)
     _note_screened_out(stores, company.name, extracted, jobs)
-    # Escalate to a real browser agent that loads the FULL listing, then re-screen.
-    # Two ways in. Skipped when an extractor is injected (tests stay offline).
-    #
-    #   discovery: browser — the page is a client-rendered search UI and the plain
-    #     fetch is known to see only a fraction of it. Crucially the old rule
-    #     ("escalate when nothing was relevant") never fired for these: a short
-    #     window containing one match looks exactly like a complete page with one
-    #     match, so a rescan kept returning the same handful and new roles further
-    #     down the listing were never fetched at all.
-    #   nothing relevant — the page may simply not have rendered; worth one look.
-    force_browser = company.discovery is DiscoveryMode.BROWSER
-    if extractor is None and not extracted and not force_browser:
+    # Nothing relevant may mean an unrendered listing; try the browser before
+    # concluding the company has no matches. Browser mode already ran above.
+    if extractor is None and not extracted:
         if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
             return listed
-    if extractor is None and (force_browser or not jobs):
-        log.info("%s: %s — reading the full listing in the browser", company.name,
-                 "client-rendered careers page" if force_browser
-                 else "nothing from the plain fetch")
+    if extractor is None and not jobs:
+        log.info("%s: nothing from the plain fetch — reading the full listing "
+                 "in the browser", company.name)
         seen_by_browser = _browser_extract(company.careers_url, company.name, prefs)
         # Union, not replacement: the plain fetch occasionally catches a posting
         # the browser agent scrolls past, and losing one to gain thirty is still

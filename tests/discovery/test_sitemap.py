@@ -144,6 +144,45 @@ def test_crawl_screens_the_sitemap_instead_of_opening_the_browser(monkeypatch):
     assert noted == ["Acme"]
 
 
+def test_browser_mode_cannot_be_short_circuited_by_a_sitemap(monkeypatch):
+    """Starbucks returned a small irrelevant sitemap slice and never searched.
+
+    Even a refused HTTP fetch used to bypass the browser-mode override. Neither
+    HTTP nor a sitemap may decide that an explicitly requested search is done.
+    """
+    from core import flags
+    from core.models import DiscoveryMode, JobRecord
+
+    def cheap_reader(*args, **kwargs):
+        pytest.fail("browser mode must search even when a sitemap has entries")
+
+    monkeypatch.setattr(crawler, "_render_page", cheap_reader)
+    monkeypatch.setattr(crawler, "sitemap_jobs", cheap_reader)
+    monkeypatch.setattr(crawler, "_default_extractor", cheap_reader)
+    monkeypatch.setattr(flags, "effective_prefs", lambda name, prefs: prefs)
+    monkeypatch.setattr(flags, "company_pref", lambda name: {})
+    monkeypatch.setattr(flags, "company_filter", lambda name: ["Principal"])
+    monkeypatch.setattr(crawler, "relevant", lambda jobs, prefs: jobs)
+    monkeypatch.setattr(crawler, "_age_limit", lambda name: 0.0)
+    calls = []
+    found = [JobRecord(company="starbucks", job_id=str(i), title=title, jd_text="",
+                       jd_url=f"https://starbucks.eightfold.ai/careers/job/{i}")
+             for i, title in enumerate(["Principal Engineer AI", "Software Engineer"])]
+
+    def browser(url, company, prefs):
+        calls.append((url, company))
+        return found
+
+    monkeypatch.setattr(crawler, "_browser_extract", browser)
+    co = CompanyConfig(name="starbucks", careers_url="https://starbucks.eightfold.ai/careers",
+                       discovery=DiscoveryMode.BROWSER)
+    stores = _Stores()
+    client = httpx.Client(transport=httpx.MockTransport(cheap_reader))
+    assert crawler.crawl_company(co, Preferences(), stores, client=client) == 1
+    assert calls == [(co.careers_url, co.name)]
+    assert [j.title for j in stores.tracking.put] == ["Principal Engineer AI"]
+
+
 @pytest.mark.parametrize("url,location", [
     ("https://jobs.acme.com/ie/jobs/2131328/software-engineer/", "Ireland"),
     ("https://jobs.acme.com/in/jobs/2131328/software-engineer/", "India"),

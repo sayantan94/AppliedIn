@@ -96,7 +96,15 @@ def _workday(host: str, path: str, url: str) -> AtsMatch | None:
     return None
 
 
-_URL_DETECTORS = (_greenhouse, _lever, _ashby, _smartrecruiters, _workday)
+def _eightfold(host: str, path: str, url: str) -> AtsMatch | None:
+    # Starbucks' search renders in the browser. A partial sitemap parse used to
+    # suppress that search entirely, silently hiding its engineering postings.
+    if host.endswith(".eightfold.ai"):
+        return AtsMatch("custom", url, discovery=DiscoveryMode.BROWSER)
+    return None
+
+
+_URL_DETECTORS = (_greenhouse, _lever, _ashby, _smartrecruiters, _workday, _eightfold)
 
 # Signatures to look for inside a fetched custom careers page (many custom pages
 # embed or link their real ATS board). Only ATSes we have a feed adapter for.

@@ -216,3 +216,8 @@ companies:
   - name: pintrest
     careers_url: https://www.pinterestcareers.com/jobs/
     mode: gated
+
+  - name: starbucks
+    careers_url: https://starbucks.eightfold.ai/careers
+    discovery: browser
+    mode: gated

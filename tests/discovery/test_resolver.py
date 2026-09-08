@@ -30,6 +30,21 @@ def test_custom_url_falls_back_to_crawl():
     assert m is None  # no direct pattern
 
 
+def test_eightfold_search_runs_in_chrome_without_probing_unrelated_feeds():
+    url = "https://starbucks.eightfold.ai/careers"
+
+    def no_fetch(request):
+        raise AssertionError("a known browser board needs no HTTP discovery")
+
+    client = httpx.Client(transport=httpx.MockTransport(no_fetch))
+    m = resolve(url, client, name="starbucks")
+    assert (m.ats, m.board, m.discovery) == ("custom", url, DiscoveryMode.BROWSER)
+
+
+def test_eightfold_name_in_an_unrelated_host_is_not_a_browser_board():
+    assert detect_from_url("https://eightfold.ai.example.com/careers") is None
+
+
 def test_resolve_scans_page_for_embedded_ats():
     html = '<iframe src="https://boards.greenhouse.io/embed/job_board?for=acmecorp"></iframe>'
     client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=html)))

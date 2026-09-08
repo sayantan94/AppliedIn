@@ -42,10 +42,9 @@ def resolve_company(company: CompanyConfig, client: httpx.Client) -> CompanyConf
         return company
     match = resolve(company.careers_url, client, name=company.name)
     # An explicit `discovery: browser` in the watchlist SURVIVES resolution.
-    # The resolver infers ats and board from the careers URL, and it can only ever
-    # guess "feed" or "crawl" — BROWSER is a judgement the resolver cannot make,
-    # because a client-rendered page looks like an ordinary one until you fetch it
-    # and count what came back. Overwriting it here silently undid the setting:
+    # The resolver knows some browser boards, but an unfamiliar client-rendered
+    # page still looks like an ordinary crawl target. An explicit choice must win
+    # over that fallback. Overwriting it here silently undid the setting:
     # Netflix was marked browser, resolved back to crawl, and kept extracting ten
     # postings out of hundreds. Apple only escaped because it had `ats: custom`
     # set, which skips resolution entirely.
