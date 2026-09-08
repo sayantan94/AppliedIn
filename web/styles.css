@@ -446,7 +446,7 @@ button:disabled { cursor: default; }
 }
 .cp-dt-f:has(.cp-dt-inh.overridden) .cp-dt-in:focus { border-color: var(--scan); }
 .cp-dt-in { padding: 5px 9px; font-size: 12.5px; }
-.cp-dt-f select.cp-dt-in { appearance: none; cursor: pointer; }
+.cp-dt-f select.cp-dt-in { appearance: auto; cursor: pointer; }
 .cp-dt-f textarea.cp-dt-in {
   min-height: 54px; resize: vertical;
   /* same voice as Hard rules in Job preferences: the two panes read alike */
@@ -468,7 +468,7 @@ button:disabled { cursor: default; }
 }
 .cp-dt-in::placeholder { color: var(--faint); font-style: italic; }
 .cp-dt-foot {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 8px 12px; border-top: 1px solid var(--border);
   flex: none;
 }
@@ -477,6 +477,8 @@ button:disabled { cursor: default; }
 .cp-dt-hint { flex: 1 1 auto; min-width: 0; font-size: 10.5px; color: var(--faint);
               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cp-dt-foot .cp-add-btn { flex: 0 0 auto; }
+.cp-dt-foot .cp-dt-hint { flex-basis: 100%; }
+.cp-dt-foot #cp-dt-save { margin-left: auto; }
 .cp-dt-pick { padding: 18px 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
 .cp-dt-foot .cp-add-btn:disabled { opacity: 0.4; cursor: default; }
 .cp-dt-foot .cp-add-btn:disabled:hover { border-color: var(--border); }
@@ -1050,6 +1052,15 @@ button:disabled { cursor: default; }
   background: var(--card);
 }
 table.data { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 680px; }
+/* Reserve space for the application date instead of pushing it offscreen when
+   a long role title and its profile badge compete with the activity sidebar. */
+table.applications-table { table-layout: fixed; min-width: 780px; }
+.applications-table .col-status { width: 144px; }
+.applications-table .col-company { width: 90px; }
+.applications-table .col-match { width: 74px; }
+.applications-table .col-links { width: 110px; }
+.applications-table .col-applied { width: 120px; }
+.applications-table .col-updated { width: 86px; }
 table.data th {
   text-align: left;
   font-weight: 600;
@@ -1069,6 +1080,11 @@ table.data tbody tr:last-child td { border-bottom: none; }
 table.data tbody tr { cursor: pointer; transition: background 0.12s; }
 table.data tbody tr:hover { background: var(--card-2); }
 .t-co { font-weight: 600; white-space: nowrap; }
+.applications-table .t-co { overflow: hidden; text-overflow: ellipsis; }
+.applications-table td, .applications-table th { padding-left: 10px; padding-right: 10px; }
+.applications-table .t-applied { color: var(--muted); }
+.applications-table .rowlk { padding-left: 4px; padding-right: 4px; }
+.applications-table .t-links { gap: 3px; }
 .t-role {
   color: var(--muted);
   max-width: 300px;
@@ -4206,8 +4222,9 @@ a.po-t:hover { color: var(--fg); text-decoration: underline; }
 .jr-title .jr-prof { flex: none; margin-left: 0; }
 .t-role { white-space: nowrap; }
 .t-role-t { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
-.t-role:has(.jr-prof) .t-role-t { max-width: calc(100% - 118px); }
-.t-role .jr-prof { vertical-align: middle; max-width: 140px; overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+.t-role:has(.jr-prof) .t-role-t { max-width: 100%; display: block; }
+.t-role .jr-prof { vertical-align: middle; max-width: 100%; margin: 3px 0 0;
+                  overflow: hidden; text-overflow: ellipsis; display: inline-block; }
 
 .jr-prof.again { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
 .jr-prof.again.def { color: var(--muted); border-color: var(--border); }

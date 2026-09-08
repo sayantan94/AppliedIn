@@ -467,6 +467,7 @@ tests/           unit tests for core, discovery, and safety behavior
 ```bash
 uv sync --group dev
 uv run pytest
+node --test tests/web/*.test.cjs  # offline UI event/state tests; Node 18+
 uv run ruff check src tests
 ```
 

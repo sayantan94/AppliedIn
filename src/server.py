@@ -242,6 +242,7 @@ def _to_ui(row: dict, artifacts) -> dict:
         "tailored_at": row.get("tailored_at") or "",
         "retailored_at": row.get("retailored_at") or "",
         "posted_at": row.get("posted_at") or "",
+        "applied_at": row.get("applied_at") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
         "closed_reason": _closed_reason(row),

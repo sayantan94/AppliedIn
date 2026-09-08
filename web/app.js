@@ -37,12 +37,15 @@ const state = {
   collapsed: null,    // folded location buckets (null = pick the default once)
   dayShut: null,      // folded tailoring-date groups in Ready to apply
   companies: [],      // watchlist names for the discovery picker
-  picked: new Set(),  // companies picked for the next discovery ("" empty = all)
+  picked: new Set(),  // companies picked for discovery; empty means none
+  pickedLoaded: false,
   skipped: new Set(), // lowercase names excluded from un-scoped Discover/Process
   filters: {},        // {company_lower: [title keyword, ...]} per-company title filters
   cprefs: {},         // {company_lower: {field: value}} per-company preference OVERRIDES
   prefs: {},          // the global job preferences, so overrides can show what they inherit
   detailCo: null,     // company open in the picker's preference pane
+  cpDrafts: {},       // unsaved fields, retained when switching companies
+  cpSaving: false,
   activity: {},       // pk -> {detail, at} — the live step, shown on active cards
   coQuery: "",        // search inside the company picker
   mode: "gated",
@@ -132,6 +135,17 @@ function when(ts) {
   return ts ? new Date(ts).toLocaleString([], { month: "short", day: "numeric",
     hour: "2-digit", minute: "2-digit" }) : "—";
 }
+function appliedDateHtml(ts, full = false) {
+  const date = ts ? new Date(ts) : null;
+  if (!date || !Number.isFinite(date.getTime())) {
+    return '<span class="muted" title="No application date was recorded">Not recorded</span>';
+  }
+  const exact = date.toLocaleString([], { year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+  const label = full ? exact : date.toLocaleDateString([], {
+    year: "numeric", month: "short", day: "numeric" });
+  return `<time datetime="${esc(ts)}" title="Applied ${esc(exact)}">${esc(label)}</time>`;
+}
 // Demo rows use "#" as a stand-in URL — fine for links, broken for <img>.
 const imgOk = (u) => !!u && u !== "#";
 
@@ -206,7 +220,9 @@ function visible(list) {
   const q = state.query.trim().toLowerCase();
   let f = byCompany(list);
   if (q) f = f.filter((r) => `${r.company} ${r.title}`.toLowerCase().includes(q));
-  return [...f].sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+  const date = (r) => ["applied", "applied_manual"].includes(r.status)
+    ? r.applied_at : r.updated_at;
+  return [...f].sort((a, b) => new Date(date(b) || 0) - new Date(date(a) || 0));
 }
 const filtersActive = () => !!(state.coFilter || state.query.trim());
 function emptyFiltered() {
@@ -217,8 +233,13 @@ function emptyFiltered() {
 
 // --- control bar -----------------------------------------------------------
 const pickedAll = () =>
-  state.picked.size === 0 || (state.companies.length > 0 && state.picked.size === state.companies.length);
+  state.companies.length > 0 && state.picked.size === state.companies.length;
 const discoverScope = () => (pickedAll() ? [] : [...state.picked]);
+const DISCOVER_PICK_KEY = "appliedin.discoverpicked";
+function savePicked() {
+  try { localStorage.setItem(DISCOVER_PICK_KEY, JSON.stringify([...state.picked])); }
+  catch { /* selection still works when storage is unavailable */ }
+}
 
 // Discover's run window — how far back a scan looks, by the employer's publish
 // date. Deliberately run-scoped: it bounds the NEXT scan only and never touches
@@ -236,6 +257,11 @@ function renderScanWindow() {
 }
 
 function renderDiscoverLabel() {
+  const busy = new Set((state.stats.scanning || []).map((c) => c.toLowerCase()));
+  const scope = pickedAll()
+    ? state.companies.filter((c) => !state.skipped.has(c.toLowerCase())) : [...state.picked];
+  $("#btn-discover").disabled = !scope.length || scope.every((c) => busy.has(c.toLowerCase()));
+  $("#btn-process").disabled = !state.picked.size || !!state.stats.processing;
   // ONE company selection scopes BOTH actions: Discover scans just the picked
   // companies, and Process runs the pipeline on just their discovered jobs.
   const el = $("#discover-label");
@@ -290,7 +316,7 @@ function chosenCompany() {
   return sel.value;
 }
 
-function renderPicker() {
+function renderPicker(forceDetail = false) {
   const list = $("#cp-list");
   const keepScroll = list.scrollTop; // don't jump on select-all/clear
   if (!state.companies.length) {
@@ -327,7 +353,7 @@ function renderPicker() {
   }
   list.scrollTop = keepScroll;
   renderPickerState();
-  renderDetail();
+  renderDetail(forceDetail === true);
 }
 // The per-company preference pane. Deliberately the SAME seven fields as the Job
 // preferences panel: a company either screens the way you screen everywhere, or
@@ -362,10 +388,16 @@ const cpAsText = (v, f) => {
 // The inheritance is kept by COMPARING on save rather than by leaving fields
 // blank: a value equal to the default stores no override, so raising your global
 // score bar later still moves every company that never disagreed with it.
-function renderDetail() {
+function renderDetail(force = false) {
   const box = $("#cp-detail");
   if (!box) return;
   const co = state.detailCo;
+  // Profile loads and other refreshes must not replace a focused dropdown or
+  // fields being edited. Drafts also survive closing or switching companies.
+  const draft = state.cpDrafts[(co || "").toLowerCase()] || {};
+  if (!force && box.dataset.co === co
+      && (box.contains(document.activeElement) || Object.keys(draft).length || state.cpSaving)) return;
+  box.dataset.co = co || "";
   const dflt = state.prefs || {};
   if (!co) {
     box.innerHTML = `<div class="cp-dt-h"><div class="cp-dt-co">Company rules</div></div>
@@ -382,7 +414,7 @@ function renderDetail() {
 
   const field = (f) => {
     const isOver = over[f.k] !== undefined;
-    const value = cpAsText(isOver ? over[f.k] : dflt[f.k], f);   // pre-filled either way
+    const value = draft[f.k] ?? cpAsText(isOver ? over[f.k] : dflt[f.k], f);
     const tag = isOver
       ? `<em class="cp-dt-inh overridden">only here</em>`
       : `<em class="cp-dt-inh">shared</em>`;
@@ -404,13 +436,14 @@ function renderDetail() {
       // because "who does this company hear from" is one question with one
       // answer. Picking a rotating profile binds the company instead of storing
       // a per-company override — the address is decided per application.
-      const opts = [`<option value=""${value === "" && !rotc ? " selected" : ""}>${esc(dn)}</option>`]
+      const chosen = draft[f.k] ?? (rotc ? `rot:${rotc.profile}` : value);
+      const opts = [`<option value=""${chosen === "" ? " selected" : ""}>${esc(dn)}</option>`]
         .concat(state.profiles
           .filter((x) => x.id !== state.profileDefault && x.kind !== "rotating")
-          .map((x) => `<option value="${esc(x.id)}"${value === x.id && !rotc ? " selected" : ""}
+          .map((x) => `<option value="${esc(x.id)}"${chosen === x.id ? " selected" : ""}
             >${esc(x.label || x.id)}${x.email ? ` · ${esc(x.email)}` : ""}</option>`))
         .concat(state.profiles.filter((x) => x.kind === "rotating")
-          .map((x) => `<option value="rot:${esc(x.id)}"${rotc && rotc.profile === x.id ? " selected" : ""}
+          .map((x) => `<option value="rot:${esc(x.id)}"${chosen === `rot:${x.id}` ? " selected" : ""}
             >↻ ${esc(x.label || x.id)} — a new address every ${x.limit || 5}</option>`));
       return `<label class="pf-f cp-dt-f"><span class="pf-l">${f.label}${tag}</span>
         <select ${attrs}>${opts.join("")}</select></label>`;
@@ -439,7 +472,8 @@ function renderDetail() {
       ${rotc.email ? `<span class="cp-dt-rotn mono">${rotc.used}/${rotc.limit}</span>` : ""}
     </div>` : ""}
     <div class="cp-dt-foot">
-      <span class="cp-dt-hint">${rotc ? "" : `Edits apply to ${esc(co)} only.`}</span>
+      <span class="cp-dt-hint">${Object.keys(draft).length ? "Unsaved changes" : `Edits apply to ${esc(co)} only.`}</span>
+      <button class="cp-lk cp-add-btn" id="cp-dt-save" type="button">Save preferences</button>
       ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
         title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
       ${rotc ? `<button class="cp-lk cp-add-btn cp-rot-go" id="cp-dt-rotgo" type="button"
@@ -556,12 +590,6 @@ function renderDeck() {
   // only when every company the press would cover is already being scanned.
   // (Process below keeps its global gate on purpose — the server runs one
   // process pass at a time, so there its flag and its reach agree.)
-  const busyScan = new Set((s.scanning || []).map((c) => String(c).toLowerCase()));
-  const discScope = pickedAll()
-    ? state.companies.filter((c) => !state.skipped.has(String(c).toLowerCase()))
-    : [...state.picked];
-  disc.disabled = !!discScope.length && busyScan.size > 0
-    && discScope.every((c) => busyScan.has(String(c).toLowerCase()));
   disc.classList.toggle("running", !!s.discovering);
   renderScanNow();
   const stopBtn = $("#btn-stop");
@@ -569,7 +597,6 @@ function renderDeck() {
   const stopApply = $("#btn-stop-apply");
   if (stopApply) stopApply.hidden = !(s.applying > 0);   // from /stats, polled always
   renderDiscoverLabel();
-  proc.disabled = !!s.processing;
   proc.classList.toggle("running", !!s.processing);
   renderDiscoverLabel();  // both action labels reflect run-state + company scope
   const badge = $("#proc-badge");
@@ -1173,7 +1200,7 @@ function appliedRow(r) {
     <span class="jr-co">${esc(r.company)}</span>
     <span class="jr-title"><span class="jr-title-t">${esc(r.title)}</span>${appliedProfHtml(r)}${againHtml(r)}</span>
     ${r.status === "applied_manual" ? `<span class="ps-chip">manual</span>` : ""}
-    <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
+    <span class="jr-when jr-applied-date mono">${appliedDateHtml(r.applied_at)}</span>
   </div>`;
 }
 function closedRow(r) {
@@ -1633,6 +1660,8 @@ function viewApps() {
       <td class="t-role" title="${esc(r.title)}"><span class="t-role-t">${esc(r.title)}</span>${["applied", "applied_manual"].includes(r.status) ? appliedProfHtml(r) : ""}${againHtml(r)}</td>
       <td>${scoreHtml(r.match_score)}</td>
       <td><span class="t-links">${cv}${jd}${sc}</span></td>
+      <td class="t-when t-applied">${["applied", "applied_manual"].includes(r.status)
+        ? appliedDateHtml(r.applied_at) : "—"}</td>
       <td class="t-when">${ago(r.updated_at)}</td>
     </tr>`;
   }).join("");
@@ -1643,8 +1672,11 @@ function viewApps() {
     : (rows.length ? "" : (filtersActive() ? emptyFiltered()
         : `<div class="empty">Nothing under this status filter yet.</div>`));
   return `<div class="chips">${chips}</div>
-    <div class="tablewrap"><table class="data"><thead><tr>
-      <th>status</th><th>company</th><th>role</th><th>match</th><th>links</th><th>updated</th>
+    <div class="tablewrap"><table class="data applications-table">
+      <colgroup><col class="col-status"><col class="col-company"><col>
+        <col class="col-match"><col class="col-links"><col class="col-applied"><col class="col-updated"></colgroup>
+      <thead><tr>
+      <th>status</th><th>company</th><th>role</th><th>match</th><th>links</th><th>applied on</th><th>updated</th>
       </tr></thead><tbody>${body}</tbody></table>${empty}
       ${allRows.length > rows.length
         ? moreBtn("appsTable", rows.length, allRows.length, 50)
@@ -2497,6 +2529,7 @@ function appsSig() {
   let s = "";
   for (const a of state.apps) {
     s += a.pk + "\u0001" + a.status + "\u0001" + (a.updated_at || "") + "\u0001"
+       + (a.applied_at || "") + "\u0001"
        + (a.gate_reason || "") + (a.gate_question ? "?" : "") + "\u0001"
        + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001"
        + (a.profile_id || "") + "\n";
@@ -3037,6 +3070,12 @@ async function loadCompanies() {
   if (!Object.keys(state.prefs || {}).length) await loadGlobalPrefs();
   state.companies.sort((a, b) => String(a).localeCompare(String(b), undefined,
                                                         { sensitivity: "base" }));
+  if (!state.pickedLoaded && state.companies.length) {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(DISCOVER_PICK_KEY)); } catch { /* first visit */ }
+    state.picked = new Set(Array.isArray(saved) ? saved : state.companies);
+    state.pickedLoaded = true;
+  }
   state.picked = new Set([...state.picked].filter((c) => state.companies.includes(c)));
   // The Fresh tab's own selection follows the same rule: names that left the
   // watchlist leave the set, so its count never promises a scan it cannot run.
@@ -3208,28 +3247,12 @@ function closeAllPickers() {
 // second attempt is still refused, something else is holding the guard and asking
 // again would just reopen this dialog forever, which is what happened when the
 // stop was scoped to discovery and a PROCESS run was the actual blocker.
-// Changing a company's rules in Discover should make Discover act on them, so a
-// scan follows the edit. Debounced rather than immediate: the fields commit on
-// blur, so tabbing through four of them would otherwise launch four crawls of the
-// same careers page. One scan, after the edits stop.
-let _rescanTimer = null;
-function scheduleRescan(co, url = "", waiting = false) {
-  clearTimeout(_rescanTimer);
-  if (waiting) {
-    // Another company is already scanning. Discovery runs one at a time, so hold
-    // this one and let the stats poll start it the moment that finishes. It is
-    // remembered rather than retried, so editing rules while something else scans
-    // is a thing you can just do.
-    state.pendingScan = { co, url };
-    renderPicker();
-    toast(`${co}: rules saved. It scans as soon as the current one finishes.`);
-    return;
-  }
-  // Editing four fields commits four times; one scan once the edits settle.
-  _rescanTimer = setTimeout(() => {
-    toast(`Scanning ${co} with the new rules…`);
-    runCompany(co, url, false, true);      // silent: never prompts
-  }, 2500);
+// Retry a requested scan once its company is free. Saving preferences alone
+// must never launch a scan or close an editor the owner is still using.
+function scheduleRescan(co, url = "") {
+  state.pendingScan = { co, url };
+  renderPicker();
+  toast(`${co}: it scans as soon as the current one finishes.`);
 }
 
 async function offerRestart(label, retry, blockedBy = "discover", again = false) {
@@ -3253,7 +3276,7 @@ async function runDiscover(again = false) {
   // crawl block every other company from being started. The server refuses only
   // the companies genuinely mid scan, so drop those and send the rest.
   if (demoGuard()) return;
-  closeAllPickers();
+  if (!state.picked.size) { toast("Select at least one company to discover."); return; }
   const busy = new Set((state.stats.scanning || []).map((c) => String(c).toLowerCase()));
   const wanted = discoverScope();
   const scope = Array.isArray(wanted)
@@ -3283,6 +3306,7 @@ async function runDiscover(again = false) {
   const body = { companies: scope, profile_id: profile };
   if (hours) body.hours = hours;
   const d = await post("/actions/discover", body);
+  if (d?.ok) closeAllPickers();
   const winNote = hours ? ` Only postings from ${scanWindowText(hours)} count.` : "";
   if (d && d.status === "already_running") offerRestart("the scan", () => runDiscover(true), d.blocked_by, again);
   else if (d && d.ok && profile) {
@@ -3291,7 +3315,10 @@ async function runDiscover(again = false) {
   } else if (d && d.ok) toast((scope.length
     ? `Discovery started. Scanning ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`}.`
     : "Discovery started. Scanning the whole watchlist.") + winNote);
-  else if (!d) { state.stats.discovering = false; renderDeck(); }
+  else {
+    state.stats.discovering = false; renderDeck();
+    if (d?.error) toast(d.error);
+  }
   pollStats();
 }
 
@@ -3347,13 +3374,13 @@ async function runFreshScan() {
 
 async function runCompany(name, careersUrl, again = false, silent = false) {
   if (demoGuard()) return;
-  closeAllPickers();
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
+  if (d?.ok && !silent) closeAllPickers();
   if (d && d.status === "already_running") {
     // A scan the OWNER asked for may interrupt to ask. One this scheduled itself
     // after a rules edit must not: editing four fields would mean four dialogs,
     // and the answer to all of them is the same. It waits and tries again.
-    if (silent) scheduleRescan(name, careersUrl, true);
+    if (silent) scheduleRescan(name, careersUrl);
     else offerRestart("the scan", (a) => runCompany(name, careersUrl, a), d.blocked_by, again);
   }
   else if (d && d.ok) toast(`▶ ${name}: discover → score → tailor started. Tailored jobs will land on the board.`);
@@ -3363,18 +3390,22 @@ async function runCompany(name, careersUrl, again = false, silent = false) {
 
 async function runProcess(again = false) {
   if (demoGuard() || state.stats.processing) return;
-  closeAllPickers();
+  if (!state.picked.size) { toast("Select at least one company to process."); return; }
   const n = state.stats.found_waiting ?? 0;
   const scope = discoverScope();  // same picked companies as Discover
   state.stats.processing = true;    // optimistic; poll confirms
   renderDeck();
   const d = await post("/actions/process", { companies: scope });
+  if (d?.ok) closeAllPickers();
   if (d && d.status === "already_running") offerRestart("processing", (a) => runProcess(a), d.blocked_by, again);
   else if (d && d.ok) toast(scope.length
     ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · apply.`
     : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
         : "Processing run started.");
-  else if (!d) { state.stats.processing = false; renderDeck(); }
+  else {
+    state.stats.processing = false; renderDeck();
+    if (d?.error) toast(d.error);
+  }
   pollStats();
 }
 
@@ -3785,7 +3816,8 @@ function openDrawer(pk) {
     r.ats ? ["ATS", esc(r.ats)] : null,
     r.mode ? ["mode", esc(r.mode)] : null,
     ["confirmation", `<span class="mono">${esc(r.confirmation_id || "—")}</span>`],
-    r.submitted_at ? ["submitted", when(r.submitted_at)] : null,
+    ["applied", "applied_manual"].includes(r.status)
+      ? ["applied on", appliedDateHtml(r.applied_at, true)] : null,
     ["job id", `<span class="mono">${esc(r.pk)}</span>`],
   ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 
@@ -4288,7 +4320,14 @@ window.addEventListener("resize", () => {
 });
 
 function wire() {
-  $("#btn-discover").addEventListener("click", runDiscover);
+  $("#btn-discover").addEventListener("click", async () => {
+    const scope = discoverScope();
+    for (const co of state.companies) {
+      if ((!scope.length || scope.includes(co)) && state.cpDrafts[co.toLowerCase()]
+          && !(await saveCprefs(co))) return;
+    }
+    runDiscover();
+  });
   $("#btn-stop").addEventListener("click", () => stopRun("discover"));
   $("#qpicker").addEventListener("click", (e) => {
     if (e.target.closest("#q-stop")) stopApplying();
@@ -4310,7 +4349,7 @@ function wire() {
     loadQueue && loadQueue();
     pollStats();
   }
-  $("#btn-process").addEventListener("click", runProcess);
+  $("#btn-process").addEventListener("click", () => runProcess());
 
   // company picker (for discovery)
   const picker = $("#copicker"), coBtn = $("#btn-companies");
@@ -4343,10 +4382,12 @@ function wire() {
   });
   $("#cp-all").addEventListener("click", () => {
     state.picked = new Set(state.companies);
+    savePicked();
     renderPicker(); renderDiscoverLabel();
   });
   $("#cp-none").addEventListener("click", () => {
     state.picked.clear();
+    savePicked();
     renderPicker(); renderDiscoverLabel();
   });
   // The scan window chips. The choice is remembered like the theme is, so "I
@@ -4372,6 +4413,7 @@ function wire() {
       $("#cp-add-name").value = ""; $("#cp-add-url").value = "";
       await loadCompanies();
       state.picked.add(name);
+      savePicked();
       renderPicker(); renderDiscoverLabel();
       closePicker();          // the company is added and selected — nothing left here
       toast(`${name} added to the watchlist and selected. Hit Discover to scan it.`);
@@ -4390,7 +4432,7 @@ function wire() {
   const commitOneFilter = async (inp) => {
     const name = inp.dataset.filterCo, titles = inp.value.trim();
     const was = (state.filters[name.toLowerCase()] || []).join(", ");
-    if (titles === was) return;              // nothing typed — don't toast at them
+    if (titles === was) return true;         // nothing typed — don't toast at them
     const d = await post("/actions/company-filter", { name, titles });
     if (d && d.ok) {
       state.filters = d.filters || {};
@@ -4398,15 +4440,18 @@ function wire() {
         ? `${name}: only titles with "${titles}"${d.reconciled ? ` — ${d.reconciled} re-sorted` : ""}.`
         : `${name}: every title counts again.`);
       loadApps();
+      return true;
     }
+    if (d?.error) toast(d.error);
+    return false;
   };
-  $("#cp-foot").addEventListener("click", (e) => {
+  $("#cp-foot").addEventListener("click", async (e) => {
     const b = e.target.closest("[data-runone]");
     if (!b) return;
-    const inp = $("#cp-one-filter");           // save the filter before running
-    if (inp && inp.value.trim() !== (state.filters[b.dataset.runone.toLowerCase()] || []).join(", ")) {
-      commitOneFilter(inp).then(() => runCompany(b.dataset.runone));
-    } else runCompany(b.dataset.runone);
+    const inp = $("#cp-one-filter"); // capture before saving can rebuild the footer
+    if (!(await saveCprefs(b.dataset.runone))) return;
+    if (inp && !(await commitOneFilter(inp))) return;
+    runCompany(b.dataset.runone);
   });
   $("#cp-foot").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.id === "cp-one-filter") { e.preventDefault(); e.target.blur(); }
@@ -4431,64 +4476,93 @@ function wire() {
     renderPicker();
   });
 
-  // Save on blur or Enter. The field was pre-filled with the DEFAULT when this
-  // company had no opinion, so "unchanged" must mean "still shares the default"
-  // and store nothing. Writing an override that merely copies today's default
-  // would quietly detach the company: a later change to your defaults would move
-  // every other company and leave this one behind, with nothing on screen saying
-  // why. Typing the default back in is therefore also how you re-share it.
-  const commitCpref = async (el) => {
-    const co = el.dataset.co, f = CPREF_FIELDS.find((x) => x.k === el.dataset.cpref);
-    if (!co || !f) return;
-    const raw = el.value.trim();
-    // "Apply as" carries both kinds of answer. A rotating choice is not a
-    // per-company override — there is no one address to store — so it binds the
-    // company instead, and picking anything else unbinds it.
-    if (f.prof) {
-      const bound = (state.rotation || []).some((r) => r.company === co.toLowerCase());
-      if (raw.startsWith("rot:")) {
-        const d = await post("/actions/rotation", { company: co, profile_id: raw.slice(4) });
-        if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that up."); return; }
-        toast(`${co}: a new address every ${d.limit} applications.`);
-        await loadRotation();
-        renderPicker();
-        return;
-      }
-      if (bound) {
-        await post("/actions/rotation", { company: co, profile_id: "" });
-        await loadRotation();
-        toast(`${co} no longer rotates. Addresses already used are kept.`);
-      }
+  // Editing is local until Save or Scan now. The old blur-save rebuilt the
+  // next focused field, then auto-scanned 2.5 seconds later and closed the popup.
+  const rememberCpref = (el) => {
+    const co = el.dataset.co;
+    if (!co || !el.dataset.cpref) return;
+    const draft = state.cpDrafts[co.toLowerCase()] ||= {};
+    draft[el.dataset.cpref] = el.value;
+    const hint = $("#cp-detail .cp-dt-hint");
+    if (hint) hint.textContent = "Unsaved changes";
+  };
+  const saveCprefs = async (co) => {
+    if (!co || demoGuard() || state.cpSaving) return false;
+    const key = co.toLowerCase();
+    const draft = { ...(state.cpDrafts[key] || {}) };
+    if (!Object.keys(draft).length) return true;
+    const over = state.cprefs[key] || {};
+    const changes = {};
+    const canonical = (v, f) => f.list
+      ? v.split(/[,\n]/).map((s) => s.trim()).filter(Boolean).join(", ") : v.trim();
+    for (const f of CPREF_FIELDS) {
+      if (!(f.k in draft) || f.prof) continue;
+      const raw = canonical(draft[f.k], f);
+      const shown = cpAsText(over[f.k] ?? (state.prefs || {})[f.k], f);
+      if (raw === shown) continue;
+      changes[f.k] = raw === cpAsText((state.prefs || {})[f.k], f)
+        ? null : (f.bool ? raw === "yes" : raw);
     }
-    const over = state.cprefs[co.toLowerCase()] || {};
-    const shown = cpAsText(over[f.k] !== undefined ? over[f.k] : (state.prefs || {})[f.k], f);
-    if (raw === shown) return;                                  // untouched
-    const matchesDefault = raw === cpAsText((state.prefs || {})[f.k], f);
-    const val = matchesDefault ? null : (f.bool ? raw === "yes" : raw);
-    const d = await post("/actions/company-prefs",
-                         { name: co, overrides: { [f.k]: val } });
-    if (d && d.ok) {
-      state.cprefs = d.prefs || {};
-      const moved = d.rescreened
-        ? ` ${d.rescreened} job${d.rescreened === 1 ? "" : "s"} re-screened.` : "";
-      toast((matchesDefault
-        ? `${co}: ${f.label.toLowerCase()} shared with everything else again.`
-        : `${co}: ${f.label.toLowerCase()} now applies to ${co} only.`) + moved);
-      renderPicker();
-      if (d.rescreened) loadApps();
-      scheduleRescan(co);          // the rules changed; go find what they match
+    state.cpSaving = true;
+    const button = $("#cp-dt-save");
+    if (button) { button.disabled = true; button.textContent = "Saving…"; }
+    try {
+      if ("profile_id" in draft) {
+        const raw = draft.profile_id.trim();
+        const bound = (state.rotation || []).find((r) => r.company === key);
+        if (raw.startsWith("rot:")) {
+          if (!bound || bound.profile !== raw.slice(4)) {
+            const d = await post("/actions/rotation", { company: co, profile_id: raw.slice(4) });
+            if (!d || !d.ok) { toast(d?.error || "Couldn't save the profile."); return false; }
+            await loadRotation();
+          }
+        } else {
+          if (bound) {
+            const d = await post("/actions/rotation", { company: co, profile_id: "" });
+            if (!d || !d.ok) { toast(d?.error || "Couldn't stop rotation."); return false; }
+            await loadRotation();
+          }
+          if (raw !== (over.profile_id || "")) changes.profile_id = raw || null;
+        }
+      }
+      // An empty overrides object means RESET on the server, not a no-op.
+      if (Object.keys(changes).length) {
+        const d = await post("/actions/company-prefs", { name: co, overrides: changes });
+        if (!d || !d.ok) { toast(d?.error || "Couldn't save preferences."); return false; }
+        // A response contains every company; update only the one we saved.
+        if (d.prefs?.[key]) state.cprefs[key] = d.prefs[key];
+        else delete state.cprefs[key];
+        if (d.rescreened) loadApps();
+      }
+      // Keep anything typed while the request was in flight.
+      const current = state.cpDrafts[key] || {};
+      for (const [field, value] of Object.entries(draft)) {
+        if (current[field] === value) delete current[field];
+      }
+      if (!Object.keys(current).length) delete state.cpDrafts[key];
+      toast(`${co}: preferences saved.`);
+      return !state.cpDrafts[key];
+    } finally {
+      state.cpSaving = false;
+      if (button) { button.disabled = false; button.textContent = "Save preferences"; }
+      renderPicker(state.detailCo === co && !state.cpDrafts[key]);
     }
   };
-  $("#cp-detail").addEventListener("keydown", (e) => {
-    if (!e.target.classList.contains("cp-dt-in")) return;
-    if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); e.target.blur(); }
-    if (e.key === "Escape") { state.detailCo = null; renderPicker(); }
-  });
-  $("#cp-detail").addEventListener("focusout", (e) => {
-    if (e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
+  $("#cp-detail").addEventListener("input", (e) => {
+    if (e.target.classList.contains("cp-dt-in")) rememberCpref(e.target);
   });
   $("#cp-detail").addEventListener("change", (e) => {
-    if (e.target.tagName === "SELECT" && e.target.classList.contains("cp-dt-in")) commitCpref(e.target);
+    if (e.target.classList.contains("cp-dt-in")) rememberCpref(e.target);
+  });
+  $("#cp-detail").addEventListener("keydown", (e) => {
+    if (!e.target.classList.contains("cp-dt-in")) return;
+    if (e.key === "Enter" && e.target.tagName === "INPUT") {
+      e.preventDefault();
+      saveCprefs(state.detailCo);
+    }
+    if (e.key === "Escape" && e.target.tagName !== "SELECT") {
+      e.stopPropagation(); state.detailCo = null; renderPicker();
+    }
   });
   $("#cp-detail").addEventListener("click", async (e) => {
     // Rotate & approve: re-point what is in flight, then queue it. One press,
@@ -4513,31 +4587,26 @@ function wire() {
       loadRotation(); loadApps();
       return;
     }
+    if (e.target.closest("#cp-dt-save")) {
+      await saveCprefs(state.detailCo);
+      return;
+    }
     if (e.target.closest("#cp-dt-scan")) {
-      clearTimeout(_rescanTimer);        // scanning now; do not scan twice
       const co = state.detailCo;
-      if (!co) return;
-      // A field still focused has not been committed yet, and scanning with the
-      // rules you just typed but did not blur is the worst kind of surprise:
-      // it looks like the edit was ignored.
-      const open = document.activeElement;
-      if (open && open.classList && open.classList.contains("cp-dt-in")) {
-        await commitCpref(open);
-      }
-      runCompany(co);
+      if (await saveCprefs(co)) runCompany(co);
       return;
     }
     if (!e.target.closest("#cp-dt-reset")) return;
     const co = state.detailCo;
-    if (!co) return;
+    if (!co || state.cpSaving) return;
     const d = await post("/actions/company-prefs", { name: co, overrides: {} });
     if (d && d.ok) {
       state.cprefs = d.prefs || {};
+      delete state.cpDrafts[co.toLowerCase()];
       toast(`${co}: shares your preferences again.`
             + (d.rescreened ? ` ${d.rescreened} job(s) re-screened.` : ""));
-      renderPicker();
+      renderPicker(true);
       if (d.rescreened) loadApps();
-      scheduleRescan(co);
     }
   });
 
@@ -4557,6 +4626,7 @@ function wire() {
     const cb = e.target;
     if (!cb.matches('input[type="checkbox"]')) return;
     if (cb.checked) state.picked.add(cb.value); else state.picked.delete(cb.value);
+    savePicked();
     renderPickerState(); renderDiscoverLabel(); // list DOM untouched — scroll stays
   });
 
@@ -4950,11 +5020,18 @@ function wire() {
   // What counts as a match. Every stage re-reads preferences.yaml per job, so a
   // save here changes the very next job scored — no restart, no file editing.
   const pf = $("#prefpicker"), pfBtn = $("#btn-prefs");
+  let prefsLoading = false, prefsSaving = false, prefsDirty = false, prefsLoaded = false;
+  const lockPrefs = (locked) => {
+    $$("input, textarea, button", pf).forEach((el) => { el.disabled = locked; });
+  };
   const closePf = () => {
     if (!pf.hidden) { pf.hidden = true; pfBtn.setAttribute("aria-expanded", "false"); }
   };
   const csv = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
   const loadPrefs = async () => {
+    if (prefsLoading || prefsSaving || prefsDirty) return;
+    prefsLoading = true;
+    lockPrefs(true);
     try {
       const r = await fetch(api("/preferences"), { headers: auth.header() });
       const p = (await r.json()) || {};
@@ -4969,12 +5046,20 @@ function wire() {
       $("#pf-remote").checked = !!p.remote_only;
       state.prefsGithub = p.github || "";
       state.prefs = p;                 // the per-company pane shows these as its
+      prefsLoaded = true;
       renderDetail();                  // placeholders, i.e. what a blank inherits
     } catch { toast("Couldn't load preferences."); }
+    finally {
+      prefsLoading = false;
+      lockPrefs(!prefsLoaded);
+    }
   };
   const savePrefs = async () => {
-    if (demoGuard()) return;
+    if (demoGuard() || prefsLoading || prefsSaving || !prefsLoaded) return;
+    prefsSaving = true;
+    lockPrefs(true);
     const st = $("#pf-state");
+    st.textContent = "Saving…";
     const d = await post("/preferences", {
       titles: csv($("#pf-titles").value),
       include_keywords: csv($("#pf-include").value),
@@ -4987,14 +5072,16 @@ function wire() {
       remote_only: $("#pf-remote").checked,
       github: state.prefsGithub || "",
     });
+    prefsSaving = false;
+    lockPrefs(false);
     if (d && d.ok) {
+      state.prefs = d.preferences;
+      prefsDirty = false;
+      renderPicker();
       st.textContent = "Saved — applies to the next job scored.";
       st.className = "saved";
       toast("◎ Preferences saved.");
       setTimeout(() => { st.className = ""; st.textContent = "Applies to the next job scored."; }, 4000);
-      // Saving is the end of the task, so get out of the way. Leaving the panel
-      // open over the board invites a second save of the same values.
-      closePf();
     } else {
       st.textContent = (d && d.error) || "Couldn't save.";
       st.className = "failed";
@@ -5008,6 +5095,8 @@ function wire() {
     if (show) { fitPopover(pf); loadPrefs(); $("#pf-titles").focus(); }
   });
   pf.addEventListener("click", (e) => e.stopPropagation());
+  pf.addEventListener("input", () => { prefsDirty = true; });
+  pf.addEventListener("change", () => { prefsDirty = true; });
   document.addEventListener("click", (e) => {
     if (!pf.hidden && !e.target.closest(".prefmgr")) closePf();
   });
@@ -5620,9 +5709,14 @@ function wire() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (e.target.tagName === "SELECT") return; // let the native dropdown close first
     if (!$("#rmodal").hidden) closeResume();
     else if (!$("#drawer").hidden) closeDrawer();
     else if (!picker.hidden) closePicker();
+    else if (!pf.hidden) closePf();
+    else if (!sp.hidden) closeSp();
+    else if (!pm.hidden) closePm();
+    else if (!rp.hidden) closeRp();
     else if (!qp.hidden) closeQp();
     else closeMenu();
   });
