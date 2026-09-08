@@ -62,7 +62,7 @@ const state = {
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
   reviewCollapsed: localStorage.getItem("appliedin.reviewCollapsed") === "yes",
-  reviewFilter: "ready", reviewAnchor: null, reviewNotices: {},
+  reviewFilter: "active", reviewAnchor: null, reviewNotices: {},
   activityCollapsed: localStorage.getItem("appliedin.activityCollapsed") === "yes",
   reviewPicked: new Set(), // final review: selection never authorizes submission
   reviewSkipped: new Set(),
@@ -1313,27 +1313,49 @@ function readySec(rows) {
       </div>`;
     }
   }
-  return n ? `<div class="review-stage ps-ready"><span>Ready to apply → Review</span>${locBar}</div>` : "";
+  return locBar ? `<div class="review-stage ps-ready">${locBar}</div>` : "";
 }
 
-// Preparation never authorizes submission. Keep the final review visible even
-// with an empty dispatch queue, so rejection does not race an applying worker.
+// Review and approved work share one list. A lease counts as applying even
+// before tracking catches up, so a running role cannot remain selectable.
 function reviewIsSkipped(r) { return !!r.review_skipped || state.reviewSkipped.has(r.pk); }
+function reviewPhase(r) {
+  if (["applied", "applied_manual", "skipped", "failed", "uncertain", "error", "capped", "job_gone"].includes(r.status)) return "";
+  if (r.status === "submitting" || (state.queue?.in_flight || []).includes(r.pk)) return "applying";
+  if ((state.queue?.pending || []).some((it) => it.pk === r.pk)) return "waiting";
+  return approveAllPicks(r) ? reviewIsSkipped(r) ? "later" : "ready" : "";
+}
+function reviewSelectable(r) { return ["ready", "waiting", "later"].includes(reviewPhase(r)); }
+function reviewCandidates() {
+  return visible(state.apps).filter((r) => reviewPhase(r))
+    .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter);
+}
 function reviewFilterRows(rows) {
   return rows.filter((r) => state.reviewFilter === "all"
-    || (state.reviewFilter === "later" ? reviewIsSkipped(r) : !reviewIsSkipped(r)));
+    || (state.reviewFilter === "active" ? reviewPhase(r) !== "later" : reviewPhase(r) === state.reviewFilter));
 }
 function reviewRows(company) {
-  return reviewFilterRows(visibleApprovalPicks()).filter((r) => r.company === company);
+  return reviewFilterRows(reviewCandidates()).filter((r) => r.company === company);
+}
+function reviewStatus(r) {
+  const phase = reviewPhase(r);
+  const item = (state.queue?.pending || []).find((it) => it.pk === r.pk);
+  const label = {ready:"Needs approval", waiting:"Waiting to apply", applying:"Applying", later:"Skipped for later"}[phase];
+  const detail = phase === "waiting" ? item?.blocked === "backoff" ? " · Retry pending"
+    : item?.blocked === "company_busy" ? " · Behind current application" : "" : "";
+  return `<span class="review-status ${phase}">${label}${detail}</span>`;
 }
 function reviewActions(company, rows) {
+  const shown = rows.length;
+  const stale = state.apps.some((r) => r.company === company && state.reviewPicked.has(r.pk) && !reviewSelectable(r));
+  rows = rows.filter(reviewSelectable);
   const picked = rows.filter((r) => state.reviewPicked.has(r.pk)).length;
   const remaining = rows.filter((r) => !reviewIsSkipped(r)).length;
   const later = state.reviewFilter === "later";
   const disabled = state.approvingAll ? " disabled" : "";
-  return `<span class="review-count">${esc(company)} · ${picked ? `${picked} selected` : `${rows.length} shown`}</span>
-    <button class="ps-link" data-review-select="${esc(company)}"${disabled}>${picked === rows.length ? "Clear selection" : "Select all shown"}</button>
-    ${picked && picked < rows.length ? `<button class="ps-link" data-review-clear="${esc(company)}"${disabled}>Clear selection</button>` : ""}
+  return `<span class="review-count">${esc(company)} · ${picked ? `${picked} selected` : `${shown} shown`}</span>
+    <button class="ps-link" data-review-select="${esc(company)}"${!rows.length ? " disabled" : disabled}>${picked && picked === rows.length ? "Clear selection" : "Select all shown"}</button>
+    ${stale || (picked && picked < rows.length) ? `<button class="ps-link" data-review-clear="${esc(company)}"${disabled}>Clear selection</button>` : ""}
     <button class="ps-link" data-review-action="reject" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>Reject</button>
     <button class="ps-link" data-review-action="${later ? "restore" : "skip"}" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>${later ? "Restore" : "Skip"}</button>
     <button class="ps-link on" data-review-action="apply" data-company="${esc(company)}"${!(picked || remaining) ? " disabled" : disabled}>${picked ? `Apply ${picked}` : `Apply all ${remaining}`}</button>`;
@@ -1353,7 +1375,7 @@ function reviewDate(r) {
     : '<span title="No résumé completion date was recorded">Not recorded</span>';
 }
 function reviewQueueSec(rows) {
-  rows = rows.filter(approveAllPicks)
+  rows = rows.filter((r) => reviewPhase(r))
     .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter);
   const notices = Object.keys(state.reviewNotices).filter((co) => !state.coFilter || co === state.coFilter);
   if (!rows.length && !notices.length) return "";
@@ -1362,15 +1384,16 @@ function reviewQueueSec(rows) {
     if (!groups.has(r.company)) groups.set(r.company, []);
     groups.get(r.company).push(r);
   }
-  const later = rows.filter(reviewIsSkipped).length;
+  const later = rows.filter((r) => reviewPhase(r) === "later").length;
+  const count = (phase) => rows.filter((r) => reviewPhase(r) === phase).length;
   const pill = (key, label, count) => `<button class="lp${state.reviewFilter === key ? " on" : ""}" data-review-filter="${key}" aria-pressed="${state.reviewFilter === key}">${label} <span class="mono">${count}</span></button>`;
   return `<section class="psec ps-review has" id="review-queue">
     <button class="ps-head ps-fold" data-review-collapse aria-expanded="${!state.reviewCollapsed}" aria-controls="review-body">
-      <span class="ps-caret">${state.reviewCollapsed ? "▸" : "▾"}</span><span class="ps-name">Review queue</span><span class="ps-n mono">${rows.length-later}</span>
-      <span class="ps-hint">${state.reviewCollapsed ? `Awaiting review${later ? ` · ${later} skipped for later` : ""}` : "Select roles to reject, skip or apply. Shift-click selects a range."}</span>
+      <span class="ps-caret">${state.reviewCollapsed ? "▸" : "▾"}</span><span class="ps-name">Application queue</span><span class="ps-n mono">${rows.length-later}</span>
+      <span class="ps-hint">${state.reviewCollapsed ? ` ${count("ready")} need approval · ${count("waiting")} waiting · ${count("applying")} applying${later ? ` · ${later} skipped` : ""}` : "Select roles to reject, skip or apply. Shift-click selects a range."}</span>
     </button>
     <div id="review-body"${state.reviewCollapsed ? " hidden" : ""}>
-    <div class="review-filters">${pill("ready", "Awaiting review", rows.length-later)}${pill("later", "Skipped for later", later)}${pill("all", "All", rows.length)}</div>
+    <div class="review-filters">${pill("active", "All active", rows.length-later)}${pill("ready", "Needs approval", count("ready"))}${pill("waiting", "Waiting to apply", count("waiting"))}${pill("applying", "Applying", count("applying"))}${pill("later", "Skipped for later", later)}${count("applying") ? '<button class="ps-link review-stop" data-review-stop>Stop all applying</button>' : ""}</div>
     ${notices.map(reviewNotice).join("")}
     <div class="un-groups">${[...groups].map(([co, list]) => `<div class="ung open review-company">
       <div class="review-sticky">
@@ -1379,9 +1402,9 @@ function reviewQueueSec(rows) {
       </div>
       <ol class="un-list">${list.map((r) => `<li class="un-row review-row${state.reviewPicked.has(r.pk) ? " un-picked" : ""}">
         <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"
-          aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll ? " disabled" : ""}>
+          aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll || !reviewSelectable(r) ? " disabled" : ""}>
         <div class="review-role"><button class="review-title" data-open="${esc(r.pk)}">${esc(r.title)}</button>
-          ${profHtml(r.profile_id, r.company)}${reviewIsSkipped(r) ? '<span class="review-later">Skipped for later</span>' : ""}</div>
+          ${profHtml(r.profile_id, r.company)}${reviewStatus(r)}</div>
         <span class="review-location">${esc(r.location || "Not listed")}</span>
         <span class="review-score" aria-label="Match score">${Number.isFinite(Number(r.match_score)) && r.match_score != null ? `${esc(r.match_score)}/10` : "—"}</span>
         <span class="review-date mono">${reviewDate(r)}</span>
@@ -1404,7 +1427,8 @@ function paintReviewControls() {
 function paintReviewSelection(tick, shift = false) {
   const pk = tick.dataset.reviewPick;
   const company = state.apps.find((r) => r.pk === pk)?.company;
-  const rows = reviewRows(company), pks = rows.map((r) => r.pk);
+  const rows = reviewRows(company).filter(reviewSelectable), pks = rows.map((r) => r.pk);
+  if (!pks.includes(pk)) return;
   const anchor = pks.indexOf(state.reviewAnchor), end = pks.indexOf(pk);
   const range = shift && anchor >= 0 && end >= 0 ? pks.slice(Math.min(anchor,end), Math.max(anchor,end)+1) : [pk];
   range.forEach((id) => tick.checked ? state.reviewPicked.add(id) : state.reviewPicked.delete(id));
@@ -1415,8 +1439,12 @@ async function reviewAction(action, company, explicitPks = null) {
   if (demoGuard() || state.approvingAll) return;
   const rows = reviewRows(company);
   const selected = rows.filter((r) => state.reviewPicked.has(r.pk));
+  if (!explicitPks && state.apps.some((r) => r.company === company && state.reviewPicked.has(r.pk) && !reviewSelectable(r))) {
+    toast("A selected role has started applying. Clear the selection and choose again.");
+    return;
+  }
   const picks = explicitPks ? state.apps.filter((r) => r.company === company && explicitPks.includes(r.pk))
-    : selected.length ? selected : action === "apply" ? rows.filter((r) => !reviewIsSkipped(r)) : [];
+    : selected.length ? selected : action === "apply" ? rows.filter((r) => reviewSelectable(r) && !reviewIsSkipped(r)) : [];
   if (!picks.length || !["reject", "apply", "skip", "restore", "undo"].includes(action)) return;
   if (["reject", "apply"].includes(action)) {
     const detail = action === "reject" ? "They move to Closed. You can undo this decision."
@@ -1826,17 +1854,15 @@ function viewPipeline() {
   }
   const S = { preparing: [], needs: [], ready: [], queued: [], flight: [], applied: [], found: [], closed: [] };
   const inQ = queuedPks();
-  for (const r of visible(state.apps)) S[sectionOf(r, inQ)].push(r);
+  for (const r of visible(state.apps)) S[reviewPhase(r) === "applying" ? "flight" : sectionOf(r, inQ)].push(r);
   const shown = Object.values(S).reduce((a, b) => a + b.length, 0);
   if (!shown && filtersActive()) return emptyFiltered();
   return `<div class="pstack">
     ${companyBar()}
     ${S.needs.length ? needsSec(S.needs) : ""}
     ${S.preparing.length ? `<section class="psec ps-preparing"><div class="ps-head"><span class="ps-name">Preparing résumés</span><span class="ps-n mono">${S.preparing.length}</span><span class="ps-hint">Scoring and tailoring. The completion date appears when the résumé is saved.</span></div><div class="ps-grid">${S.preparing.map(laneCard).join("")}</div></section>` : ""}
-    ${readySec(S.ready)}
-    ${reviewQueueSec(S.ready)}
-    ${queuedSec(S.queued)}
-    ${S.flight.length ? flightSec(S.flight) : ""}
+    ${readySec([...S.ready, ...S.queued, ...S.flight])}
+    ${reviewQueueSec([...S.ready, ...S.queued, ...S.flight])}
     ${S.applied.length ? appliedSec(S.applied) : ""}
     ${S.found.length ? foundSec(S.found) : ""}
     ${closedSec(S.closed)}
@@ -2992,7 +3018,7 @@ function paneSig() {
     // ride on appsSig; these extra parts simply never differ for them.
     const q = state.queue || {};
     parts.push((q.pending || []).map((it) => it.pk + (it.blocked ? "b" : "")).join(","),
-      (q.running || []).join(","), q.concurrency || 0);
+      (q.running || []).join(","), (q.in_flight || []).join(","), q.concurrency || 0);
   }
   return parts.join("\u0002");
 }
@@ -4594,10 +4620,9 @@ function renderQueuePanel() {
     </div>`;
   }).join("");
   const queueSec = `<div class="q-sec">
-    <div class="q-sec-h">Queue${total ? `<span class="q-chip mono">${total} waiting</span>` : ""}</div>
+    <div class="q-sec-h">Approved work${total ? `<span class="q-chip mono">${total} waiting</span>` : ""}</div>
     ${cos.length ? `<div class="q-cos">${rows}</div>`
-      : `<div class="q-idle">Nothing is queued or running. The Queue button on a
-          tailored card lines an application up here.</div>`}
+      : `<div class="q-idle">Nothing is running or waiting. Select roles in the application queue, then click Apply.</div>`}
   </div>`;
 
   const deadRows = state.dead.map((d) => {
@@ -5778,6 +5803,7 @@ function wire() {
       localStorage.setItem("appliedin.reviewCollapsed", state.reviewCollapsed ? "yes" : "no");
       renderPane(); return;
     }
+    if (e.target.closest("[data-review-stop]")) { stopApplying(); return; }
     const reviewFilter = e.target.closest("[data-review-filter]");
     if (reviewFilter) { state.reviewFilter = reviewFilter.dataset.reviewFilter; state.reviewAnchor = null; renderPane(); return; }
     const undoPk = e.target.closest("[data-review-undo-pk]");
@@ -5787,10 +5813,10 @@ function wire() {
     const reviewTick = e.target.closest("[data-review-pick]");
     if (reviewTick) { paintReviewSelection(reviewTick, e.shiftKey); return; }
     const reviewClear = e.target.closest("[data-review-clear]");
-    if (reviewClear) { reviewRows(reviewClear.dataset.reviewClear).forEach((r) => state.reviewPicked.delete(r.pk)); paintReviewControls(); return; }
+    if (reviewClear) { state.apps.filter((r) => r.company === reviewClear.dataset.reviewClear).forEach((r) => state.reviewPicked.delete(r.pk)); paintReviewControls(); return; }
     const reviewSelect = e.target.closest("[data-review-select]");
     if (reviewSelect) {
-      const rows = reviewRows(reviewSelect.dataset.reviewSelect);
+      const rows = reviewRows(reviewSelect.dataset.reviewSelect).filter(reviewSelectable);
       const all = rows.every((r) => state.reviewPicked.has(r.pk));
       rows.forEach((r) => all ? state.reviewPicked.delete(r.pk) : state.reviewPicked.add(r.pk));
       paintReviewControls(); return;

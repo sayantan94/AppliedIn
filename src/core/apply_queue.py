@@ -300,7 +300,10 @@ class ApplyQueue:
                         continue
                 except ValueError:
                     continue
-                self.r.lrem(key, 1, raw)
+                # A worker may have leased it since lrange. Only report removal
+                # when we won; otherwise a review decision could overwrite a run.
+                if not self.r.lrem(key, 1, raw):
+                    continue
                 if not self.r.llen(key):
                     self.r.srem(f"{_KEY}:companies", co)
                 log.info("removed %s from the %s queue", pk, co)

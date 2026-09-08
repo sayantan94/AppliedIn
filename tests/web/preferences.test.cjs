@@ -410,6 +410,50 @@ test('collapsed review keeps its count and selection while hiding the body', () 
   const markup = h.context.reviewQueueSec(h.context.visibleApprovalPicks());
   assert.match(markup, /data-review-collapse aria-expanded="false"/);
   assert.match(markup, /id="review-body" hidden/);
-  assert.match(markup, /Awaiting review/);
+  assert.match(markup, /3 need approval/);
   assert.equal(h.state.reviewPicked.has('openai#keep'), true);
+});
+
+
+test('one collapsible queue includes ready, waiting and applying with safe selection', async () => {
+  const h = reviewHarness();
+  h.state.queue = {pending:[{pk:'openai#reject',company:'OpenAI'}],in_flight:['beta#keep']};
+  const markup = h.context.viewPipeline();
+  assert.equal((markup.match(/id="review-queue"/g)||[]).length, 1);
+  assert.doesNotMatch(markup, /class="psec ps-(queued|flight)/);
+  assert.match(markup, /Application queue/);
+  assert.match(markup, /review-status ready">Needs approval/);
+  assert.match(markup, /review-status waiting">Waiting to apply/);
+  assert.match(markup, /review-status applying">Applying/);
+  assert.match(markup, /data-review-pick="beta#keep"[^>]*disabled/);
+  assert.match(markup, /Stop all applying/);
+  h.context.paintReviewSelection({dataset:{reviewPick:'beta#keep'},checked:true});
+  assert.equal(h.state.reviewPicked.has('beta#keep'), false);
+  await h.context.reviewAction('apply', 'Beta');
+  assert.equal(h.requests.length, 0);
+  h.state.reviewPicked.add('openai#reject');
+  await h.context.reviewAction('skip', 'OpenAI');
+  assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#reject'],action:'skip'});
+});
+
+test('a selection that starts or completes applying never falls back to Apply all', async () => {
+  for (const status of ['submitting', 'applied']) {
+    const h = reviewHarness();
+    h.state.reviewPicked.add('openai#reject');
+    h.state.apps[1].status = status;
+    await h.context.reviewAction('apply', 'OpenAI');
+    assert.equal(h.requests.length, 0);
+  }
+});
+
+test('phase filters preserve exact company scope and skip running roles in a range', () => {
+  const h = reviewHarness();
+  h.state.apps.push({pk:'openai#third',company:'OpenAI',status:'tailored',title:'Third'});
+  h.state.queue = {pending:[],in_flight:['openai#reject']};
+  h.context.paintReviewSelection({dataset:{reviewPick:'openai#keep'},checked:true});
+  h.context.paintReviewSelection({dataset:{reviewPick:'openai#third'},checked:true}, true);
+  assert.deepEqual(Array.from(h.state.reviewPicked), ['openai#keep','openai#third']);
+  h.state.reviewFilter = 'applying';
+  assert.deepEqual(Array.from(h.context.reviewRows('OpenAI'), r=>r.pk), ['openai#reject']);
+  assert.deepEqual(Array.from(h.context.reviewRows('Beta')), []);
 });

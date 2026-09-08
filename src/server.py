@@ -1779,7 +1779,7 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
 
         q = ApplyQueue(make_stores(settings).tracking.r)
-        return {**q.depth(), "pending": q.pending(),
+        return {**q.depth(), "pending": q.pending(), "in_flight": sorted(q.in_flight()),
                 "concurrency": flags.apply_concurrency(),
                 "max_attempts": MAX_ATTEMPTS}
 
@@ -1939,17 +1939,23 @@ def create_app() -> FastAPI:
         stores = make_stores(settings)
         q = ApplyQueue(stores.tracking.r)
         pending = {it["pk"] for it in q.pending()}
-        inflight = q.in_flight()
         results = []
         for pk in pks:
             try:
                 row = stores.tracking.get(pk) or {}
                 if (row.get("company") or "").strip().lower() != company.lower():
                     raise ValueError("This role does not belong to the selected company.")
-                if pk in pending or pk in inflight or row.get("confirmation_id"):
+                if pk in q.in_flight() or row.get("confirmation_id") or row.get("status") == "submitting":
                     raise ValueError(
-                        "This role is already approved or submitted; refresh its current state."
+                        "This role is applying or submitted; refresh its current state."
                     )
+                if pk in pending:
+                    if action not in {"skip", "reject"} or not review_eligible(row):
+                        raise ValueError("Only Skip or Reject can remove a waiting application.")
+                    # Removal competes atomically with dispatch. Losing means the
+                    # browser may be running; never overwrite its tracking state.
+                    if not q.remove(pk) or pk in q.in_flight():
+                        raise ValueError("This role has started or changed; refresh its current state.")
                 if action == "undo":
                     if (
                         row.get("status") != "skipped"

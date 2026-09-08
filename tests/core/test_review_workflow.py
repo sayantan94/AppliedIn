@@ -102,14 +102,60 @@ def test_partial_rejections_can_be_undone_without_approving_or_erasing_submissio
     assert not q.pending(), "Undo restores review, never application authorization"
 
 
-def test_already_approved_roles_cannot_be_overwritten_by_a_stale_review_tab(review):
+@pytest.mark.parametrize("action", ["reject", "skip"])
+def test_waiting_roles_can_be_removed_before_submission(review, action):
     tracking, q, endpoints = review
     q.put("acme#1", "Acme")
+    result = endpoints["/actions/review-decision"](
+        {"company": "Acme", "pks": ["acme#1"], "action": action})
+    assert result["ok"]
+    assert not q.pending()
+    assert q.next() is None, "A skipped or rejected selection must not be dispatched"
+    row = tracking.get("acme#1")
+    assert row["status"] == ("skipped" if action == "reject" else "tailored")
+    assert row["review_skipped"] == (action == "skip")
+
+
+@pytest.mark.parametrize("action", ["reject", "skip", "restore"])
+def test_running_roles_are_protected_even_before_tracking_catches_up(review, action):
+    tracking, q, endpoints = review
+    q.put("acme#1", "Acme")
+    item = q.next()
+    result = endpoints["/actions/review-decision"](
+        {"company": "Acme", "pks": ["acme#1"], "action": action})
+    assert not result["ok"]
+    assert tracking.get("acme#1")["status"] == "tailored"
+    assert item["pk"] in q.in_flight()
+
+
+def test_reject_losing_the_dispatch_race_does_not_overwrite_the_application(review, monkeypatch):
+    tracking, q, endpoints = review
+    q.put("acme#1", "Acme")
+    original = ApplyQueue.remove
+
+    def dispatch_first(queue, pk):
+        q.next()
+        return original(queue, pk)
+
+    monkeypatch.setattr(ApplyQueue, "remove", dispatch_first)
     result = endpoints["/actions/review-decision"](
         {"company": "Acme", "pks": ["acme#1"], "action": "reject"})
     assert not result["ok"]
     assert tracking.get("acme#1")["status"] == "tailored"
-    assert q.pending()[0]["pk"] == "acme#1"
+    assert q.in_flight() == {"acme#1"}
+
+
+def test_remove_reports_failure_if_worker_removed_the_entry_since_it_was_read(review, monkeypatch):
+    _, q, _ = review
+    q.put("acme#1", "Acme")
+    original = q.r.lrem
+
+    def worker_wins(*args, **kwargs):
+        original(*args, **kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(q.r, "lrem", worker_wins)
+    assert not q.remove("acme#1")
 
 
 def test_queue_selection_empty_means_none_and_lease_still_excludes_same_company(review):

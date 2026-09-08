@@ -4429,3 +4429,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 600px) {
   .preferences-drawer .cp-dt-h { top: 76px; }
 }
+
+/* Keep status beside each role without adding another wide table column. */
+.review-status { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); }
+.review-status.waiting { color: var(--run); }
+.review-status.applying { color: var(--scan); }
+.review-stop { margin-left: auto; }
+.review-row:has(.un-sel:disabled) .un-sel { cursor: default; }
