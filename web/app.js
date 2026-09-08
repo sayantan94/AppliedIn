@@ -61,6 +61,9 @@ const state = {
   secOpen: { closed: false }, // pipeline stack: which foldable sections are open
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
+  reviewCollapsed: localStorage.getItem("appliedin.reviewCollapsed") === "yes",
+  reviewFilter: "ready", reviewAnchor: null, reviewNotices: {},
+  activityCollapsed: localStorage.getItem("appliedin.activityCollapsed") === "yes",
   reviewPicked: new Set(), // final review: selection never authorizes submission
   reviewSkipped: new Set(),
   qPicked: new Set(),  // queued jobs ticked for a bulk Skip / Remove
@@ -469,13 +472,19 @@ function renderDetail(force = false) {
         value="${esc(value)}" autocomplete="off" spellcheck="false" /></label>`;
   };
 
+  const scopeLabel = $("#cp-scope-label");
+  if (scopeLabel) scopeLabel.textContent = `Editing ${co} · unchanged fields inherit shared defaults`;
   box.innerHTML = `
     <div class="cp-dt-h">
       <div class="cp-dt-co">${esc(co)}</div>
       <span class="cp-dt-badge ${n ? "custom" : ""}">${
-        n ? `${n} only here` : "all shared"}</span>
+        n ? `${n} company override${n === 1 ? "" : "s"}` : "Using shared defaults"}</span>
     </div>
-    <div class="cp-dt-body">${CPREF_FIELDS.map(field).join("")}</div>
+    <div class="cp-dt-body">${[
+      ["Role fit", ["titles", "seniority", "include_keywords", "exclude_keywords", "min_match_score", "max_new_per_run"]],
+      ["Location & rules", ["locations", "remote_only", "notes"]],
+      ["Application identity", ["profile_id"]],
+    ].map(([label, keys]) => `<fieldset class="pref-section"><legend>${label}</legend>${keys.map((key) => field(CPREF_FIELDS.find((f) => f.k === key))).join("")}</fieldset>`).join("")}</div>
     ${rotc ? `<div class="cp-dt-rotbar" title="Each application to ${esc(co)} goes out
       under its own address; a new one is minted when this one reaches the limit.">
       <span class="cp-dt-rotmark">↻</span>
@@ -485,7 +494,7 @@ function renderDetail(force = false) {
     </div>` : ""}
     <div class="cp-dt-foot">
       <span class="cp-dt-hint">${Object.keys(draft).length ? "Unsaved changes" : `Edits apply to ${esc(co)} only.`}</span>
-      <button class="cp-lk" id="cp-dt-cancel" type="button">Cancel edits</button>
+      <button class="cp-lk" id="cp-dt-cancel" type="button">Cancel</button>
       <button class="cp-lk cp-add-btn" id="cp-dt-save" type="button">Save preferences</button>
       ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
         title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
@@ -612,6 +621,7 @@ function renderDeck() {
   renderDiscoverLabel();
   proc.classList.toggle("running", !!s.processing || state.requests.has("prepare"));
   renderLaunch();
+  renderPreparation();
   renderDiscoverLabel();  // both action labels reflect run-state + company scope
   const badge = $("#proc-badge");
   badge.textContent = waiting;
@@ -843,7 +853,25 @@ function renderScanFinished() {
 }
 
 // --- tabs + company filter -------------------------------------------------
+function renderActivityLayout() {
+  $(".board")?.classList.toggle("activity-collapsed", state.activityCollapsed);
+  const button = $("#btn-activity-panel");
+  if (button) { button.textContent = state.activityCollapsed ? "Show activity" : "Hide activity"; button.setAttribute("aria-expanded", String(!state.activityCollapsed)); }
+}
+function renderPreparation() {
+  const box = $("#prep-progress");
+  if (!box) return;
+  const batches = state.stats.preparation || [];
+  const active = batches.filter((b) => b.active);
+  const shown = active.length ? active : batches.slice(-1);
+  box.hidden = !shown.length;
+  setHtmlOnce(box, shown.map((b) => `<div class="prep-receipt"><span title="${esc(b.company)}"><b>${shown.length > 1 ? `${esc(b.company.slice(0,48))} · ` : ""}${b.completed} of ${b.total} processed</b> · ${b.prepared} ready${b.skipped ? ` · ${b.skipped} skipped` : ""}${b.failed ? ` · ${b.failed} failed` : ""}</span>
+    <span class="prep-stage" title="${esc(b.current || b.company)}">${esc(b.stage)}${b.active && b.current ? ` · ${esc(b.current)}` : ""}</span>
+    ${b.active ? `<progress max="${Math.max(b.total,1)}" value="${b.completed}" aria-label="Preparation progress"></progress>` : ""}</div>`).join(""));
+}
+
 function renderTabs() {
+  renderActivityLayout();
   $$("#tabs .tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === state.tab));
   // The Logs tab is the roomy version of the live rail — hide the rail there.
   $(".board").classList.toggle("logs-open", state.tab === "logs");
@@ -1235,6 +1263,7 @@ function closedRow(r) {
     act = `<button class="kc-retry kc-queue jr-act" data-act="queue-apply" data-pk="${esc(r.pk)}"
       title="Clear the failure and put this job back on the apply queue">↻ Requeue</button>`;
   }
+  if (r.review_rejected) act = `<button class="ps-link jr-act" data-review-undo-pk="${esc(r.pk)}" data-company="${esc(r.company)}">Undo rejection</button>`;
   const whyFull = r.closed_reason || r.fail_reason || r.skip_reason || "";
   const why = String(whyFull).replace(/\s+/g, " ").trim().slice(0, 90);
   return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
@@ -1284,124 +1313,181 @@ function readySec(rows) {
       </div>`;
     }
   }
-  return `<section class="psec ps-ready${n ? " has" : ""}">
-    <div class="ps-head">
-      <span class="ps-dot${n ? " on" : ""}"></span>
-      <span class="ps-name">Ready to apply</span>
-      <span class="ps-n mono">${n}</span>
-      <span class="ps-hint">${n ? "Tailored résumés. Review the queue below before approving applications."
-                                : "Nothing is tailored yet. Run jobs from Found below."}</span>
-      ${n ? `<a class="ps-link on" href="#review-queue">Review queue ↓</a>` : ""}
-    </div>
-    ${locBar}
-  </section>`;
+  return n ? `<div class="review-stage ps-ready"><span>Ready to apply → Review</span>${locBar}</div>` : "";
 }
 
 // Preparation never authorizes submission. Keep the final review visible even
 // with an empty dispatch queue, so rejection does not race an applying worker.
+function reviewIsSkipped(r) { return !!r.review_skipped || state.reviewSkipped.has(r.pk); }
+function reviewFilterRows(rows) {
+  return rows.filter((r) => state.reviewFilter === "all"
+    || (state.reviewFilter === "later" ? reviewIsSkipped(r) : !reviewIsSkipped(r)));
+}
 function reviewRows(company) {
-  return visibleApprovalPicks().filter((r) => r.company === company);
+  return reviewFilterRows(visibleApprovalPicks()).filter((r) => r.company === company);
 }
 function reviewActions(company, rows) {
   const picked = rows.filter((r) => state.reviewPicked.has(r.pk)).length;
-  const remaining = rows.filter((r) => !state.reviewSkipped.has(r.pk)).length;
+  const remaining = rows.filter((r) => !reviewIsSkipped(r)).length;
+  const later = state.reviewFilter === "later";
   const disabled = state.approvingAll ? " disabled" : "";
-  return `<span class="ps-hint">${picked ? `${picked} selected` : `${remaining} awaiting approval`}</span>
+  return `<span class="review-count">${esc(company)} · ${picked ? `${picked} selected` : `${rows.length} shown`}</span>
+    <button class="ps-link" data-review-select="${esc(company)}"${disabled}>${picked === rows.length ? "Clear selection" : "Select all shown"}</button>
+    ${picked && picked < rows.length ? `<button class="ps-link" data-review-clear="${esc(company)}"${disabled}>Clear selection</button>` : ""}
     <button class="ps-link" data-review-action="reject" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>Reject</button>
-    <button class="ps-link" data-review-action="skip" data-company="${esc(company)}" title="Leave selected roles for later; Apply all will leave them out"${!picked ? " disabled" : disabled}>Skip</button>
+    <button class="ps-link" data-review-action="${later ? "restore" : "skip"}" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>${later ? "Restore" : "Skip"}</button>
     <button class="ps-link on" data-review-action="apply" data-company="${esc(company)}"${!(picked || remaining) ? " disabled" : disabled}>${picked ? `Apply ${picked}` : `Apply all ${remaining}`}</button>`;
 }
-
+function reviewNotice(company) {
+  const notice = state.reviewNotices[company];
+  if (!notice) return "";
+  return `<div class="review-notice" role="status"><span><b>${esc(company)}</b> · ${esc(notice.message)}</span>
+    ${notice.undo?.length ? `<button class="ps-link" data-review-undo="${esc(company)}"${state.approvingAll ? " disabled" : ""}>Undo rejection</button>` : ""}
+    ${notice.errors?.length ? `<details><summary>Show ${notice.errors.length} issue${notice.errors.length === 1 ? "" : "s"}</summary><ul>${notice.errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></details>` : ""}
+  </div>`;
+}
+function reviewDate(r) {
+  const date = r.retailored_at || r.tailored_at;
+  return date && Number.isFinite(new Date(date).getTime())
+    ? `<time datetime="${esc(date)}" title="${esc(new Date(date).toLocaleString())}">${esc(new Date(date).toLocaleDateString(undefined, {month:"short",day:"numeric",year:"numeric"}))}</time>`
+    : '<span title="No résumé completion date was recorded">Not recorded</span>';
+}
 function reviewQueueSec(rows) {
   rows = rows.filter(approveAllPicks)
     .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter);
-  if (!rows.length) return "";
-  const groups = new Map();
-  for (const r of rows) {
+  const notices = Object.keys(state.reviewNotices).filter((co) => !state.coFilter || co === state.coFilter);
+  if (!rows.length && !notices.length) return "";
+  const shown = reviewFilterRows(rows), groups = new Map();
+  for (const r of shown) {
     if (!groups.has(r.company)) groups.set(r.company, []);
     groups.get(r.company).push(r);
   }
+  const later = rows.filter(reviewIsSkipped).length;
+  const pill = (key, label, count) => `<button class="lp${state.reviewFilter === key ? " on" : ""}" data-review-filter="${key}" aria-pressed="${state.reviewFilter === key}">${label} <span class="mono">${count}</span></button>`;
   return `<section class="psec ps-review has" id="review-queue">
-    <div class="ps-head"><span class="ps-dot on"></span><span class="ps-name">Review queue</span>
-      <span class="ps-n mono">${rows.length}</span>
-      <span class="ps-hint">Résumés tailored. Select roles to reject, skip or apply. Nothing starts until you apply.</span>
-    </div>
-    <div class="un-groups">${[...groups].map(([co, list]) => `<div class="ung open">
-      <div class="ung-head"><span class="un-co">${esc(co)}</span>
-        <button class="ps-link" data-review-select="${esc(co)}">Select all</button>
-        <span class="review-actions" data-review-actions="${esc(co)}">${reviewActions(co, list)}</span></div>
+    <button class="ps-head ps-fold" data-review-collapse aria-expanded="${!state.reviewCollapsed}" aria-controls="review-body">
+      <span class="ps-caret">${state.reviewCollapsed ? "▸" : "▾"}</span><span class="ps-name">Review queue</span><span class="ps-n mono">${rows.length-later}</span>
+      <span class="ps-hint">${state.reviewCollapsed ? `Awaiting review${later ? ` · ${later} skipped for later` : ""}` : "Select roles to reject, skip or apply. Shift-click selects a range."}</span>
+    </button>
+    <div id="review-body"${state.reviewCollapsed ? " hidden" : ""}>
+    <div class="review-filters">${pill("ready", "Awaiting review", rows.length-later)}${pill("later", "Skipped for later", later)}${pill("all", "All", rows.length)}</div>
+    ${notices.map(reviewNotice).join("")}
+    <div class="un-groups">${[...groups].map(([co, list]) => `<div class="ung open review-company">
+      <div class="review-sticky">
+        <div class="review-actions" data-review-actions="${esc(co)}">${reviewActions(co, list)}</div>
+        <div class="review-columns" aria-hidden="true"><span></span><span>Role / application identity</span><span>Location</span><span>Match</span><span>Résumé date</span><span>Résumé</span></div>
+      </div>
       <ol class="un-list">${list.map((r) => `<li class="un-row review-row${state.reviewPicked.has(r.pk) ? " un-picked" : ""}">
         <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"
           aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll ? " disabled" : ""}>
-        <span class="un-title" data-open="${esc(r.pk)}" role="button" tabindex="0">${esc(r.title)}</span>
-        <span class="review-location">${esc(r.location || "")}</span>
-        ${state.reviewSkipped.has(r.pk) ? `<span class="review-later">Skipped for now</span>` : ""}
-        <span class="un-aged mono">${esc(ageLabel(r.tailored_at) || "")}</span>
+        <div class="review-role"><button class="review-title" data-open="${esc(r.pk)}">${esc(r.title)}</button>
+          ${profHtml(r.profile_id, r.company)}${reviewIsSkipped(r) ? '<span class="review-later">Skipped for later</span>' : ""}</div>
+        <span class="review-location">${esc(r.location || "Not listed")}</span>
+        <span class="review-score" aria-label="Match score">${Number.isFinite(Number(r.match_score)) && r.match_score != null ? `${esc(r.match_score)}/10` : "—"}</span>
+        <span class="review-date mono">${reviewDate(r)}</span>
+        <button class="ps-link review-preview" data-resume="${esc(r.pk)}"${!r.resume_url ? ' disabled title="No résumé PDF is available"' : ' title="Preview tailored résumé"'}>Preview</button>
       </li>`).join("")}</ol>
-    </div>`).join("")}</div>
+    </div>`).join("") || '<div class="review-empty">No roles in this view. Use the filters above to review other roles.</div>'}</div>
+    </div>
   </section>`;
 }
-
-function paintReviewSelection(tick) {
-  const pk = tick.dataset.reviewPick;
-  if (tick.checked) state.reviewPicked.add(pk);
-  else state.reviewPicked.delete(pk);
-  tick.closest(".un-row")?.classList.toggle("un-picked", tick.checked);
-  // Keep rows in place so rapid checkbox clicks and keyboard focus survive.
+function paintReviewControls() {
+  $$("[data-review-pick]").forEach((tick) => {
+    tick.checked = state.reviewPicked.has(tick.dataset.reviewPick);
+    tick.closest(".un-row")?.classList.toggle("un-picked", tick.checked);
+  });
   $$("[data-review-actions]").forEach((bar) => {
     const co = bar.dataset.reviewActions;
     bar.innerHTML = reviewActions(co, reviewRows(co));
   });
 }
-
-async function reviewAction(action, company) {
+function paintReviewSelection(tick, shift = false) {
+  const pk = tick.dataset.reviewPick;
+  const company = state.apps.find((r) => r.pk === pk)?.company;
+  const rows = reviewRows(company), pks = rows.map((r) => r.pk);
+  const anchor = pks.indexOf(state.reviewAnchor), end = pks.indexOf(pk);
+  const range = shift && anchor >= 0 && end >= 0 ? pks.slice(Math.min(anchor,end), Math.max(anchor,end)+1) : [pk];
+  range.forEach((id) => tick.checked ? state.reviewPicked.add(id) : state.reviewPicked.delete(id));
+  state.reviewAnchor = pk;
+  paintReviewControls();
+}
+async function reviewAction(action, company, explicitPks = null) {
   if (demoGuard() || state.approvingAll) return;
   const rows = reviewRows(company);
   const selected = rows.filter((r) => state.reviewPicked.has(r.pk));
-  const picks = selected.length ? selected : action === "apply"
-    ? rows.filter((r) => !state.reviewSkipped.has(r.pk)) : [];
-  if (!picks.length) return;
-  if (action === "skip") {
-    picks.forEach((r) => { state.reviewSkipped.add(r.pk); state.reviewPicked.delete(r.pk); });
-    localStorage.setItem("appliedin.reviewSkipped", JSON.stringify([...state.reviewSkipped]));
-    renderPane();
-    toast(`Skipped ${picks.length} for now. Apply all leaves them out; select them later to apply.`);
-    return;
+  const picks = explicitPks ? state.apps.filter((r) => r.company === company && explicitPks.includes(r.pk))
+    : selected.length ? selected : action === "apply" ? rows.filter((r) => !reviewIsSkipped(r)) : [];
+  if (!picks.length || !["reject", "apply", "skip", "restore", "undo"].includes(action)) return;
+  if (["reject", "apply"].includes(action)) {
+    const detail = action === "reject" ? "They move to Closed. You can undo this decision."
+      : "Only these roles will start. Other roles in this company's queue are left for their own run.";
+    if (!confirm(`${action === "reject" ? "Reject" : "Apply to"} ${picks.length} role${picks.length === 1 ? "" : "s"} at ${company}?\n\n${detail}`)) return;
   }
-  if (!["reject", "apply"].includes(action)) return;
-  const detail = action === "reject" ? "They move to Closed. Nothing is applied."
-    : "This starts this company's approved queue, including any roles already queued. Skipped and unselected roles in review stay here.";
-  if (!confirm(`${action === "reject" ? "Reject" : "Apply to"} ${picks.length} role${picks.length === 1 ? "" : "s"} at ${company}?\n\n${detail}`)) return;
   state.approvingAll = true;
-  const controls = $$("[data-review-action], [data-review-pick], [data-review-select], [data-approve-all]");
+  state.reviewNotices[company] = {message: `${action === "apply" ? "Starting" : "Saving"} ${picks.length} role${picks.length === 1 ? "" : "s"}…`};
+  const controls = $$("[data-review-action], [data-review-pick], [data-review-select], [data-review-clear], [data-review-undo], [data-approve-all]");
   controls.forEach((el) => { el.disabled = true; });
+  paintReviewControls();
   try {
-    if (action === "reject") {
+    const result = await post(action === "apply" ? "/actions/apply-selection" : "/actions/review-decision", {
+      company, pks: picks.map((r) => r.pk), ...(action === "apply" ? {} : {action}),
+    });
+    if (action === "apply") {
+      if (!result?.ok) {
+        state.reviewNotices[company] = {message: result?.error || "Could not confirm this run. Refresh before retrying; your selection is kept."};
+        return;
+      }
+      picks.forEach((r) => state.reviewPicked.delete(r.pk));
+      state.reviewNotices[company] = {message: `${result.queued} selected role${result.queued === 1 ? "" : "s"} accepted for applying.`};
+    } else {
+      const successes = new Set((result?.results || []).filter((r) => r.ok).map((r) => r.pk));
+      const errors = (result?.results || []).filter((r) => !r.ok).map((r) => `${picks.find((p) => p.pk === r.pk)?.title || r.pk}: ${r.error}`);
       for (const r of picks) {
-        const result = await post(`/actions/skip/${encodeURIComponent(r.pk)}`);
-        if (!result?.ok) { toast(result?.note || result?.error || "Could not reject this role. Remaining selections are kept."); return; }
-        r.status = "skipped";
+        if (!successes.has(r.pk)) { state.reviewPicked.add(r.pk); continue; }
         state.reviewPicked.delete(r.pk);
         state.reviewSkipped.delete(r.pk);
+        r.review_skipped = action === "skip";
+        if (action === "reject") { r.status = "skipped"; r.review_rejected = true; r.skip_reason = "review_rejected"; }
+        if (action === "undo") { r.status = r.gate_reason === "approval" ? "needs_human" : "tailored"; r.review_rejected = false; r.skip_reason = ""; }
       }
-      toast(`Rejected ${picks.length} at ${company}.`);
-    } else {
-      const result = await post("/actions/approve-all", {company, pks: picks.map((r) => r.pk)});
-      if (!result?.ok) { toast(result?.error || "Could not confirm approval. Refresh the queue before retrying."); return; }
-      picks.forEach((r) => { state.reviewPicked.delete(r.pk); state.reviewSkipped.delete(r.pk); });
-      // The existing company worker respects its lease and runs serially even
-      // when automation is paused. Final Apply is explicit authorization to run.
-      const run = await post("/actions/drain-company", {company});
-      toast(run?.ok ? `Applying at ${company} — ${run.queued} queued, one at a time.`
-        : `Approved at ${company}. ${run?.error || "Could not start; use Process in Queued to apply."}`);
+      const verb = {reject:"rejected",skip:"saved for later",restore:"restored to review",undo:"restored to review"}[action];
+      state.reviewNotices[company] = {
+        message: `${successes.size} ${verb}${successes.size < picks.length ? `; ${picks.length-successes.size} could not be updated. Failed selections are kept.` : "."}`,
+        errors: errors.length ? errors : result?.error ? [result.error] : !result ? ["Connection failed. Refresh to check which decisions were saved."] : [],
+        undo: action === "reject" ? [...successes] : [],
+      };
     }
   } finally {
     state.approvingAll = false;
+    // Legacy browser-only skips remain excluded until the server saves them.
     localStorage.setItem("appliedin.reviewSkipped", JSON.stringify([...state.reviewSkipped]));
     await loadQueue();
     renderPane();
     scheduleReload();
   }
+}
+
+// Upgrade old browser-only Skip choices without ever granting apply permission.
+async function migrateReviewSkips() {
+  if (state.reviewMigrating || !state.reviewSkipped.size) return;
+  state.reviewMigrating = true;
+  try {
+    const groups = new Map();
+    for (const r of state.apps) if (state.reviewSkipped.has(r.pk) && approveAllPicks(r)) {
+      if (r.review_skipped) { state.reviewSkipped.delete(r.pk); continue; }
+      if (!groups.has(r.company)) groups.set(r.company, []);
+      groups.get(r.company).push(r.pk);
+    }
+    for (const [company, pks] of groups) {
+      const result = await post("/actions/review-decision", {company, pks, action:"skip"});
+      for (const item of result?.results || []) if (item.ok) {
+        const r = state.apps.find((r) => r.pk === item.pk);
+        if (r) r.review_skipped = true;
+        state.reviewSkipped.delete(item.pk);
+      }
+    }
+    localStorage.setItem("appliedin.reviewSkipped", JSON.stringify([...state.reviewSkipped]));
+  } finally { state.reviewMigrating = false; }
 }
 
 function flightSec(rows) {
@@ -1551,7 +1637,7 @@ function queuedSec(rows) {
           data-company="${esc(co)}"${busy ? " disabled" : ""}
           title="${busy ? `${esc(co)} already has one running`
                         : `Work through ${esc(co)}'s ${list.length} queued job${list.length === 1 ? "" : "s"}, one after another`}"
-        >${busy ? "● Running" : "▶ Process"}</button>
+        >${busy ? "● Running" : "▶ Run company queue"}</button>
       </div>
       ${open ? `<ol class="un-list">${list.map(row).join("")}</ol>` : ""}
     </div>`;
@@ -1745,14 +1831,14 @@ function viewPipeline() {
   if (!shown && filtersActive()) return emptyFiltered();
   return `<div class="pstack">
     ${companyBar()}
-    ${needsSec(S.needs)}
+    ${S.needs.length ? needsSec(S.needs) : ""}
     ${S.preparing.length ? `<section class="psec ps-preparing"><div class="ps-head"><span class="ps-name">Preparing résumés</span><span class="ps-n mono">${S.preparing.length}</span><span class="ps-hint">Scoring and tailoring. The completion date appears when the résumé is saved.</span></div><div class="ps-grid">${S.preparing.map(laneCard).join("")}</div></section>` : ""}
     ${readySec(S.ready)}
     ${reviewQueueSec(S.ready)}
     ${queuedSec(S.queued)}
-    ${flightSec(S.flight)}
-    ${appliedSec(S.applied)}
-    ${foundSec(S.found)}
+    ${S.flight.length ? flightSec(S.flight) : ""}
+    ${S.applied.length ? appliedSec(S.applied) : ""}
+    ${S.found.length ? foundSec(S.found) : ""}
     ${closedSec(S.closed)}
   </div>`;
 }
@@ -2749,7 +2835,7 @@ function appsSig() {
        + (a.applied_at || "") + "\u0001"
        + (a.gate_reason || "") + (a.gate_question ? "?" : "") + "\u0001"
        + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001"
-       + (a.profile_id || "") + "\n";
+       + (a.profile_id || "") + "\u0001" + (a.review_skipped ? "s" : "") + (a.review_rejected ? "r" : "") + "\n";
   }
   return s;
 }
@@ -2932,6 +3018,7 @@ function renderPane() {
   // happen while the owner is typing an answer or a filter. Losing a
   // half-typed gate answer to a legitimate repaint is not acceptable either,
   // so the courtesy stays for the rebuilds that remain.
+  const selectedFocus = document.activeElement?.dataset?.reviewPick;
   const saved = {};
   let focusPk = null;
   $$("#pane textarea[data-answer-for]").forEach((t) => {
@@ -2972,6 +3059,7 @@ function renderPane() {
   // narrow screen, land on today rather than a year ago.
   const hs = $("#pane .hm-scroll");
   if (hs) hs.scrollLeft = hs.scrollWidth;
+  if (selectedFocus) $(`[data-review-pick="${CSS.escape(selectedFocus)}"]`)?.focus({preventScroll:true});
   _paneSig = paneSig();
 }
 
@@ -3315,6 +3403,7 @@ async function loadApps() {
   try {
     const a = await fetch(api("/applications"), { headers: auth.header() }).then((r) => r.json());
     state.apps = (a.items || []).filter((r) => !isInternalPk(r.pk));
+    await migrateReviewSkips();
     // The heatmap and the Fresh tab ride the same cadence, but only while on screen.
     if (state.tab === "activity") loadActivity();
     if (state.tab === "fresh") loadFresh();
@@ -4591,13 +4680,27 @@ window.addEventListener("resize", () => {
 });
 
 function wire() {
+  // The deck changes height as scan receipts appear. Scroll offsets and sticky
+  // review controls must follow its actual height on desktop and mobile.
+  const measureDeck = () => document.documentElement.style.setProperty("--deck-height", `${Math.ceil($(".deck").getBoundingClientRect().height)}px`);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measureDeck).observe($(".deck"));
+  measureDeck();
+  $("#btn-activity-panel").addEventListener("click", () => {
+    state.activityCollapsed = !state.activityCollapsed;
+    localStorage.setItem("appliedin.activityCollapsed", state.activityCollapsed ? "yes" : "no");
+    renderActivityLayout();
+  });
+  $("#m-shared-prefs").addEventListener("click", () => { $("#menu").hidden = true; $("#btn-prefs").click(); });
+  $("#m-company-prefs").addEventListener("click", () => { $("#menu").hidden = true; state.detailCo = state.coFilter || state.detailCo || state.companies[0] || null; $("#btn-companies").click(); });
+
   // A backdrop-filter on the deck traps fixed descendants inside its short height.
   // Mount dialogs at the page root so their dimensions belong to the viewport.
   $$(".preferences-drawer, #setup-health").forEach((el) => document.body.appendChild(el));
   $("#btn-review").addEventListener("click", () => {
+    state.reviewCollapsed = false; localStorage.setItem("appliedin.reviewCollapsed", "no");
     state.tab = "pipeline"; state.coFilter = ""; state.query = ""; state.locFilter = "";
     $("#co-filter").value = ""; $("#search").value = "";
-    renderTabs(); renderPane(); $(".ps-ready")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    renderTabs(); renderPane(); ($("#review-queue") || $(".ps-ready"))?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   $("#setup-health").addEventListener("click", (e) => {
     if (e.target.closest("[data-close-health]")) $("#setup-health").hidden = true;
@@ -5444,7 +5547,7 @@ function wire() {
   });
   $("#pf-save").addEventListener("click", savePrefs);
   $("#pf-close").addEventListener("click", closePf);
-  $("#pf-company").addEventListener("click", () => { closePf(); coBtn.click(); });
+  $("#pf-company").addEventListener("click", () => { closePf(); state.detailCo = state.coFilter || state.detailCo || state.companies[0] || null; coBtn.click(); });
   $("#pf-cancel").addEventListener("click", () => { prefsDirty = false; loadPrefs(); $("#pf-state").textContent = "Edits cancelled."; });
 
   const sp = $("#skippicker"), spBtn = $("#btn-skips");
@@ -5670,14 +5773,27 @@ function wire() {
     }
     const res = e.target.closest("[data-resume]");
     if (res) { openResume(res.dataset.resume); return; }
+    if (e.target.closest("[data-review-collapse]")) {
+      state.reviewCollapsed = !state.reviewCollapsed;
+      localStorage.setItem("appliedin.reviewCollapsed", state.reviewCollapsed ? "yes" : "no");
+      renderPane(); return;
+    }
+    const reviewFilter = e.target.closest("[data-review-filter]");
+    if (reviewFilter) { state.reviewFilter = reviewFilter.dataset.reviewFilter; state.reviewAnchor = null; renderPane(); return; }
+    const undoPk = e.target.closest("[data-review-undo-pk]");
+    if (undoPk) { reviewAction("undo", undoPk.dataset.company, [undoPk.dataset.reviewUndoPk]); return; }
+    const undo = e.target.closest("[data-review-undo]");
+    if (undo) { reviewAction("undo", undo.dataset.reviewUndo, state.reviewNotices[undo.dataset.reviewUndo]?.undo || []); return; }
     const reviewTick = e.target.closest("[data-review-pick]");
-    if (reviewTick) { paintReviewSelection(reviewTick); return; }
+    if (reviewTick) { paintReviewSelection(reviewTick, e.shiftKey); return; }
+    const reviewClear = e.target.closest("[data-review-clear]");
+    if (reviewClear) { reviewRows(reviewClear.dataset.reviewClear).forEach((r) => state.reviewPicked.delete(r.pk)); paintReviewControls(); return; }
     const reviewSelect = e.target.closest("[data-review-select]");
     if (reviewSelect) {
       const rows = reviewRows(reviewSelect.dataset.reviewSelect);
       const all = rows.every((r) => state.reviewPicked.has(r.pk));
       rows.forEach((r) => all ? state.reviewPicked.delete(r.pk) : state.reviewPicked.add(r.pk));
-      renderPane(); return;
+      paintReviewControls(); return;
     }
     const reviewButton = e.target.closest("[data-review-action]");
     if (reviewButton) { reviewAction(reviewButton.dataset.reviewAction, reviewButton.dataset.company); return; }

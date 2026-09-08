@@ -182,6 +182,8 @@ def _closed_reason(row: dict) -> str | None:
         reason, score = row.get("skip_reason"), row.get("match_score")
         if reason == "low_score":
             return f"Match score {score}/10 was below the bar — skipped before tailoring."
+        if reason == "review_rejected":
+            return "You rejected this role during review. Undo returns it to the review queue."
         if reason == "user_skipped":
             return "You skipped this one."
         return f"Skipped: {reason}." if reason else "Skipped."
@@ -246,6 +248,8 @@ def _to_ui(row: dict, artifacts) -> dict:
         "applied_at": row.get("applied_at") or "",
         "gate_question": (row.get("gate_pending") or {}).get("question"),
         "skip_reason": row.get("skip_reason"),
+        "review_skipped": bool(row.get("review_skipped")),
+        "review_rejected": row.get("skip_reason") == "review_rejected",
         "closed_reason": _closed_reason(row),
         "resume_version": row.get("resume_version"),
         "resume_url": link("resume_s3_key"),
@@ -465,6 +469,7 @@ def create_app() -> FastAPI:
 
     @app.get("/stats")
     def stats():
+        from core import preparation
         from discovery import handler as _handler
 
         stores = make_stores(settings)
@@ -474,6 +479,7 @@ def create_app() -> FastAPI:
         counts = stores.tracking.status_counts()
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
         from core import flags
+        preparation_runs = preparation.snapshot()
         return {"today_submitted": applied,
                 "llm_error": flags.llm_error(),
                 "queue_age_seconds": None, "paused": flags.paused(),
@@ -481,7 +487,9 @@ def create_app() -> FastAPI:
                 "headless": flags.browser_headless(),
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
-                "discovering": _discovery_running(), "processing": _RUNNING["process"],
+                "discovering": _discovery_running(),
+                "processing": _RUNNING["process"] or any(b["active"] for b in preparation_runs),
+                "preparation": preparation_runs,
                 # WHICH companies, not just whether any. Scans became per company
                 # when the global lock was replaced by claims, but the board still
                 # had only a yes or no, so it disabled the Run button whenever
@@ -1816,7 +1824,8 @@ def create_app() -> FastAPI:
                     "rotate-and-queue: tailoring %s failed", pk)
         return done
 
-    def _flush_loop(company: str, q, already_claimed: bool = False) -> int:  # noqa: ANN001
+    def _flush_loop(company: str, q, already_claimed: bool = False,
+                    pks: set[str] | None = None) -> int:  # noqa: ANN001
         """Work through ONE company's queue, back to back, and stop there.
 
         One at a time, because they go to the same employer — the same lease the
@@ -1839,18 +1848,143 @@ def create_app() -> FastAPI:
             return 0
         done = 0
         try:
-            while True:
-                item = q.next(only=company)
+            remaining = set(pks) if pks is not None else None
+            while co in q.flushing():
+                item = (q.next(only=company, pks=remaining) if remaining is not None
+                        else q.next(only=company))
                 if item is None:
                     return done                # drained, or the rest is backing off
                 run_queued(item, q)            # releases the lease in its own finally
+                if remaining is not None:
+                    remaining.discard(item["pk"])
                 done += 1
                 if co not in q.flushing():
                     log.info("flush of %s stopped after %d", company, done)
                     return done
+            return done
         finally:
             q.stop_flush(company)
             log.info("flush of %s finished: %d application(s)", company, done)
+
+    def review_selection(body: dict) -> tuple[str, list[str]]:
+        company, pks = body.get("company"), body.get("pks")
+        if not isinstance(company, str) or not company.strip() or company.strip() == "__all__":
+            raise ValueError("Choose one company for this review action.")
+        if (
+            not isinstance(pks, list)
+            or not pks
+            or len(pks) > 1000
+            or any(not isinstance(pk, str) or not pk.strip() for pk in pks)
+        ):
+            raise ValueError("Select between 1 and 1,000 job IDs.")
+        return company.strip(), list(dict.fromkeys(pks))
+
+    def review_eligible(row: dict) -> bool:
+        return row.get("status") == "tailored" or (
+            row.get("status") == "needs_human"
+            and (
+                row.get("gate_reason") == "approval"
+                or (row.get("gate_pending") or {}).get("question", "").startswith("Ready to apply")
+            )
+        )
+
+    @app.post("/actions/apply-selection")
+    def apply_selection(body: dict, background: BackgroundTasks):
+        """Authorize and run exactly the selected roles, never the older queue."""
+        from core.apply_queue import ApplyQueue
+
+        try:
+            company, pks = review_selection(body)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+        for pk in pks:
+            row = stores.tracking.get(pk) or {}
+            if (
+                (row.get("company") or "").strip().lower() != company.lower()
+                or not review_eligible(row)
+                or row.get("confirmation_id")
+            ):
+                return {
+                    "ok": False,
+                    "error": "A selected role is no longer available for review. Refresh and select again.",
+                }
+        if company.lower() in q.depth()["running"] or not q.start_flush(company):
+            return {
+                "ok": False,
+                "error": f"{company} already has an application run. Wait for it to finish, then apply this selection.",
+            }
+        try:
+            for pk in pks:
+                q.put(pk, company)
+            background.add_task(_flush_loop, company, q, True, set(pks))
+        except Exception:
+            q.stop_flush(company)
+            raise
+        return {"ok": True, "company": company, "pks": pks, "queued": len(pks)}
+
+    @app.post("/actions/review-decision")
+    def review_decision(body: dict):
+        """Persist decisions per role and report partial results for safe retries."""
+        from core.apply_queue import ApplyQueue
+
+        try:
+            company, pks = review_selection(body)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        action = body.get("action")
+        if action not in {"skip", "restore", "reject", "undo"}:
+            return {"ok": False, "error": "Choose skip, restore, reject or undo."}
+        stores = make_stores(settings)
+        q = ApplyQueue(stores.tracking.r)
+        pending = {it["pk"] for it in q.pending()}
+        inflight = q.in_flight()
+        results = []
+        for pk in pks:
+            try:
+                row = stores.tracking.get(pk) or {}
+                if (row.get("company") or "").strip().lower() != company.lower():
+                    raise ValueError("This role does not belong to the selected company.")
+                if pk in pending or pk in inflight or row.get("confirmation_id"):
+                    raise ValueError(
+                        "This role is already approved or submitted; refresh its current state."
+                    )
+                if action == "undo":
+                    if (
+                        row.get("status") != "skipped"
+                        or row.get("skip_reason") != "review_rejected"
+                    ):
+                        raise ValueError("Only a role rejected from review can be restored.")
+                    previous = row.get("review_rejected_from", "tailored")
+                    if previous not in {"tailored", "needs_human"}:
+                        raise ValueError("The previous review state is unavailable.")
+                    stores.tracking.set_status(
+                        pk, Status(previous), skip_reason="", review_skipped=False
+                    )
+                else:
+                    if not review_eligible(row):
+                        raise ValueError("This role is no longer waiting for review.")
+                    if action == "reject":
+                        stores.tracking.set_status(
+                            pk,
+                            Status.SKIPPED,
+                            skip_reason="review_rejected",
+                            review_rejected_from=row["status"],
+                            review_skipped=False,
+                        )
+                    else:
+                        stores.tracking.set_status(
+                            pk, Status(row["status"]), review_skipped=action == "skip"
+                        )
+                results.append({"pk": pk, "ok": True})
+            except ValueError as exc:
+                results.append({"pk": pk, "ok": False, "error": str(exc)})
+            except Exception:
+                results.append(
+                    {"pk": pk, "ok": False, "error": "Could not save this decision. Try again."}
+                )
+        return {"ok": all(r["ok"] for r in results), "results": results}
 
     @app.post("/actions/drain-company")
     def drain_company(body: dict, background: BackgroundTasks):

@@ -175,8 +175,12 @@ class ApplyQueue:
                     item.get("pk"), int(item.get("attempts", 0)) + 1, reason[:120])
 
     # --- reading ----------------------------------------------------------
-    def next(self, only: str = "", *, priority_only: bool = False) -> dict | None:
+    def next(self, only: str = "", *, priority_only: bool = False,
+             pks: set[str] | None = None) -> dict | None:
         """Lease the next application, or None when nothing can start.
+
+        `pks` bounds a manual batch to the exact reviewed IDs; an empty set
+        dispatches nothing, and older or newly queued jobs remain untouched.
 
         `only` restricts the lease to one company, which is how a single employer's
         queue can be drained by hand while automatic applying is paused. It narrows
@@ -218,6 +222,8 @@ class ApplyQueue:
                 continue
             for raw in (self.r.lrange(key, 0, -1) or []):
                 item = json.loads(raw)
+                if pks is not None and item.get("pk") not in pks:
+                    continue
                 if float(item.get("not_before") or 0) > now:
                     continue                            # still backing off
                 answered = bool(item.get("priority"))
@@ -232,9 +238,14 @@ class ApplyQueue:
         if best is None:
             return None
         _, co, raw = best
-        self.r.lrem(f"{_KEY}:co:{co}", 1, raw)
+        # A manual batch and the automatic worker may choose concurrently. Claim
+        # the company before removing an item; only the winner may dispatch it.
+        if not self.r.sadd(_BUSY, co):
+            return None
+        if not self.r.lrem(f"{_KEY}:co:{co}", 1, raw):
+            self.r.srem(_BUSY, co)
+            return None
         item = json.loads(raw)
-        self.r.sadd(_BUSY, co)
         # The pk as well as the company. A company lease cannot tell a job that is
         # genuinely running from one whose worker died, and with two jobs at one
         # employer it cannot tell WHICH is running. Recovery needs that.

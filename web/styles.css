@@ -4354,19 +4354,78 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .health-panel .preferences-heading { padding: 0 0 12px; }
 .health-panel .health-item { margin-top: 10px; padding: 12px; }
 
-/* The review step uses the queue's compact rows, with explicit rejection ticks. */
-.review-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
-.un-row.review-row { grid-template-columns: 16px minmax(0, 1fr) minmax(0, 160px) max-content max-content; }
-.review-row .un-sel { opacity: 1; }
-.review-later { color: var(--muted); font-size: 11px; }
-.ps-review .ung-head { padding: 8px 14px; }
-.review-location { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#review-queue { scroll-margin-top: 20px; }
+/* Keep the original deck density; align review controls below its measured edge. */
+:root { --deck-height: 170px; }
+.board.activity-collapsed { grid-template-columns: minmax(0, 1fr); }
+.board.activity-collapsed .feedpanel { display: none; }
+.work:has(.ps-review) { overflow: clip; }
+.ps-review { overflow: visible; }
+.review-stage { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; padding: 0 12px; }
+.review-stage .locbar { margin: 0; padding: 0; border: 0; }
+.review-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px; }
+.review-sticky { position: sticky; top: var(--deck-height); z-index: 12; background: var(--panel-solid); border-bottom: 1px solid var(--border-2); box-shadow: 0 2px 4px #0002; }
+.review-actions { display: flex; align-items: center; gap: 6px; padding: 8px 12px; flex-wrap: wrap; }
+.review-count { margin-right: auto; color: var(--fg); font-weight: 600; font-size: 12px; }
+.review-columns, .un-row.review-row { display: grid; grid-template-columns: 18px minmax(150px, 1fr) minmax(90px, 140px) 45px 105px 64px; gap: 10px; align-items: center; padding: 9px 12px; }
+.review-columns { padding-top: 2px; padding-bottom: 7px; font-size: 10px; color: var(--muted); }
+.review-row .un-sel { opacity: 1; width: 16px; height: 16px; }
+.review-row { border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+.review-row:last-child { border-bottom: 0; }
+.review-title { padding: 0; border: 0; background: none; color: var(--fg); text-align: left; font: inherit; line-height: 1.5; cursor: pointer; overflow-wrap: anywhere; }
+.review-title:hover { text-decoration: underline; text-underline-offset: 3px; }
+.review-role { min-width: 0; }
+.review-role .kc-prof { margin: 3px 0 0; font-size: 11px; color: var(--muted); }
+.review-later { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+.review-location { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; line-height: 1.4; }
+.review-score { color: var(--fg); font-size: 12px; font-variant-numeric: tabular-nums; }
+.review-date { color: var(--muted); font-size: 11px; }
+.review-preview { margin: 0; padding: 5px 7px; }
+.review-preview:disabled { opacity: .55; }
+.review-empty { padding: 16px; font-size: 13px; color: var(--muted); }
+.review-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 10px; background: var(--card-2); border-radius: 6px; font-size: 12px; color: var(--fg); }
+.review-notice details { flex: 1 1 100%; color: var(--muted); }
+.review-notice ul { padding-left: 20px; }
+#review-queue, .review-stage { scroll-margin-top: calc(var(--deck-height) + 12px); }
+.prep-progress { padding: 6px 0; font-size: 12px; }
+.prep-progress[hidden] { display: none; }
+.prep-receipt { display: flex; gap: 8px 14px; align-items: center; flex-wrap: wrap; }
+.prep-stage { color: var(--muted); max-width: 45%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.prep-receipt progress { width: 90px; height: 5px; accent-color: var(--scan); }
+
+/* Scope controls and form sections share a clear hierarchy across both editors. */
+.preference-scope { display: flex; gap: 4px; padding: 4px; margin: 0 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-2); flex: none; }
+.preference-scope .chip { flex: 1; padding: 8px 10px; border: 0; border-radius: 5px; text-align: center; color: var(--muted); }
+.preference-scope .chip.active { color: var(--fg); background: var(--panel-solid); box-shadow: 0 1px 3px #0003; }
+.preferences-explain { color: var(--muted); line-height: 1.5; margin: 8px 0 12px; flex: none; }
+.pref-section { border: 0; border-top: 1px solid var(--border); padding: 12px 0 4px; margin: 0 0 14px; display: grid; grid-template-columns: 1fr; gap: 10px; min-width: 0; }
+.pref-section legend, .pref-section-title { font-size: 12px; font-weight: 600; color: var(--fg); padding-right: 8px; }
+.pref-section-title { margin: 8px 0 0; }
+.preferences-drawer .cp-dt-body { display: block; padding: 4px 16px 12px; }
+.preferences-drawer .cp-dt-badge { font-size: 10px; }
+.preferences-drawer .cp-dt-foot { gap: 8px; }
+.preferences-drawer .cp-dt-foot .cp-dt-hint { flex: 1 1 100%; }
+.settings-menu-title { font-size: 14px; color: var(--fg); font-weight: 600; padding: 10px 12px 4px; }
+.settings-menu-group { padding: 12px 12px 5px; font-size: 10px; color: var(--muted); font-weight: 600; }
+#menu { min-width: 275px; max-height: calc(100dvh - 80px); overflow-y: auto; }
+
+@media (max-width: 700px) {
+  .review-actions { gap: 6px; }
+  .review-count { flex: 1 1 100%; }
+  .review-columns { display: none; }
+  .un-row.review-row { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 6px 10px; }
+  .review-row .un-sel { grid-column: 1; grid-row: 1; align-self: start; margin-top: 4px; }
+  .review-role { grid-column: 2 / 4; }
+  .review-location { grid-column: 2; }
+  .review-score { grid-column: 3; grid-row: 2; font-size: 11px; }
+  .review-date { grid-column: 2; }
+  .review-preview { grid-column: 3; grid-row: 3; }
+  .prep-stage { max-width: 100%; }
+  .preference-scope { margin: 0 14px; }
+}
+
+/* Long mobile company forms retain their identity and an exit while scrolling. */
+.preferences-drawer .preferences-heading { position: sticky; top: 0; z-index: 6; background: var(--panel-solid); }
+.preferences-drawer .cp-dt-h { position: sticky; top: 0; z-index: 5; background: var(--panel-solid); }
 @media (max-width: 600px) {
-  .ps-review .ung-head { flex-wrap: wrap; gap: 8px; }
-  .review-actions { flex: 1 1 100%; margin-left: 0; }
-  .un-row.review-row { grid-template-columns: 16px minmax(0, 1fr); }
-  .review-row .review-location { grid-column: 2; font-size: 11px; }
-  .review-row .un-aged { display: none; }
-  .review-later { grid-column: 2; }
+  .preferences-drawer .cp-dt-h { top: 76px; }
 }

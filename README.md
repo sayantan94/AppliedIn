@@ -197,9 +197,12 @@ Then:
    stops before applying, including when automatic mode is enabled.
 3. Tailored roles automatically enter the **Review queue**, below **Ready to apply**.
    Select checkboxes to **Reject** roles or **Skip** them for later. Skips are remembered
-   in this browser and excluded from Apply all; selecting them explicitly includes them again.
+   on the server across browsers and excluded from Apply all. Use **Skipped for later**
+   to restore them. Rejected roles can be returned to review with **Undo rejection**.
 4. Press **Apply** for the selected roles, or **Apply all** for the remaining roles
-   at that company. This starts its approved queue, one application at a time.
+   shown at that company. Only those job IDs run; older queued roles stay in their
+   own queue. **Run company queue** is the separate action for already-approved work.
+   The Review queue can be collapsed, and its company action bar stays visible while scrolling.
 
 The daemon also schedules discovery every six hours by default. Change
 `APPLIEDIN_DISCOVER_INTERVAL_SEC` in `.env` if needed.

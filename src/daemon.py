@@ -389,33 +389,40 @@ def process_backlog_once(companies: list | None = None,
              if not is_internal_pk(r.get("pk", ""))]
     if sel or skipped:
         found = [r for r in found if _in_scope(r.get("company"))]
-    # Browser-only postings (Meta) are read a batch per session HERE, before the
-    # per-row pass, so each row below finds its description already on the row
-    # and never opens a browser of its own. Without this every Meta row cost a
-    # five-minute session that yielded to any application in flight.
-    try:
-        prefetch_browser_jds(found, stores)
-    except Exception:
-        log.exception("process: browser prefetch failed — rows will be read one at a time")
-    evaluated = 0
-    # Captured before the first job, so only a Stop pressed after this point ends
-    # the pass. A board already paused does not.
+    from core import preparation
+
     epoch0 = _flags.stop_epoch()
-    for row in found:
-        if _pass_cancelled(manual, epoch0):
-            log.info("process: stopped by the owner after %d job(s)", evaluated)
-            break
+    with preparation.track(found) as progress:
+        # Browser-only postings (Meta) are read a batch per session HERE, before the
+        # per-row pass, so each row below finds its description already on the row
+        # and never opens a browser of its own. Without this every Meta row cost a
+        # five-minute session that yielded to any application in flight.
         try:
-            log.info("process: %s", run_job(row["pk"], stores, prepare_only=True)
-                     if prepare_only else run_job(row["pk"], stores))
-            evaluated += 1
+            prefetch_browser_jds(found, stores)
         except Exception:
-            log.exception("process: evaluate failed for %s", row.get("pk"))
+            log.exception("process: browser prefetch failed — rows will be read one at a time")
+        evaluated = 0
+        # Captured before the first job, so only a Stop pressed after this point ends
+        # the pass. A board already paused does not.
+        for row in found:
+            if _pass_cancelled(manual, epoch0):
+                log.info("process: stopped by the owner after %d job(s)", evaluated)
+                break
+            progress.start(row)
             try:
-                stores.tracking.set_status(row["pk"], Status.ERROR,
-                                           error="pipeline error — see logs")
+                log.info("process: %s", run_job(row["pk"], stores, prepare_only=True)
+                         if prepare_only else run_job(row["pk"], stores))
+                evaluated += 1
             except Exception:
-                log.exception("could not mark %s errored", row.get("pk"))
+                log.exception("process: evaluate failed for %s", row.get("pk"))
+                try:
+                    stores.tracking.set_status(row["pk"], Status.ERROR,
+                                               error="pipeline error — see logs")
+                except Exception:
+                    log.exception("could not mark %s errored", row.get("pk"))
+
+            finally:
+                progress.complete((stores.tracking.get(row["pk"]) or {}).get("status", ""))
 
     if prepare_only:
         return {"evaluated": evaluated, "applied": 0}

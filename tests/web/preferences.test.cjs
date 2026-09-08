@@ -297,7 +297,7 @@ function reviewHarness() {
   ];
   h.context.confirm = () => true; h.context.markBusy = () => {};
   h.context.loadQueue = () => {}; h.context.scheduleReload = () => {};
-  h.context.reply = async () => ({ok:true,queued:1});
+  h.context.reply = async (url, body) => ({ok:true,queued:body.pks.length, results:body.pks.map(pk => ({pk,ok:true}))});
   h.context.renderPane = () => {};
   return h;
 }
@@ -318,11 +318,10 @@ test('checkbox rejection closes only selected roles, then Apply all approves the
   const h = reviewHarness();
   h.state.reviewPicked.add('openai#reject'); h.state.reviewPicked.add('beta#keep');
   await h.context.reviewAction('reject','OpenAI');
-  assert.deepEqual(h.requests, [{url:'/actions/skip/openai%23reject',body:undefined}]);
+  assert.deepEqual(h.requests, [{url:'/actions/review-decision',body:{company:'OpenAI',pks:['openai#reject'],action:'reject'}}]);
   await h.context.reviewAction('apply','OpenAI');
   assert.deepEqual(h.requests.slice(1), [
-    {url:'/actions/approve-all',body:{company:'OpenAI',pks:['openai#keep']}},
-    {url:'/actions/drain-company',body:{company:'OpenAI'}},
+    {url:'/actions/apply-selection',body:{company:'OpenAI',pks:['openai#keep']}},
   ]);
   assert.equal(h.state.reviewPicked.has('beta#keep'), true);
 });
@@ -330,15 +329,16 @@ test('checkbox rejection closes only selected roles, then Apply all approves the
 test('Skip leaves selected roles waiting and excludes them from Apply all', async () => {
   const h = reviewHarness(); h.state.reviewPicked.add('openai#reject');
   await h.context.reviewAction('skip','OpenAI');
-  assert.equal(h.requests.length, 0);
+  assert.equal(h.requests.length, 1);
   assert.equal(h.state.apps[1].status, 'tailored');
-  assert.equal(h.storage.get('appliedin.reviewSkipped'), '["openai#reject"]');
+  assert.equal(h.state.apps[1].review_skipped, true);
+  assert.equal(h.requests[0].body.action, 'skip');
   await h.context.reviewAction('apply','OpenAI');
-  assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#keep']});
+  assert.deepEqual(h.requests[1].body, {company:'OpenAI',pks:['openai#keep']});
 });
 
 test('a skipped role can be explicitly selected to apply later without approving others', async () => {
-  const h = reviewHarness(); h.state.reviewSkipped.add('openai#reject'); h.state.reviewPicked.add('openai#reject');
+  const h = reviewHarness(); h.state.reviewFilter = 'later'; h.state.reviewSkipped.add('openai#reject'); h.state.reviewPicked.add('openai#reject');
   await h.context.reviewAction('apply','OpenAI');
   assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#reject']});
 });
@@ -355,7 +355,7 @@ test('a failed approval never starts a company and keeps the selection', async (
 test('new roles and double clicks cannot widen a pending Apply selection', async () => {
   const h = reviewHarness(); h.state.reviewPicked.add('openai#keep');
   let finish;
-  h.context.reply = (url) => url === '/actions/approve-all'
+  h.context.reply = (url) => url === '/actions/apply-selection'
     ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ok:true,queued:1});
   const pending = h.context.reviewAction('apply','OpenAI');
   h.state.apps.push({pk:'openai#new',company:'OpenAI',title:'New',status:'tailored'});
@@ -363,4 +363,53 @@ test('new roles and double clicks cannot widen a pending Apply selection', async
   assert.equal(h.requests.length, 1);
   assert.deepEqual(h.requests[0].body, {company:'OpenAI',pks:['openai#keep']});
   finish({ok:true,queued:1}); await pending;
+});
+
+test('partial rejection retains failures and Undo restores only successful rejections', async () => {
+  const h = reviewHarness();
+  h.state.reviewPicked.add('openai#keep'); h.state.reviewPicked.add('openai#reject');
+  h.context.reply = async () => ({ok:false,results:[{pk:'openai#keep',ok:true},{pk:'openai#reject',ok:false,error:'Already approved'}]});
+  await h.context.reviewAction('reject', 'OpenAI');
+  assert.equal(h.state.reviewPicked.has('openai#reject'), true);
+  assert.equal(h.state.reviewPicked.has('openai#keep'), false);
+  assert.match(h.state.reviewNotices.OpenAI.message, /1 rejected; 1 could not/);
+  assert.deepEqual(Array.from(h.state.reviewNotices.OpenAI.undo), ['openai#keep']);
+  h.context.reply = async () => ({ok:true,results:[{pk:'openai#keep',ok:true}]});
+  await h.context.reviewAction('undo','OpenAI',h.state.reviewNotices.OpenAI.undo);
+  assert.equal(h.state.apps[0].status, 'tailored');
+  assert.equal(h.requests.every(r => r.url === '/actions/review-decision'), true);
+});
+
+test('shift-click selects only a contiguous range in the visible company', () => {
+  const h = reviewHarness();
+  h.state.apps.push({pk:'openai#third',company:'OpenAI',title:'Third role',status:'tailored'});
+  const tick = (pk, checked) => ({dataset:{reviewPick:pk},checked,closest:()=>null});
+  h.context.paintReviewSelection(tick('openai#keep',true));
+  h.context.paintReviewSelection(tick('openai#third',true),true);
+  assert.deepEqual(Array.from(h.state.reviewPicked), ['openai#keep','openai#reject','openai#third']);
+  h.context.paintReviewSelection(tick('beta#keep',true),true);
+  assert.equal(h.state.reviewPicked.size, 4);
+});
+
+test('server-saved skips refresh the view and legacy migration never approves', async () => {
+  const h = reviewHarness();
+  const before = h.context.appsSig();
+  h.state.apps[0].review_skipped = true;
+  assert.notEqual(h.context.appsSig(), before);
+  h.state.reviewSkipped.add('openai#reject');
+  await h.context.migrateReviewSkips();
+  assert.deepEqual(h.requests[0], {url:'/actions/review-decision',body:{company:'OpenAI',pks:['openai#reject'],action:'skip'}});
+  assert.equal(h.state.reviewSkipped.size, 0);
+  assert.equal(h.state.apps[1].review_skipped, true);
+});
+
+test('collapsed review keeps its count and selection while hiding the body', () => {
+  const h = reviewHarness();
+  h.state.reviewCollapsed = true;
+  h.state.reviewPicked.add('openai#keep');
+  const markup = h.context.reviewQueueSec(h.context.visibleApprovalPicks());
+  assert.match(markup, /data-review-collapse aria-expanded="false"/);
+  assert.match(markup, /id="review-body" hidden/);
+  assert.match(markup, /Awaiting review/);
+  assert.equal(h.state.reviewPicked.has('openai#keep'), true);
 });
