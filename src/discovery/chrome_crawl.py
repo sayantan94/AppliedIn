@@ -358,6 +358,8 @@ def find_jobs_sync(company: str, careers_url: str, **kw: object) -> tuple[list, 
     # Already inside a loop (the daemon): run it on its own.
     import concurrent.futures
 
+    from contextvars import copy_context
+    context = copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(
+        return pool.submit(context.run,
             lambda: asyncio.run(find_jobs(company, careers_url, **kw))).result()  # type: ignore[arg-type]

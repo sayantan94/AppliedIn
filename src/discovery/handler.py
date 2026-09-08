@@ -23,6 +23,7 @@ from core.models import DiscoveryMode, Status
 from core.stores import make_stores
 
 from .adapters import ADAPTERS
+from . import progress
 from .relevance import relevant
 from .resolver import BROWSER_HEADERS, resolve
 from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
@@ -71,9 +72,11 @@ def discover_company(
     """Discover one company; returns the number of jobs newly enqueued."""
     from core.events import emit
 
+    progress.record(stage="Reading job feed")
     adapter = ADAPTERS.get(company.ats)
     if adapter is None:
         log.warning("%s: no adapter for ats=%r — check the careers_url", company.name, company.ats)
+        progress.record(note="No supported job feed. Check this company’s discovery mode.")
         return 0
 
     try:
@@ -81,8 +84,10 @@ def discover_company(
     except Exception as exc:
         log.error("%s: feed fetch failed (%s) — check the board token in watchlist.yaml",
                   company.name, exc)
+        progress.record(note="Could not read the job feed. Check the careers URL and retry.")
         return 0
 
+    progress.record(found=len(fetched), stage="Matching preferences")
     from core import flags as _flags
 
     # Per-company preference OVERRIDES first (dashboard): the same fields as the
@@ -160,6 +165,9 @@ def discover_company(
     already = seen.load()
     matched = [j for j in matched if j.jd_url not in already]  # skip past-run URLs
 
+    progress.record(relevant=len(matched), stage="Saving new matches")
+    if progress.cancelled():
+        return 0
     wm_row = tracking.get(_watermark_pk(company.name))
     if wm_row is None:  # first run — cap the backfill
         matched = matched[:BACKFILL_CAP]
@@ -282,6 +290,8 @@ _SCANNING: set[str] = set()
 # scanning set meant a 47 company sweep showed all 47 as in progress with an
 # identical clock, and there was no way to tell a run that was working from one
 # that had hung. Crawls are sequential: exactly one company is ever being read.
+_SCANS: dict[str, progress.Scan] = {}
+
 _ACTIVE: dict[str, object] = {"company": "", "since": 0.0, "done": 0, "total": 0}
 
 
@@ -291,8 +301,26 @@ def active() -> dict:
 
     with _LOCK:
         a = dict(_ACTIVE)
+        scans = list(_SCANS.values())
+    if scans:
+        running = [x for x in scans if x.started and not x.finished]
+        a.update(company=running[0].company if running else "", total=len(scans),
+                 done=sum(x.finished for x in scans),
+                 since=min((x.started for x in running), default=0))
+    a["companies"] = [{"company": x.company, "stage": x.stage, "found": x.found,
+                       "elapsed_s": int(_t.time() - x.started) if x.started else 0,
+                       "stopping": x.stopped.is_set()} for x in scans if not x.finished]
     a["elapsed_s"] = int(_t.time() - float(a["since"] or 0)) if a["since"] else 0
     return a
+
+
+def stop_company(name: str) -> bool:
+    with _LOCK:
+        scan = _SCANS.get(name.strip().lower())
+        if scan is None:
+            return False
+        scan.stopped.set()
+        return True
 
 
 def _set_active(company: str, done: int, total: int) -> None:
@@ -370,10 +398,16 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "",
     from core import flags as _flags
 
     epoch0 = _flags.stop_epoch()
+    with _LOCK:
+        for name in claimed:
+            _SCANS[name] = progress.Scan(name)
     try:
         return _run_discovery(sorted(claimed), profile_id, manual, epoch0)
     finally:
-        _release(claimed)
+        with _LOCK:
+            _SCANNING.difference_update(claimed)
+            for name in claimed:
+                _SCANS.pop(name, None)
 
 
 def _targets(only: list[str] | None) -> set[str]:
@@ -453,55 +487,48 @@ def _run_discovery(only: list[str] | None, profile_id: str,
 
     _r = getattr(stores.tracking, "r", None)
     scan_log.start_run(_r, batch_n)
-    crawl_companies: list[CompanyConfig] = []
+    receipts = []
+    from .crawler import crawl_company
+
     with httpx.Client(headers=BROWSER_HEADERS) as client:
         for raw in companies:
             if _stop_requested(manual, epoch0):
-                log.info("discovery stopped by the owner after %d company(ies)", done_n)
                 break
+            scan = _SCANS.get(raw.name.lower()) or progress.Scan(raw.name)
+            token = progress.current.set(scan)
+            _set_active(raw.name, done_n, batch_n)
+            started = scan.started = _time.time()
+            n = 0
             try:
-                company = resolve_company(raw, client)
+                if not progress.cancelled():
+                    progress.record(stage="Finding careers page")
+                    company = resolve_company(raw, client)
+                    if not progress.cancelled():
+                        if company.discovery is DiscoveryMode.FEED:
+                            n = discover_company(company, prefs, stores.tracking,
+                                                 stores.queue, client,
+                                                 stores.tailor_queue, profile_id)
+                            total += n
+                        else:
+                            n = crawl_company(company, prefs, stores)
+                            crawl_total += n
             except Exception:
-                log.exception("ATS resolution failed for %s", raw.name)
-                continue
-            if company.discovery is not DiscoveryMode.FEED:
-                crawl_companies.append(company)  # custom career page -> crawler
-                continue
-            try:
-                _set_active(company.name, done_n, batch_n)
+                scan.note = "Scan failed. Check Logs for the cause and retry."
+                log.exception("discovery failed for %s", raw.name)
+            finally:
                 done_n += 1
-                _t0 = _time.time()
-                _n = discover_company(company, prefs, stores.tracking,
-                                      stores.queue, client,
-                                      stores.tailor_queue, profile_id)
-                total += _n
-                scan_log.finished(_r, company.name, found=_n, relevant=_n,
-                                  enqueued=_n, seconds=_time.time() - _t0)
-            except Exception:
-                log.exception("discovery failed for %s", company.name)
-
-    # Crawl-mode companies (no usable feed) -> the browser crawler.
-    if crawl_companies:
-        from .crawler import crawl_company
-
-        for company in crawl_companies:
-            if _stop_requested(manual, epoch0):
-                log.info("discovery stopped by the owner after %d company(ies)", done_n)
-                break
-            try:
-                _set_active(company.name, done_n, batch_n)
-                done_n += 1
-                _t0 = _time.time()
-                _n = crawl_company(company, prefs, stores)
-                crawl_total += _n
-                scan_log.finished(_r, company.name, found=_n, relevant=_n,
-                                  enqueued=_n, seconds=_time.time() - _t0)
-            except Exception:
-                log.exception("crawl failed for %s", company.name)
+                scan.finished = True
+                if scan.stopped.is_set():
+                    scan.note = "Stopped by you"
+                receipt = dict(company=raw.name, found=scan.found, relevant=scan.relevant,
+                               enqueued=n, seconds=_time.time() - started, note=scan.note)
+                receipts.append(receipt)
+                scan_log.finished(_r, **receipt)
+                progress.current.reset(token)
 
     _clear_active()      # nothing is being read once the batch is finished
     log.info("discovery done: feed=%d crawl=%d", total, crawl_total)
-    return {"enqueued": total, "crawled": crawl_total}
+    return {"enqueued": total, "crawled": crawl_total, "companies": receipts}
 
 
 def handler(event, context):  # noqa: ANN001 - Lambda signature (cloud cron)

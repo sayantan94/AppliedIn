@@ -195,7 +195,7 @@ _ALREADY_RUNNING = ("An earlier run is still working on this job. Wait for it to
                     "finish; if it never does, restart the daemon and it frees itself.")
 
 
-def run_job(pk: str, stores: Any = None) -> dict:
+def run_job(pk: str, stores: Any = None, *, prepare_only: bool = False) -> dict:
     """Run the pipeline for one discovered job through the ADK agent graph."""
     stores = stores or make_stores()
     row = stores.tracking.get(pk)
@@ -229,12 +229,13 @@ def run_job(pk: str, stores: Any = None) -> dict:
     emit("running", pk=pk, detail=f"{row.get('title','')} @ {row.get('company','')}",
          url=row.get("jd_url"))
     try:
-        return _run(_run_job_async(pk, row, stores))
+        return _run(_run_job_async(pk, row, stores, prepare_only=prepare_only))
     finally:
         _release(pk, stores)
 
 
-async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
+async def _run_job_async(pk: str, row: dict, stores: Any, *,
+                         prepare_only: bool = False) -> dict:
     jd_text = await _jd_text(row)  # fetch the FULL JD (discovery only had the title)
 
     if _unreadable(jd_text):
@@ -277,12 +278,14 @@ async def _run_job_async(pk: str, row: dict, stores: Any) -> dict:
         log.info("base résumé changed since %s was first seen — starting it fresh", pk)
     if existing is None:
         await sessions.create_session(app_name=_APP, user_id=_USER, session_id=pk, state=state)
-    runner = Runner(agent=root_agent, app_name=_APP, session_service=sessions)
+    from .graph import review_agent
+    runner = Runner(agent=review_agent if prepare_only else root_agent,
+                    app_name=_APP, session_service=sessions)
 
     msg = types.Content(role="user", parts=[types.Part(
         text=f"Apply to this job: {row.get('title','')} at {row.get('company','')}. "
              f"URL: {row.get('jd_url','')}")])
-    result = await _drive_async(runner, pk, msg, stores)
+    result = await _drive_async(runner, pk, msg, stores, prepare_only=prepare_only)
     _save_output(pk, row, jd_text, stores)  # inspection folder: JD + tailored résumé
     return result
 
@@ -1216,7 +1219,8 @@ def _auto_decision(pk: str, stores: Any) -> str:
     return "go"
 
 
-async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> dict:
+async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any, *,
+                       prepare_only: bool = False) -> dict:
     """Run the agent, streaming each step's input/response; catch the human gate.
     In AUTO mode the "Ready to apply?" approval is decided by code (score ≥
     threshold, under the daily cap) and the browser apply runs immediately —
@@ -1334,6 +1338,18 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any) -> di
              detail="auto-approved (score ≥ threshold) — queued to apply")
         log.info("queued-to-apply pk=%s", pk)
         return {"result": "queued_apply", "pk": pk}
+
+    if prepare_only:
+        row = stores.tracking.get(pk) or {}
+        if not str(row.get("resume_s3_key") or "").endswith(".pdf"):
+            stores.tracking.set_status(pk, Status.FAILED, fail_kind="no_resume",
+                                       fail_reason="No PDF was saved. Retry preparation.")
+            return {"result": "failed", "pk": pk, "reason": "no_resume"}
+        stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval",
+                                   gate_pending={"question":
+                                                 "Ready to apply? Review the résumé first."})
+        emit("gate", pk=pk, detail="Résumé ready for review. Nothing submitted.")
+        return {"result": "prepared", "pk": pk}
 
     # The run finished without gating. Only call it APPLIED if the browser agent
     # actually confirmed a submit — otherwise it FAILED (dead/404 posting, no form

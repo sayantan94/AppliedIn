@@ -123,7 +123,7 @@ test('refreshes cannot replace an active dropdown or a draft', () => {
 
 test('shared Save immediately updates Discover defaults and keeps the panel open', async () => {
   const h = harness();
-  h.context.fetch = async () => ({ json: async () => h.state.prefs });
+  h.context.fetch = async () => ({ ok: true, json: async () => h.state.prefs });
   await h.context.loadShared();
   h.node('#pf-titles').value = 'Principal Engineer';
   h.context.reply = async () => ({ ok: true, preferences: { titles: ['Principal Engineer'] } });
@@ -165,7 +165,7 @@ test('applied history sorts by submission date even after a later profile edit',
 
 test('saved company selections, including Clear, survive reload', async () => {
   const h = harness();
-  h.context.fetch = async () => ({ json: async () => ({ companies: ['Acme', 'Beta'] }) });
+  h.context.fetch = async () => ({ ok: true, json: async () => ({ companies: ['Acme', 'Beta'] }) });
   vm.runInContext('renderSkipPicker = () => {}; renderCompanyOptions = () => {};', h.context);
   h.state.picked.add('Acme');
   vm.runInContext('savePicked()', h.context);
@@ -194,4 +194,40 @@ test('a failed Discover keeps the popup open and clears its optimistic running s
   await vm.runInContext('runDiscover()', h.context);
   assert.equal(h.state.stats.discovering, false);
   assert.equal(h.requests.length, 1);
+});
+
+test('Run all acknowledges immediately and suppresses duplicates while the request is pending', async () => {
+  const h = harness();
+  h.state.picked = new Set(['Acme']);
+  h.context.renderPane = () => {};
+  let finish;
+  h.context.reply = () => new Promise((resolve) => { finish = resolve; });
+  const run = h.context.runProcess();
+  assert.equal(h.state.requests.has('prepare'), true);
+  assert.match(h.state.launch.label, /Starting preparation/);
+  await h.context.runProcess();
+  assert.equal(h.requests.length, 1);
+  finish({ok:false,error:'Could not start'});
+  await run;
+  assert.equal(h.state.requests.has('prepare'), false);
+  assert.equal(h.state.stats.processing, false);
+});
+
+test('follow-up reminders ignore completed outcomes and dates filter by actual submission', () => {
+  const h = harness();
+  assert.equal(h.context.followupDue({follow_up:'2026-09-01',outcome:'waiting'}, '2026-09-07'), true);
+  assert.equal(h.context.followupDue({follow_up:'2026-09-01',outcome:'rejected'}, '2026-09-07'), false);
+  h.state.appFrom = '2026-09-01'; h.state.appTo = '2026-09-07';
+  const rows = h.context.trackerRows([
+    {pk:'1',applied_at:'2026-09-03T12:00:00Z'},
+    {pk:'2',updated_at:'2026-09-03T12:00:00Z'},
+    {pk:'3',applied_at:'2026-08-01T12:00:00Z',updated_at:'2026-09-03T12:00:00Z'},
+  ]);
+  assert.equal(rows.length, 1); assert.equal(rows[0].pk, '1');
+});
+
+test('jobs still being tailored are never presented as ready with a missing completion date', () => {
+  const h = harness();
+  assert.equal(h.context.sectionOf({status:'tailoring'}, new Set()), 'preparing');
+  assert.equal(h.context.sectionOf({status:'tailored'}, new Set()), 'ready');
 });

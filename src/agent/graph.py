@@ -144,7 +144,11 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     # the old content.
     from agent.run import seed_fingerprint
 
-    stores.tracking.set_status(pk, row.get("status", "tailored"), resume_s3_key=key,
+    from datetime import datetime, timezone
+    dates = {}
+    if fmt == "pdf" and not row.get("tailored_at"):
+        dates["tailored_at"] = datetime.now(timezone.utc).isoformat()
+    stores.tracking.set_status(pk, row.get("status", "tailored"), **dates, resume_s3_key=key,
                                resume_tex_key=tex_key, resume_version="tailored",
                                resume_seed=seed_fingerprint())
     return {"ok": True, "resume_s3_key": key, "format": fmt}
@@ -421,4 +425,11 @@ root_agent = SequentialAgent(
     name="appliedin_pipeline",
     description="Score → tailor (write-until-happy) → browser apply (+ human gate).",
     sub_agents=[scorer, tailor_critique, applier],
+)
+
+# Review has no applier agent or submission tools, even when automation is on.
+review_agent = SequentialAgent(
+    name="appliedin_review",
+    description="Score and tailor, then leave the résumé for review.",
+    sub_agents=[scorer.clone(), tailor_critique.clone()],
 )

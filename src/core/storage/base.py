@@ -26,6 +26,12 @@ class AbstractTracking(ABC):
     @abstractmethod
     def set_status(self, pk: str, status: Status, **attrs: object) -> None: ...
 
+    def application_notes(self) -> dict:
+        raise NotImplementedError
+
+    def save_application_note(self, pk: str, note: dict) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def find_by_jd_hash(self, jd_hash: str) -> str | None: ...
 

@@ -127,6 +127,12 @@ class RedisTracking(AbstractTracking):
         row.update(attrs)
         self._write(pk, row, prev_status=prev)
 
+    def application_notes(self) -> dict:
+        return {pk: json.loads(value) for pk, value in self.r.hgetall("application:notes").items()}
+
+    def save_application_note(self, pk: str, note: dict) -> None:
+        self.r.hset("application:notes", pk, json.dumps(note))
+
     def find_by_jd_hash(self, jd_hash: str) -> str | None:
         return self.r.hget("jdhash", jd_hash)
 

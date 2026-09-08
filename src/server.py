@@ -239,7 +239,8 @@ def _to_ui(row: dict, artifacts) -> dict:
         "gate_reason": row.get("gate_reason"),
         "fail_kind": row.get("fail_kind") or "",
         "fail_reason": row.get("fail_reason") or "",
-        "tailored_at": row.get("tailored_at") or "",
+        "tailored_at": row.get("tailored_at") or next(
+            (e.get("at", "") for e in events if e.get("status") == "tailored"), ""),
         "retailored_at": row.get("retailored_at") or "",
         "posted_at": row.get("posted_at") or "",
         "applied_at": row.get("applied_at") or "",
@@ -381,6 +382,13 @@ def create_app() -> FastAPI:
     app = FastAPI(title="AppliedIn")
     settings = get_settings()
 
+    @app.middleware("http")
+    async def revalidate_dashboard(request, call_next):
+        response = await call_next(request)
+        if request.url.path in ("/", "/dashboard.html", "/app.js", "/styles.css", "/config.js"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     # The browser extension is a DRIVER, not the app: it runs on the employer's
     # page and calls back here for every decision. That means cross-origin
     # requests from a chrome-extension:// origin, which the browser blocks by
@@ -405,6 +413,55 @@ def create_app() -> FastAPI:
         stores = make_stores(settings)
         rows = [r for r in stores.tracking.all() if _is_job_row(r)]
         return {"items": [_to_ui(r, stores.artifacts) for r in rows]}
+
+    @app.get("/application-tracker")
+    def application_tracker():
+        return {"items": make_stores(settings).tracking.application_notes()}
+
+    @app.post("/application-tracker/{pk}")
+    def save_application_tracker(pk: str, body: dict):
+        from core.application_tracker import validate
+        stores = make_stores(settings)
+        if is_internal_pk(pk) or not stores.tracking.get(pk):
+            return {"ok": False, "error": "Application not found."}
+        try:
+            note = validate(body)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        stores.tracking.save_application_note(pk, note)
+        return {"ok": True, "item": note}
+
+    @app.get("/setup-health")
+    def setup_health():
+        import os
+        import shutil
+        checks = []
+        resume = Path(settings.config_dir).parent / "resume" / "base.tex"
+        has_resume = resume.is_file() and bool(resume.read_text().strip())
+        checks.append({"name": "Résumé", "state": "ready" if has_resume else "action",
+                       "detail": "Base résumé available." if has_resume else
+                       "Add your résumé at resume/base.tex before preparing jobs."})
+        has_key = bool(os.environ.get("OPENAI_API_KEY") or getattr(settings, "openai_api_key", ""))
+        checks.append({"name": "Model access", "state": "ready" if has_key else "action",
+                       "detail": "API key configured; validity is checked on use." if has_key else
+                       "Add OPENAI_API_KEY to .env and restart AppliedIn."})
+        render = bool(shutil.which("tectonic"))
+        checks.append({"name": "PDF rendering", "state": "ready" if render else "action",
+                       "detail": "PDF renderer installed." if render else
+                       "Run ./appliedin setup to install the PDF renderer."})
+        cli = bool(shutil.which("claude"))
+        checks.append({"name": "Chrome connection", "state": "check" if cli else "action",
+                       "detail": "Claude CLI installed. Sign in with your subscription and enable "
+                       "Claude in Chrome; the next browser run verifies the connection."
+                       if cli else "Install Claude Code and sign in with a subscription "
+                       "to scan browser-only boards and apply."})
+        return {"checks": checks}
+
+    @app.post("/actions/stop-company")
+    def stop_company_scan(body: dict):
+        from discovery.handler import stop_company
+        name = str(body.get("name") or "").strip()
+        return {"ok": stop_company(name), "company": name}
 
     @app.get("/stats")
     def stats():
@@ -1136,6 +1193,7 @@ def create_app() -> FastAPI:
             from daemon import process_backlog_once
             from discovery.handler import run_discovery
             _RUNNING["discover"] = True
+            found = {}
             try:
                 emit("running", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}",
@@ -1150,9 +1208,12 @@ def create_app() -> FastAPI:
                 logging.getLogger("server").exception("run-company discover failed")
             finally:
                 _RUNNING["discover"] = False
+            if not found or any(r.get("note") == "Stopped by you"
+                                for r in found.get("companies", [])):
+                return
             _RUNNING["process"] = True
             try:
-                process_backlog_once(companies=[name], manual=True)
+                process_backlog_once(companies=[name], manual=True, prepare_only=True)
                 # Report the outcome, not the fact that the code reached the end.
                 # "Tailored jobs await your approval" when nothing was found sends
                 # the owner to look at an empty board and doubt the board.
@@ -1160,24 +1221,18 @@ def create_app() -> FastAPI:
                 waiting = sum(1 for r in stores.tracking.all()
                               if (r.get("company") or "").strip().lower() == name.strip().lower()
                               and r.get("status") == "tailored")
-                # Distinguish "nothing matched" from "nothing was READ". They look
-                # the same from here and mean opposite things: the first is a
-                # preferences question the owner can act on, the second is a
-                # careers page that could not be reached, and telling them to
-                # loosen their preferences would waste their time and never work.
-                total = sum(1 for r in stores.tracking.all()
-                            if (r.get("company") or "").strip().lower()
-                            == name.strip().lower()
-                            and not is_internal_pk(r.get("pk", "")))
+                receipts = found.get("companies") or []
+                receipt = receipts[0] if receipts else {}
                 if waiting:
-                    msg = f"{name}: {waiting} tailored job(s) awaiting your approval"
-                elif total:
-                    msg = (f"{name}: run complete — nothing NEW matched your "
-                           f"preferences ({total} already tracked)")
+                    msg = f"{name}: {waiting} résumé(s) ready for review"
+                elif receipt.get("note"):
+                    msg = f"{name}: {receipt['note']}"
+                elif receipt.get("found") is not None:
+                    msg = (f"{name}: scan complete — {receipt['found']} postings returned, "
+                           f"{receipt.get('relevant') or 0} matched, {n_new} new. "
+                           "Review Passed over for exclusions; existing jobs are not added twice.")
                 else:
-                    msg = (f"{name}: run complete — no postings could be read from "
-                           f"this careers page at all. That is a reading problem "
-                           f"rather than a preferences one; check the Logs view")
+                    msg = f"{name}: scan complete. No new jobs added; see scan results for details."
                 emit("applied", agent="workflow", company=name,
                      pk=f"meta#run#{name.lower()}", detail=msg)
             except Exception:
@@ -1235,7 +1290,7 @@ def create_app() -> FastAPI:
 
             from agent.run import run_job
             try:
-                run_job(pk, make_stores(settings))
+                run_job(pk, make_stores(settings), prepare_only=True)
             except Exception:
                 logging.getLogger("server").exception("run-job failed for %s", pk)
 
@@ -1476,13 +1531,15 @@ def create_app() -> FastAPI:
             from daemon import process_backlog_once
             _RUNNING["process"] = True
             try:
-                process_backlog_once(companies=companies, manual=True)
+                process_backlog_once(
+                    companies=companies, manual=True, prepare_only=True)
             except Exception:  # noqa: BLE001
                 import logging
                 logging.getLogger("server").exception("manual process failed")
             finally:
                 _RUNNING["process"] = False
 
+        _RUNNING["process"] = True
         background.add_task(_run)
         return {"ok": True, "status": "processing", "companies": companies}
 
@@ -1554,7 +1611,8 @@ def create_app() -> FastAPI:
             # Clear every company claim. The runs themselves release in a finally,
             # so this only matters when one died without unwinding — but a claim
             # left behind would refuse that company for good.
-            _handler._release(_handler.scanning())
+            for company in _handler.scanning():
+                _handler.stop_company(company)
         if what in ("process", "all"):
             _RUNNING["process"] = False
         if what in ("apply", "all"):

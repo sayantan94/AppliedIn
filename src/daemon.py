@@ -356,7 +356,7 @@ def _pass_cancelled(manual: bool = False, epoch0: int = 0) -> bool:
 
 
 def process_backlog_once(companies: list | None = None,
-                         manual: bool = False) -> dict:
+                         manual: bool = False, prepare_only: bool = False) -> dict:
     """One on-demand pass over the discovered backlog (the UI 'Process
     applications' button): score + tailor EVERY waiting `found` job, then apply
     everything that qualifies — queued for the apply worker, which runs them
@@ -406,7 +406,8 @@ def process_backlog_once(companies: list | None = None,
             log.info("process: stopped by the owner after %d job(s)", evaluated)
             break
         try:
-            log.info("process: %s", run_job(row["pk"], stores))
+            log.info("process: %s", run_job(row["pk"], stores, prepare_only=True)
+                     if prepare_only else run_job(row["pk"], stores))
             evaluated += 1
         except Exception:
             log.exception("process: evaluate failed for %s", row.get("pk"))
@@ -415,6 +416,9 @@ def process_backlog_once(companies: list | None = None,
                                            error="pipeline error — see logs")
             except Exception:
                 log.exception("could not mark %s errored", row.get("pk"))
+
+    if prepare_only:
+        return {"evaluated": evaluated, "applied": 0}
 
     # 2) APPLY — hand everything to the SAME queue the apply worker drains, rather
     # than applying here. Two code paths applying concurrently was the actual

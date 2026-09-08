@@ -61,6 +61,14 @@ class TrackingStore(AbstractTracking):
         names = {"#s": "status"}
         values = {":s": status.value}
         sets = ["#s = :s"]
+        from datetime import datetime, timezone
+
+        stamp = {"tailored": "tailored_at", "applied": "applied_at",
+                 "applied_manual": "applied_at"}.get(status.value)
+        if stamp and stamp not in attrs:
+            names["#date"] = stamp
+            values[":date"] = datetime.now(timezone.utc).isoformat()
+            sets.append("#date = if_not_exists(#date, :date)")
         for i, (key, value) in enumerate(attrs.items()):
             names[f"#a{i}"] = key
             values[f":a{i}"] = value
@@ -71,6 +79,21 @@ class TrackingStore(AbstractTracking):
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
         )
+
+    def application_notes(self) -> dict:
+        out, kwargs = {}, {}
+        while True:
+            response = self._table.scan(
+                FilterExpression="begins_with(pk, :prefix)",
+                ExpressionAttributeValues={":prefix": "meta#tracker#"}, **kwargs)
+            for row in response.get("Items", []):
+                out[row["pk"][13:]] = row.get("note", {})
+            if "LastEvaluatedKey" not in response:
+                return out
+            kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+
+    def save_application_note(self, pk: str, note: dict) -> None:
+        self._table.put_item(Item={"pk": f"meta#tracker#{pk}", "note": note})
 
     def find_by_jd_hash(self, jd_hash: str) -> str | None:
         """Return the pk of an existing row with this jd_hash, or None."""

@@ -9,7 +9,7 @@ import { auth } from "./auth.js";
 const CONFIG = window.APPLIEDIN_CONFIG || {};
 const DEMO = CONFIG.demo === true || new URLSearchParams(location.search).has("demo");
 
-const INTERNAL_KINDS = new Set(["watermark", "run", "profiles", "prefs", "dailycap", "undated", "age"]);
+const INTERNAL_KINDS = new Set(["watermark", "run", "profiles", "prefs", "dailycap", "undated", "age", "tracker"]);
 const isInternalPk = (pk) => {
   const s = String(pk || "");
   if (!s.startsWith("meta#")) return false;
@@ -21,6 +21,9 @@ const api = (p) => (CONFIG.apiUrl || "").replace(/\/$/, "") + p;
 
 const state = {
   apps: [],
+  tracker: {}, trackerDrafts: {}, trackerSaving: new Set(),
+  appFrom: "", appTo: "", appOutcome: "", appDue: false,
+  requests: new Set(), launch: null,
   stats: {},
   events: [],
   tab: "pipeline",    // pipeline | apps | needs | stuck | activity | logs
@@ -260,8 +263,8 @@ function renderDiscoverLabel() {
   const busy = new Set((state.stats.scanning || []).map((c) => c.toLowerCase()));
   const scope = pickedAll()
     ? state.companies.filter((c) => !state.skipped.has(c.toLowerCase())) : [...state.picked];
-  $("#btn-discover").disabled = !scope.length || scope.every((c) => busy.has(c.toLowerCase()));
-  $("#btn-process").disabled = !state.picked.size || !!state.stats.processing;
+  $("#btn-discover").disabled = state.requests.has("discover") || !scope.length || scope.every((c) => busy.has(c.toLowerCase()));
+  $("#btn-process").disabled = state.requests.has("prepare") || !state.picked.size || !!state.stats.processing;
   // ONE company selection scopes BOTH actions: Discover scans just the picked
   // companies, and Process runs the pipeline on just their discovered jobs.
   const el = $("#discover-label");
@@ -276,10 +279,12 @@ function renderDiscoverLabel() {
     ? `Discover · All${wtag}`
     : `Discover · ${state.picked.size} selected${wtag}`;
   const pl = $("#process-label");
-  if (state.stats.processing) pl.textContent = "Processing…";
+  if (state.requests.has("discover")) el.textContent = "Starting scan…";
+  if (state.requests.has("prepare")) pl.textContent = "Starting preparation…";
+  else if (state.stats.processing) pl.textContent = "Preparing résumés…";
   else pl.textContent = pickedAll()
-    ? "Process applications"
-    : `Process · ${state.picked.size} selected`;
+    ? "Prepare résumés"
+    : `Prepare · ${state.picked.size} selected`;
 }
 
 /* The company picker for a pasted role. A dropdown of what is already tracked,
@@ -473,6 +478,7 @@ function renderDetail(force = false) {
     </div>` : ""}
     <div class="cp-dt-foot">
       <span class="cp-dt-hint">${Object.keys(draft).length ? "Unsaved changes" : `Edits apply to ${esc(co)} only.`}</span>
+      <button class="cp-lk" id="cp-dt-cancel" type="button">Cancel edits</button>
       <button class="cp-lk cp-add-btn" id="cp-dt-save" type="button">Save preferences</button>
       ${n ? `<button class="cp-lk cp-add-btn" id="cp-dt-reset" type="button"
         title="Drop ${esc(co)}'s own values and share yours again">Use shared</button>` : ""}
@@ -502,7 +508,7 @@ function renderPickerState() {
     ? `postings from <b>${scanWindowText(hours)}</b>`
     : `postings of <b>any age</b>`;
   const line = `Discover scans ${who}, ${win}.${skNote}`
-    + ` Process runs on the same companies.`;
+    + ` Preparation uses the same companies.`;
   // Pick exactly ONE company → a clear per-company title filter + run button,
   // right where you decide to run it (not buried in the skip list).
   let single = "";
@@ -597,7 +603,8 @@ function renderDeck() {
   const stopApply = $("#btn-stop-apply");
   if (stopApply) stopApply.hidden = !(s.applying > 0);   // from /stats, polled always
   renderDiscoverLabel();
-  proc.classList.toggle("running", !!s.processing);
+  proc.classList.toggle("running", !!s.processing || state.requests.has("prepare"));
+  renderLaunch();
   renderDiscoverLabel();  // both action labels reflect run-state + company scope
   const badge = $("#proc-badge");
   badge.textContent = waiting;
@@ -712,7 +719,9 @@ function renderScanNow() {
       + `<span class="sn-prog">${done} done, ${left} to go</span>`
     : "";
 
-  setHtmlOnce(host, `<span class="sn-label">Scanning</span>${chip}${bar}`);
+  const detail = (a.companies || []).filter((c) => c.stage !== "Waiting to start");
+  const stages = detail.map((c) => `<span class="scan-stage"><b>${esc(disp.get(c.company.toLowerCase()) || c.company)}</b> ${esc(c.stage)} · ${scanTook(c.elapsed_s || 0)}${c.found == null ? "" : ` · ${c.found} postings returned`} <button class="cp-lk" data-stop-company="${esc(c.company)}" ${c.stopping ? "disabled" : ""}>${c.stopping ? "Stopping…" : "Stop"}</button></span>`).join("");
+  setHtmlOnce(host, `<span class="sn-label">Scanning</span>${chip}${bar}<div class="scan-stages">${stages}</div>`);
   host.hidden = false;
   // The moving parts are poked in place, so the strip itself never redraws.
   const fill = $("#sn-fill");
@@ -734,7 +743,7 @@ function renderScanResults() {
   const log = state.scanLog || {};
   const rows = log.companies || [];
   const scanning = (state.stats.scanning || []).length;
-  if (!rows.length || (!scanning && !_scanFinishedAt)) {
+  if (!rows.length) {
     host.hidden = true; host.innerHTML = ""; delete host.dataset.sig;
     return;
   }
@@ -754,12 +763,17 @@ function renderScanResults() {
     : "";
   const html = head
     + `<ol class="sr-list">` + rows.map((c) => {
-        const got = Number(c.enqueued) > 0
-          ? `<span class="sr-got">${c.enqueued} new</span>`
-          : `<span class="sr-none">${c.note ? esc(c.note) : "nothing new"}</span>`;
-        return `<li class="sr-row">`
+        const newJobs = Number(c.enqueued) || 0;
+        let result = newJobs ? `${newJobs} new job${newJobs === 1 ? "" : "s"}` : "No new jobs";
+        if (c.version === 2 && c.relevant > 0) result = `${c.relevant} matched · ${result.toLowerCase()}`;
+        else if (c.version === 2 && c.found > 0 && !newJobs) result = `${c.found} postings checked · no matches`;
+        const explanation = c.note || (c.version === 2 && c.found != null
+          ? `${c.found} postings returned by the reader. Existing jobs are not added twice.`
+          : "This older scan did not record how many postings were read.");
+        if (!newJobs && c.note) result = c.note;
+        return `<li class="sr-row" title="${esc(explanation)}">`
           + `<span class="sr-co" title="${esc(c.company)}">${esc(c.company)}</span>`
-          + got
+          + `<span class="${newJobs ? "sr-got" : "sr-none"}">${esc(result)}</span>`
           + `<span class="sr-t mono">${scanTook(c.seconds)}</span></li>`;
       }).join("") + `</ol>`;
   setHtmlOnce(host, html);
@@ -877,6 +891,7 @@ function sectionOf(r, queued) {
     return awaitsApproval(r) ? "ready" : "needs";
   }
   if (r.status === "tailored" || r.status === "tailoring") {
+    if (r.status === "tailoring") return "preparing";
     return (queued && queued.has(r.pk)) ? "queued" : "ready";
   }
   if (r.status === "submitting") return "flight";
@@ -1004,9 +1019,9 @@ function dayKey(iso) {
    goes stale on a page left open overnight. So the actual date is always shown,
    with the relative word in front of it only where that word helps. */
 function dayLabel(key) {
-  if (!key) return "No date recorded";
+  if (!key) return "Preparation date unavailable";
   const d = new Date(key + "T12:00:00");
-  if (isNaN(d)) return "No date recorded";
+  if (isNaN(d)) return "Preparation date unavailable";
   const exact = d.toLocaleDateString(undefined,
     { weekday: "short", day: "numeric", month: "short" });
   const today = dayKey(new Date().toISOString());
@@ -1533,7 +1548,7 @@ function foundSec(rows) {
       ${freshN ? `<button class="ps-link on" data-goto-fresh="1"
         title="Employers published ${freshN} of these in the last 2 days. The Fresh tab shows them across every window">✦ ${freshN} new in the last 2 days</button>` : ""}
       ${n ? `<button class="ps-link on" data-run-all="1"
-        title="Score and tailor all ${n} found jobs. Each stops before applying">▶ Run all</button>` : ""}
+        title="Score and tailor the selected companies’ found jobs. Each stops before applying" ${state.stats.processing || state.requests.has("prepare") ? "disabled" : ""}>${state.stats.processing ? "Preparing…" : "Prepare all"}</button>` : ""}
     </div>
     ${n ? `<div class="fgroups">${gs.map(([co, list]) =>
         foundGroup(co, list, openAll || state.coFilter === co)).join("")}</div>` : ""}
@@ -1611,7 +1626,7 @@ function viewPipeline() {
       Click <b>Discover · All</b> above to find jobs from your watchlist.<br>
       They move down this board: found, then tailored, then applied.</div>`;
   }
-  const S = { needs: [], ready: [], queued: [], flight: [], applied: [], found: [], closed: [] };
+  const S = { preparing: [], needs: [], ready: [], queued: [], flight: [], applied: [], found: [], closed: [] };
   const inQ = queuedPks();
   for (const r of visible(state.apps)) S[sectionOf(r, inQ)].push(r);
   const shown = Object.values(S).reduce((a, b) => a + b.length, 0);
@@ -1619,6 +1634,7 @@ function viewPipeline() {
   return `<div class="pstack">
     ${companyBar()}
     ${needsSec(S.needs)}
+    ${S.preparing.length ? `<section class="psec ps-preparing"><div class="ps-head"><span class="ps-name">Preparing résumés</span><span class="ps-n mono">${S.preparing.length}</span><span class="ps-hint">Scoring and tailoring. The completion date appears when the résumé is saved.</span></div><div class="ps-grid">${S.preparing.map(laneCard).join("")}</div></section>` : ""}
     ${readySec(S.ready)}
     ${queuedSec(S.queued)}
     ${flightSec(S.flight)}
@@ -1626,6 +1642,92 @@ function viewPipeline() {
     ${foundSec(S.found)}
     ${closedSec(S.closed)}
   </div>`;
+}
+
+// Follow-up dates are calendar dates in the owner's timezone.
+const TRACK_OUTCOMES = [["", "No outcome set"], ["waiting", "Waiting for response"],
+  ["interview", "Interview"], ["offer", "Offer"], ["rejected", "Rejected"], ["withdrawn", "Withdrawn"]];
+function followupDue(note, today = dayKey(new Date().toISOString())) {
+  return !!note?.follow_up && note.follow_up <= today
+    && !["offer", "rejected", "withdrawn"].includes(note.outcome);
+}
+function trackerRows(rows) {
+  return rows.filter((r) => {
+    const date = dayKey(r.applied_at), note = state.tracker[r.pk] || {};
+    return (!state.appFrom || (date && date >= state.appFrom))
+      && (!state.appTo || (date && date <= state.appTo))
+      && (!state.appOutcome || note.outcome === state.appOutcome)
+      && (!state.appDue || followupDue(note));
+  });
+}
+function trackerEditor(r) {
+  const note = state.trackerDrafts[r.pk] || state.tracker[r.pk] || {};
+  if (!state.trackerLoaded && !DEMO) return `<section class="section tracker-editor"><div class="section-t">Your application tracker</div><p class="tracker-hint">Loading private notes…</p></section>`;
+  return `<section class="section tracker-editor" data-tracker-pk="${esc(r.pk)}">
+    <div class="section-t">Your application tracker</div>
+    <p class="tracker-hint">Private notes and outcomes. Follow-up reminders appear here when due.</p>
+    <div class="tracker-fields"><label class="pf-f"><span class="pf-l">Outcome</span><select class="cp-search" data-track="outcome">${TRACK_OUTCOMES.map(([v,l]) => `<option value="${v}" ${note.outcome === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label class="pf-f"><span class="pf-l">Follow up on</span><input type="date" class="cp-search" data-track="follow_up" value="${esc(note.follow_up || "")}"></label></div>
+    <label class="pf-f"><span class="pf-l">Notes</span><textarea class="cp-search" rows="4" maxlength="10000" data-track="notes" placeholder="Recruiter, interview details, or your next step…">${esc(note.notes || "")}</textarea></label>
+    <div class="tracker-actions"><span id="tracker-state" role="status">${state.trackerDrafts[r.pk] ? "Unsaved changes" : ""}</span><button class="btn" data-save-tracker="${esc(r.pk)}" ${state.trackerSaving.has(r.pk) ? "disabled" : ""}>Save tracker</button></div>
+  </section>`;
+}
+async function loadTracker() {
+  if (DEMO) return;
+  try {
+    const r = await fetch(api("/application-tracker"), { headers: auth.header() });
+    if (!r.ok) throw Error();
+    state.tracker = (await r.json()).items || {};
+    state.trackerLoaded = true;
+    const editor = $(".tracker-editor"), row = state.apps.find((r) => r.pk === state.openPk);
+    if (editor && row && !state.trackerDrafts[row.pk]) editor.outerHTML = trackerEditor(row);
+    renderFollowups();
+    if (state.tab === "apps") renderPane();
+  } catch {
+    state.trackerLoaded = false;
+    const editor = $(".tracker-editor");
+    if (editor && !state.trackerDrafts[state.openPk]) editor.innerHTML = `<p class="tracker-hint">Could not load notes. Close and reopen this application to retry.</p>`;
+  }
+}
+function renderFollowups() {
+  const button = $("#btn-followups");
+  if (!button) return;
+  const n = Object.values(state.tracker).filter((x) => followupDue(x)).length;
+  button.hidden = !n;
+  button.textContent = `${n} follow-up${n === 1 ? "" : "s"} due`;
+}
+async function saveTracker(pk) {
+  if (demoGuard() || state.trackerSaving.has(pk)) return;
+  if (!state.trackerLoaded) { toast("Tracker could not load. Reopen this application to retry."); return; }
+  const draft = { ...(state.trackerDrafts[pk] || state.tracker[pk] || {}) };
+  state.trackerSaving.add(pk);
+  const button = $("[data-save-tracker]"), status = $("#tracker-state");
+  if (button) button.disabled = true;
+  if (status) status.textContent = "Saving…";
+  const result = await post(`/application-tracker/${encodeURIComponent(pk)}`, draft);
+  state.trackerSaving.delete(pk);
+  if (result?.ok) {
+    state.tracker[pk] = result.item;
+    if (JSON.stringify(state.trackerDrafts[pk] || {}) === JSON.stringify(draft)) delete state.trackerDrafts[pk];
+    if (state.openPk === pk && status) status.textContent = state.trackerDrafts[pk] ? "Newer edits are not saved yet." : "Saved";
+    renderFollowups(); renderPane();
+  } else if (state.openPk === pk && status) status.textContent = result?.error || "Could not save. Your edits are kept.";
+  if (button) button.disabled = false;
+}
+async function loadHealth() {
+  const box = $("#setup-health"), button = $("#btn-health");
+  if (state.healthLoading) return;
+  state.healthLoading = true; button.disabled = true; box.hidden = false;
+  const heading = `<div class="preferences-heading"><h2>Setup check</h2><button class="iconbtn" data-close-health aria-label="Close setup check">✕</button></div>`;
+  box.innerHTML = heading + "Checking setup…";
+  try {
+    const response = await fetch(api("/setup-health"), { headers: auth.header() });
+    if (!response.ok) throw Error();
+    const data = await response.json();
+    box.innerHTML = heading + (data.checks || []).map((c) => `<div class="health-item"><span class="health-state ${esc(c.state)}">${c.state === "ready" ? "✓" : c.state === "check" ? "○" : "!"}</span><div><b>${esc(c.name)}</b><p>${esc(c.detail)}</p></div></div>`).join("");
+
+  } catch { box.innerHTML = heading + `<p class="tracker-hint">Could not check setup. Make sure AppliedIn is running, then try again.</p>`; }
+  finally { state.healthLoading = false; button.disabled = false; }
 }
 
 // --- Applications table ----------------------------------------------------
@@ -1637,7 +1739,7 @@ function viewApps() {
     `<button class="chip" data-filter="${k}" aria-selected="${state.filter === k}">
       ${label}<span class="n">${counts[k]}</span></button>`).join("");
   const pred = FILTERS.find(([k]) => k === state.filter)[2];
-  const allRows = visible(state.apps.filter(pred));
+  const allRows = trackerRows(visible(state.apps.filter(pred)));
   // Paginate. All 1737 rows at once produced 1.1MB of DOM and blocked the main
   // thread for 145ms on every switch to this tab and every re-render after it,
   // which is exactly what makes a click feel dead. Every other lane on this board
@@ -1657,7 +1759,7 @@ function viewApps() {
     return `<tr data-pk="${esc(r.pk)}">
       <td>${tagHtml(r.status)}</td>
       <td class="t-co">${esc(r.company)}</td>
-      <td class="t-role" title="${esc(r.title)}"><span class="t-role-t">${esc(r.title)}</span>${["applied", "applied_manual"].includes(r.status) ? appliedProfHtml(r) : ""}${againHtml(r)}</td>
+      <td class="t-role" title="${esc(r.title)}"><span class="t-role-t">${esc(r.title)}</span>${["applied", "applied_manual"].includes(r.status) ? appliedProfHtml(r) : ""}${againHtml(r)}${state.tracker[r.pk]?.outcome ? `<span class="tracker-outcome">${esc(TRACK_OUTCOMES.find(([v]) => v === state.tracker[r.pk].outcome)?.[1] || "")}</span>` : ""}${state.tracker[r.pk]?.follow_up ? `<span class="tracker-followup ${followupDue(state.tracker[r.pk]) ? "due" : ""}">Follow up ${esc(state.tracker[r.pk].follow_up)}</span>` : ""}</td>
       <td>${scoreHtml(r.match_score)}</td>
       <td><span class="t-links">${cv}${jd}${sc}</span></td>
       <td class="t-when t-applied">${["applied", "applied_manual"].includes(r.status)
@@ -1668,10 +1770,12 @@ function viewApps() {
   const empty = !state.apps.length
     ? `<div class="empty"><div class="empty-big">No applications yet</div>
         Click <b>Discover</b> above to find and queue jobs,<br>
-        then <b>Process applications</b> to score, tailor and apply.</div>`
+        then <b>Prepare for review</b> to score and tailor your résumé.</div>`
     : (rows.length ? "" : (filtersActive() ? emptyFiltered()
         : `<div class="empty">Nothing under this status filter yet.</div>`));
   return `<div class="chips">${chips}</div>
+    <div class="tracker-filters"><label>Applied from<input class="cp-search" type="date" data-app-filter="appFrom" value="${esc(state.appFrom)}"></label><label>Through<input class="cp-search" type="date" data-app-filter="appTo" value="${esc(state.appTo)}"></label><label>Outcome<select class="cp-search" data-app-filter="appOutcome"><option value="">Any outcome</option>${TRACK_OUTCOMES.slice(1).map(([v,l]) => `<option value="${v}" ${state.appOutcome === v ? "selected" : ""}>${l}</option>`).join("")}</select></label><label class="tracker-due-toggle"><input type="checkbox" data-app-filter="appDue" ${state.appDue ? "checked" : ""}>Follow-ups due</label><button class="cp-lk" data-clear-tracker>Clear</button><span class="tracker-count">${allRows.length} results</span></div>
+    ${state.appFrom && state.appTo && state.appFrom > state.appTo ? `<p class="tracker-hint">The start date must be before the end date.</p>` : ""}
     <div class="tablewrap"><table class="data applications-table">
       <colgroup><col class="col-status"><col class="col-company"><col>
         <col class="col-match"><col class="col-links"><col class="col-applied"><col class="col-updated"></colgroup>
@@ -3270,6 +3374,34 @@ async function offerRestart(label, retry, blockedBy = "discover", again = false)
   setTimeout(() => retry(true), 800);   // let both guards clear first
 }
 
+function beginLaunch(key, label) {
+  if (state.requests.has(key)) return false;
+  state.requests.add(key);
+  state.launch = { key, label, at: Date.now(), accepted: false };
+  renderDeck();
+  return true;
+}
+function finishLaunch(key, result) {
+  state.requests.delete(key);
+  if (state.launch?.key === key) {
+    state.launch.accepted = !!result?.ok;
+    state.launch.label = result?.ok ? "Request accepted — starting work…"
+      : result?.error || "Could not start. Check the connection and try again.";
+  }
+  renderDeck();
+}
+function renderLaunch() {
+  const box = $("#action-status");
+  if (!box) return;
+  const launch = state.launch;
+  if (!launch) { box.hidden = true; return; }
+  const active = launch.key === "prepare" ? state.stats.processing : (state.stats.scanning || []).length;
+  if (launch.accepted && active) { state.launch = null; box.hidden = true; return; }
+  box.hidden = false;
+  box.textContent = launch.label;
+  box.setAttribute("aria-busy", String(state.requests.has(launch.key)));
+}
+
 async function runDiscover(again = false) {
   // Same reasoning as runFreshScan: `discovering` is true whenever ANY company is
   // being scanned, and scans are per company now, so bailing here made one running
@@ -3300,12 +3432,14 @@ async function runDiscover(again = false) {
   // published within it, and is omitted for "Any age" so the payload — and the
   // behaviour — stay exactly what they were before the window existed.
   const hours = Number(state.scanHours) || 0;
-  state.stats.discovering = true;   // optimistic; poll confirms
+  if (!beginLaunch("discover", "Starting scan — contacting AppliedIn…")) return;
+  state.stats.discovering = true;
   renderDeck();
   const profile = ($("#cp-profile") || {}).value || "";
   const body = { companies: scope, profile_id: profile };
   if (hours) body.hours = hours;
   const d = await post("/actions/discover", body);
+  finishLaunch("discover", d);
   if (d?.ok) closeAllPickers();
   const winNote = hours ? ` Only postings from ${scanWindowText(hours)} count.` : "";
   if (d && d.status === "already_running") offerRestart("the scan", () => runDiscover(true), d.blocked_by, again);
@@ -3347,10 +3481,13 @@ async function runFreshScan() {
     toast(`Starting ${companies.length}. The rest are already scanning.`);
   }
   const hours = Number(state.freshHours) || 0;
-  state.freshNote = "";
+  if (!beginLaunch("fresh", "Starting selected scans…")) return;
+  state.freshNote = "Starting scan…";
   state.stats.discovering = true;   // optimistic; poll confirms
   renderDeck(); renderPane();
   const d = await post("/actions/discover", { companies, profile_id: "", hours });
+  finishLaunch("fresh", d);
+  state.freshNote = d?.ok ? "Scan accepted. Results appear as each company finishes." : "Could not start the scan.";
   if (d && d.status === "already_running") {
     const who = Array.isArray(d.companies) && d.companies.length ? d.companies : companies;
     state.freshNote = (who.length <= 3
@@ -3374,7 +3511,10 @@ async function runFreshScan() {
 
 async function runCompany(name, careersUrl, again = false, silent = false) {
   if (demoGuard()) return;
+  const key = `company:${name.toLowerCase()}`;
+  if (!beginLaunch(key, `Starting ${name} — finding the careers page…`)) return;
   const d = await post("/actions/run-company", { name, careers_url: careersUrl || "" });
+  finishLaunch(key, d);
   if (d?.ok && !silent) closeAllPickers();
   if (d && d.status === "already_running") {
     // A scan the OWNER asked for may interrupt to ask. One this scheduled itself
@@ -3393,15 +3533,18 @@ async function runProcess(again = false) {
   if (!state.picked.size) { toast("Select at least one company to process."); return; }
   const n = state.stats.found_waiting ?? 0;
   const scope = discoverScope();  // same picked companies as Discover
+  if (!beginLaunch("prepare", "Starting preparation — matching jobs and preparing résumés…")) return;
   state.stats.processing = true;    // optimistic; poll confirms
   renderDeck();
+  renderPane();
   const d = await post("/actions/process", { companies: scope });
+  finishLaunch("prepare", d);
   if (d?.ok) closeAllPickers();
   if (d && d.status === "already_running") offerRestart("processing", (a) => runProcess(a), d.blocked_by, again);
   else if (d && d.ok) toast(scope.length
-    ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · apply.`
-    : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · apply.`
-        : "Processing run started.");
+    ? `Processing ${scope.length <= 3 ? scope.join(", ") : `${scope.length} companies`} only — score · tailor · review.`
+    : n ? `Processing ${n} waiting job${n === 1 ? "" : "s"} — score · tailor · review.`
+        : "Preparation started. Review the résumés before applying.");
   else {
     state.stats.processing = false; renderDeck();
     if (d?.error) toast(d.error);
@@ -3712,6 +3855,7 @@ async function resetPipeline() {
 
 // --- detail drawer ---------------------------------------------------------
 function openDrawer(pk) {
+  if (!state.trackerLoaded) loadTracker();
   const r = state.apps.find((a) => a.pk === pk);
   if (!r) return;
   const links = [["JD", r.jd_url], ["Resume PDF", r.resume_url], ["Screenshot", r.screenshot_url]]
@@ -3835,6 +3979,7 @@ function openDrawer(pk) {
     : "";
 
   $("#drawer-body").innerHTML = `
+    ${trackerEditor(r)}
     ${gate}
     ${failBlock}
     ${jdBlock}
@@ -4310,7 +4455,7 @@ async function reviveDead(pk) {
 // button is unreachable — scrolling over the popover scrolls the list inside it,
 // not the page. Call on open, and again on resize while it is open.
 const fitPopover = (el) => {
-  if (!el || el.hidden) return;
+  if (!el || el.hidden || el.classList.contains("preferences-drawer")) return;
   el.style.removeProperty("--pop-max");           // measure unclamped
   const top = el.getBoundingClientRect().top;
   el.style.setProperty("--pop-max", `${Math.max(220, window.innerHeight - top - 12)}px`);
@@ -4320,6 +4465,67 @@ window.addEventListener("resize", () => {
 });
 
 function wire() {
+  // A backdrop-filter on the deck traps fixed descendants inside its short height.
+  // Mount dialogs at the page root so their dimensions belong to the viewport.
+  $$(".preferences-drawer, #setup-health").forEach((el) => document.body.appendChild(el));
+  $("#btn-review").addEventListener("click", () => {
+    state.tab = "pipeline"; state.coFilter = ""; state.query = ""; state.locFilter = "";
+    $("#co-filter").value = ""; $("#search").value = "";
+    renderTabs(); renderPane(); $(".ps-ready")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#setup-health").addEventListener("click", (e) => {
+    if (e.target.closest("[data-close-health]")) $("#setup-health").hidden = true;
+  });
+  $("#btn-health").addEventListener("click", () => {
+    $("#menu").hidden = true;
+    if (!$("#setup-health").hidden && !state.healthLoading) $("#setup-health").hidden = true;
+    else loadHealth();
+  });
+  $("#btn-followups").addEventListener("click", () => {
+    state.tab = "apps"; state.filter = "all"; state.appDue = true; state.appFrom = state.appTo = state.appOutcome = "";
+    state.coFilter = state.query = ""; $("#co-filter").value = ""; $("#search").value = "";
+    renderTabs(); renderPane();
+  });
+  $("#scan-now").addEventListener("click", async (e) => {
+    const button = e.target.closest("[data-stop-company]");
+    if (!button || demoGuard()) return;
+    button.disabled = true; button.textContent = "Stopping…";
+    const result = await post("/actions/stop-company", { name: button.dataset.stopCompany });
+    if (!result?.ok) { button.disabled = false; toast("That scan already finished, or could not be stopped. Refreshing status."); }
+    pollStats();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const drawer = $(".preferences-drawer:not([hidden])");
+    if (!drawer) return;
+    const controls = $$("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href]", drawer).filter((x) => x.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (e.shiftKey && (document.activeElement === first || !drawer.contains(document.activeElement))) { e.preventDefault(); last?.focus(); }
+    else if (!e.shiftKey && (document.activeElement === last || !drawer.contains(document.activeElement))) { e.preventDefault(); first?.focus(); }
+  });
+  $("#drawer").addEventListener("input", (e) => {
+    const field = e.target.dataset.track;
+    if (!field) return;
+    const pk = e.target.closest("[data-tracker-pk]").dataset.trackerPk;
+    const draft = state.trackerDrafts[pk] ||= { ...(state.tracker[pk] || {}) };
+    draft[field] = e.target.value;
+    $("#tracker-state").textContent = "Unsaved changes";
+  });
+  $("#drawer").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-save-tracker]");
+    if (button) saveTracker(button.dataset.saveTracker);
+  });
+  $("#pane").addEventListener("change", (e) => {
+    const field = e.target.dataset.appFilter;
+    if (!field) return;
+    state[field] = field === "appDue" ? e.target.checked : e.target.value;
+    delete state.page.appsTable; renderPane();
+  });
+  $("#pane").addEventListener("click", (e) => {
+    if (!e.target.closest("[data-clear-tracker]")) return;
+    state.appFrom = state.appTo = state.appOutcome = ""; state.appDue = false;
+    delete state.page.appsTable; renderPane();
+  });
   $("#btn-discover").addEventListener("click", async () => {
     const scope = discoverScope();
     for (const co of state.companies) {
@@ -4366,6 +4572,8 @@ function wire() {
     coBtn.setAttribute("aria-expanded", String(show));
     coBtn.classList.toggle("open", show);
     if (show) {
+      closeAllPickers(); picker.hidden = false;
+      coBtn.setAttribute("aria-expanded", "true");
       fitPopover(picker);
       // The per-company pane offers an identity dropdown, and profiles are only
       // fetched when the Profiles panel is opened — so without this the dropdown
@@ -4376,6 +4584,8 @@ function wire() {
     }
   });
   picker.addEventListener("click", (e) => e.stopPropagation());
+  $("#cp-close").addEventListener("click", closePicker);
+  $("#cp-shared").addEventListener("click", () => { closePicker(); $("#btn-prefs").click(); });
   $("#cp-search").addEventListener("input", (e) => {
     state.coQuery = e.target.value;
     renderPicker();
@@ -4565,6 +4775,11 @@ function wire() {
     }
   });
   $("#cp-detail").addEventListener("click", async (e) => {
+    if (e.target.closest("#cp-dt-cancel")) {
+      if (state.cpSaving) return;
+      delete state.cpDrafts[(state.detailCo || "").toLowerCase()];
+      renderDetail(true); return;
+    }
     // Rotate & approve: re-point what is in flight, then queue it. One press,
     // because doing the two halves separately queues jobs under the address
     // being retired.
@@ -5025,7 +5240,7 @@ function wire() {
     $$("input, textarea, button", pf).forEach((el) => { el.disabled = locked; });
   };
   const closePf = () => {
-    if (!pf.hidden) { pf.hidden = true; pfBtn.setAttribute("aria-expanded", "false"); }
+    if (!pf.hidden) { pf.hidden = true; pfBtn.setAttribute("aria-expanded", "false"); pfBtn.focus(); }
   };
   const csv = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
   const loadPrefs = async () => {
@@ -5034,6 +5249,7 @@ function wire() {
     lockPrefs(true);
     try {
       const r = await fetch(api("/preferences"), { headers: auth.header() });
+      if (!r.ok) throw Error("Preferences unavailable");
       const p = (await r.json()) || {};
       $("#pf-titles").value = (p.titles || []).join(", ");
       $("#pf-include").value = (p.include_keywords || []).join(", ");
@@ -5092,15 +5308,18 @@ function wire() {
     const show = pf.hidden;
     pf.hidden = !show;
     pfBtn.setAttribute("aria-expanded", String(show));
-    if (show) { fitPopover(pf); loadPrefs(); $("#pf-titles").focus(); }
+    if (show) { closeAllPickers(); pf.hidden = false; pfBtn.setAttribute("aria-expanded", "true"); fitPopover(pf); loadPrefs(); $("#pf-titles").focus(); }
   });
   pf.addEventListener("click", (e) => e.stopPropagation());
   pf.addEventListener("input", () => { prefsDirty = true; });
   pf.addEventListener("change", () => { prefsDirty = true; });
   document.addEventListener("click", (e) => {
-    if (!pf.hidden && !e.target.closest(".prefmgr")) closePf();
+    // Preferences close through their own close button or Escape.
   });
   $("#pf-save").addEventListener("click", savePrefs);
+  $("#pf-close").addEventListener("click", closePf);
+  $("#pf-company").addEventListener("click", () => { closePf(); coBtn.click(); });
+  $("#pf-cancel").addEventListener("click", () => { prefsDirty = false; loadPrefs(); $("#pf-state").textContent = "Edits cancelled."; });
 
   const sp = $("#skippicker"), spBtn = $("#btn-skips");
   const closeSp = () => {
@@ -5694,7 +5913,7 @@ function wire() {
   });
   document.addEventListener("click", (e) => {
     if (!menu.hidden && !e.target.closest(".menu-wrap")) closeMenu();
-    if (!picker.hidden && !e.target.closest(".disco")) closePicker();
+    // The company drawer stays open while editing.
   });
   $("#m-pause").addEventListener("click", () => { togglePause(); closeMenu(); });
   $("#m-mode").addEventListener("click", () => { toggleMode(); closeMenu(); });
@@ -5710,7 +5929,8 @@ function wire() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (e.target.tagName === "SELECT") return; // let the native dropdown close first
-    if (!$("#rmodal").hidden) closeResume();
+    if (!$("#setup-health").hidden) $("#setup-health").hidden = true;
+    else if (!$("#rmodal").hidden) closeResume();
     else if (!$("#drawer").hidden) closeDrawer();
     else if (!picker.hidden) closePicker();
     else if (!pf.hidden) closePf();
@@ -5743,6 +5963,7 @@ async function boot() {
     renderAll();
   }
   loadCompanies().catch(() => {});
+  loadTracker();
   loadQueue();   // the workbar badge needs a first read; after this it only
                  // refreshes on events, or every 3s while the panel is open
   if (!DEMO) {

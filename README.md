@@ -193,12 +193,21 @@ predictable.
 Then:
 
 1. Press **Discover** to fetch and queue matching roles.
-2. Press **Process applications** to score and tailor the discovered backlog.
-3. Review jobs in the **Tailored** lane.
+2. Press **Prepare résumés** to score and tailor the discovered backlog. This action
+   stops before applying, including when automatic mode is enabled.
+3. Review jobs in the **Ready to apply** lane.
 4. Press **Apply** only when the resume and job details look right.
 
 The daemon also schedules discovery every six hours by default. Change
 `APPLIEDIN_DISCOVER_INTERVAL_SEC` in `.env` if needed.
+
+You can edit shared or company-specific preferences with explicit Save and Cancel
+controls. Discovery shows progress per company, with a separate Stop action. In
+**Applications**, filter by application date or outcome, and open a job to keep
+private notes and a follow-up date. Due reminders appear in the dashboard; they
+do not send emails or notifications outside the app. **Settings → Check setup**
+checks configuration and installed tools; live credentials and the Chrome
+connection are verified when those tools are used.
 
 ## Add application facts
 
@@ -288,7 +297,7 @@ visible and filterable.*
    not dropped, then compile a PDF. A failed validation goes back for repair.
 5. **Critique.** The critic agent evaluates the tailored resume. It either exits
    the loop or sends one focused revision back to the tailor.
-6. **Gate.** The completed resume waits in the **Tailored** lane. Gated mode
+6. **Gate.** The completed resume waits in the **Ready to apply** lane. Gated mode
    requires a person to approve it; missing facts always become human questions.
 7. **Apply.** After approval, the browser agent opens the posting in the user's
    browser, fills fields from approved facts, uploads the tailored resume, and
@@ -422,7 +431,7 @@ use `pdflatex` when it is installed.
 
 ### A role stays in `found`
 
-The role has been discovered but not processed. Press **Process applications**
+The role has been discovered but not processed. Press **Prepare résumés**
 or run:
 
 ```bash

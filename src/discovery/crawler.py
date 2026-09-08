@@ -30,6 +30,7 @@ import httpx
 from core.logging import get_logger
 from core.models import DiscoveryMode, JobRecord
 
+from . import progress
 from .relevance import relevant
 from .resolver import detect_from_page
 from .sitemap import sitemap_jobs
@@ -60,6 +61,7 @@ def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobReco
 
     from .chrome_crawl import find_jobs_sync
 
+    progress.record(stage="Reading careers page in Chrome")
     jobs, board, note = find_jobs_sync(
         company, url, prefs=prefs,
         model=(getattr(get_settings(), "chrome_model", "") or ""))
@@ -69,6 +71,7 @@ def _browser_extract(url: str, company: str, prefs: Preferences) -> list[JobReco
         log.info("%s: careers page is a %s wrapper — switch it to feed mode in "
                  "watchlist.yaml", company, board)
     if note:
+        progress.record(note=note[:160])
         log.info("%s: %s", company, note[:200])
     # Relative links normalised so dedup and the clickable URL agree.
     for j in jobs:
@@ -243,6 +246,9 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
                              f"{undated} role(s) cannot show under Fresh. They are "
                              f"on the Pipeline board under Found."))
 
+    progress.record(relevant=len(jobs))
+    if progress.cancelled():
+        return 0
     already = seen.load()
     jobs = [j for j in jobs if j.jd_url not in already]
 
@@ -273,6 +279,7 @@ def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any) 
     found = sitemap_jobs(company.careers_url, company.name)
     if not found:
         return None
+    progress.record(found=len(found), stage="Matching preferences")
     jobs = relevant(found, prefs)
     _note_screened_out(stores, company.name, found, jobs)
     log.info("%s: the sitemap lists %d posting(s), %d relevant — the browser crawl "
@@ -282,7 +289,8 @@ def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any) 
         before = len(jobs)
         jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
-    return _enqueue(company, jobs, stores)
+    progress.record(relevant=len(jobs), stage="Saving new matches")
+    return 0 if progress.cancelled() else _enqueue(company, jobs, stores)
 
 
 def crawl_company(
@@ -347,6 +355,7 @@ def crawl_company(
             if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
                 return listed
         found = _browser_extract(company.careers_url, company.name, prefs)
+        progress.record(found=len(found), stage="Matching preferences")
         jobs = relevant(found, prefs)
         _note_screened_out(stores, company.name, found, jobs)
         # Three outcomes that a single "0 new" line used to blur together, and
@@ -366,7 +375,8 @@ def crawl_company(
         kws = _flags.company_filter(company.name)
         if kws:
             jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
-        return _enqueue(company, jobs, stores)
+        progress.record(relevant=len(jobs), stage="Saving new matches")
+        return 0 if progress.cancelled() else _enqueue(company, jobs, stores)
 
     # If the page actually embeds a known ATS, we shouldn't be here — log it so
     # the watchlist can be corrected to feed mode.
@@ -379,6 +389,7 @@ def crawl_company(
     extracted = extract(html, company.name)
     from tools import seen
 
+    progress.record(found=len(extracted), stage="Matching preferences")
     jobs = relevant(extracted, prefs)
     _note_screened_out(stores, company.name, extracted, jobs)
     # Nothing relevant may mean an unrendered listing; try the browser before
@@ -396,6 +407,7 @@ def crawl_company(
         by_url = {j.jd_url: j for j in extracted}
         by_url.update({j.jd_url: j for j in seen_by_browser})
         extracted = list(by_url.values())
+        progress.record(found=len(extracted), stage="Matching preferences")
         jobs = relevant(extracted, prefs)
         _note_screened_out(stores, company.name, extracted, jobs)
 
@@ -416,4 +428,5 @@ def crawl_company(
         jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
 
-    return _enqueue(company, jobs, stores)
+    progress.record(relevant=len(jobs), stage="Saving new matches")
+    return 0 if progress.cancelled() else _enqueue(company, jobs, stores)

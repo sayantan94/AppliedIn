@@ -16,7 +16,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import re
-from urllib.parse import parse_qsl, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlparse, urlunparse
 
 import httpx
 
@@ -164,9 +164,11 @@ def is_job_url(url: str) -> bool:
 def _title_from(url: str) -> str:
     p = urlparse(url)
     parts = [s for s in p.path.split("/") if s]
+    parts = [unquote(s) for s in parts]
     words_of = lambda s: [w for w in _WORD_RX.split(s) if w and not w.isdigit()]  # noqa: E731
     best = ""
     for s in parts:
+        s = re.sub(r"^\d{3,}[-_](?=[A-Za-z])", "", s)
         if s.lower() in _JOB_SEGMENTS or s.lower() in _NOT_JOB or _ID_RX.match(s):
             continue
         if len(words_of(s)) > len(words_of(best)):

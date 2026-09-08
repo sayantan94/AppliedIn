@@ -55,7 +55,7 @@ def make_pk(company: str, job_id: str) -> str:
 # was used, every one of Meta's postings was treated as bookkeeping: hidden from
 # the board, left out of the status index, never swept. The kinds are registered
 # here and a test scans the source so a new one cannot be written unregistered.
-INTERNAL_KINDS = ("watermark", "run", "profiles", "prefs", "dailycap", "undated", "age")
+INTERNAL_KINDS = ("watermark", "run", "profiles", "prefs", "dailycap", "undated", "age", "tracker")
 
 
 def is_internal_pk(pk: str) -> bool:

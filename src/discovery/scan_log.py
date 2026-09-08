@@ -50,14 +50,14 @@ def start_run(client: Any, total: int) -> None:
         log.debug("could not start the scan log", exc_info=True)
 
 
-def finished(client: Any, company: str, *, found: int, relevant: int,
+def finished(client: Any, company: str, *, found: int | None, relevant: int | None,
              enqueued: int, seconds: float, note: str = "") -> None:
     """Record one company's completed scan."""
     if client is None:
         return
     try:
-        row = {"company": company, "at": time.time(), "seconds": round(seconds, 1),
-               "found": int(found), "relevant": int(relevant),
+        row = {"version": 2, "company": company, "at": time.time(), "seconds": round(seconds, 1),
+               "found": found, "relevant": relevant,
                "enqueued": int(enqueued), "note": note[:160]}
         pipe = client.pipeline()
         pipe.lpush(_KEY, json.dumps(row))

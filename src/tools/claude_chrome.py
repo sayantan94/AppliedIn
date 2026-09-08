@@ -394,6 +394,11 @@ async def run_task(task: str, *, report_key: str, model: str = "",
         log.info("%s session waiting: %d application(s) are being filled",
                  kind, applies_running())
         while applies_running() and waited < _YIELD_MAX_S:
+            if kind == "crawl":
+                from discovery.progress import cancelled, record
+                record(stage="Waiting for active applications to finish")
+                if cancelled():
+                    return {}, "Stopped by you"
             await asyncio.sleep(_YIELD_POLL_S)
             waited += _YIELD_POLL_S
         if applies_running():
@@ -405,6 +410,11 @@ async def run_task(task: str, *, report_key: str, model: str = "",
         else:
             log.info("%s session waited %ds for the browser", kind, waited)
 
+    if kind == "crawl":
+        from discovery.progress import cancelled, record
+        if cancelled():
+            return {}, "Stopped by you"
+        record(stage="Reading careers page in Chrome")
     return await _run_task_impl(task, report_key=report_key, model=model,
                                 timeout_s=timeout_s, allow_dirs=allow_dirs, kind=kind)
 
@@ -467,17 +477,32 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _LIVE[proc.pid] = kind or "other"
+    async def watch_stop():
+        from discovery.progress import cancelled
+        while True:
+            if cancelled():
+                if proc.returncode is None:
+                    proc.terminate()
+                return
+            await asyncio.sleep(0.25)
+
+    watcher = asyncio.create_task(watch_stop()) if kind == "crawl" else None
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        log.warning("chrome session hit the %ds ceiling — killed", timeout_s)
         return {}, (f"{TIMEOUT_OPENING} {timeout_s // 60} minutes and was stopped. "
-                    "Check the tab it left open — it may have submitted. Raise the "
-                    "ceiling if this portal is simply slow.")
+                    "Check the tab it left open — it may have submitted.")
+    finally:
+        if watcher:
+            watcher.cancel()
+        _LIVE.pop(proc.pid, None)
+    if kind == "crawl":
+        from discovery.progress import cancelled
+        if cancelled():
+            return {}, "Stopped by you"
 
-    _LIVE.pop(proc.pid, None)
     stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
 
     # The REPORT FILE decides, before anything else. A session can do the whole

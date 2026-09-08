@@ -65,7 +65,9 @@
                 </svg>
               </button>
 
-              <div id="copicker" class="copicker copicker-wide" hidden>
+              <div id="copicker" class="copicker copicker-wide preferences-drawer" role="dialog" aria-modal="true" aria-label="Company preferences" hidden>
+                <div class="preferences-heading"><div><small>DISCOVERY SETTINGS</small><h2>Companies &amp; preferences</h2></div><button id="cp-close" class="iconbtn" aria-label="Close company preferences">✕</button></div>
+                <div class="preference-scope"><button id="cp-shared" class="chip">All companies</button><span class="chip active">This company</span></div>
                 <div class="cp-cols">
                   <div class="cp-col cp-col-list">
                     <div class="cp-head">
@@ -148,13 +150,13 @@
             </span>
 
             <button id="btn-process" class="act act-process"
-              title="Step 2 — score + tailor every “found” job, then apply the ones that qualify.">
+              title="Step 2 — prepare matching résumés for your review. Nothing is submitted.">
               <span class="act-spin" aria-hidden="true"></span>
               <svg class="act-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="M13.2 2.8 5.4 13h5.4l-1.2 8.2L18.6 11h-5.5l.1-8.2z"
                   stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
               </svg>
-              <span class="act-label" id="process-label">Process applications</span>
+              <span class="act-label" id="process-label">2 · Prepare for review</span>
               <span class="act-badge mono" id="proc-badge" title="found jobs waiting to be processed">0</span>
             </button>
           </div>
@@ -207,6 +209,7 @@
                   <span>Theme</span>
                   <span class="menu-state mono" id="m-theme-state">dark</span>
                 </button>
+                <button class="menu-item" id="btn-health"><span>Check setup</span></button>
                 <div class="menu-div"></div>
                 <button class="menu-item danger" id="m-reset"
                   title="Clears tracked jobs, queue, logs and stored artifacts. Keeps facts & logins.">
@@ -218,9 +221,10 @@
         </div>
 
         <p class="deck-help">
-          <b>Discover</b> finds new jobs from your company watchlist, then
-          <b>Process</b> scores them, tailors your résumé and applies.
+          <b>1 Discover</b> jobs. <b>2 Prepare</b> matching résumés. <button id="btn-review" class="deck-review">3 Review &amp; apply</button> when you’re ready.
         </p>
+        <div id="action-status" class="action-status" role="status" hidden></div>
+        <div id="setup-health" class="health-panel" role="dialog" aria-label="Setup check" hidden></div>
         <div class="deck-breakdown mono" id="breakdown"></div>
         <!-- Scan progress, visible from every tab: the ONE company being read
              right now with its clock, a bar for how far through the batch the
@@ -305,6 +309,7 @@
                   </div>
                 </div>
               </div>
+              <button id="btn-followups" class="skipbtn" hidden></button>
               <div class="qmgr" id="qmgr">
                 <button id="btn-queue" class="skipbtn queuebtn" aria-haspopup="true" aria-expanded="false"
                   title="Applications running now, the ones waiting their turn, and the ones that gave up">⇶ Apply queue<span
@@ -364,8 +369,10 @@
               <div class="prefmgr" id="prefmgr">
                 <button id="btn-prefs" class="skipbtn prefbtn" aria-haspopup="true" aria-expanded="false"
                   title="What counts as a match — titles, keywords, locations and the score bar">◎ Job preferences</button>
-                <div id="prefpicker" class="copicker prefpicker" hidden>
-                  <div class="cp-role-h">What counts as a match</div>
+                <div id="prefpicker" class="copicker prefpicker preferences-drawer" role="dialog" aria-modal="true" aria-label="Shared job preferences" hidden>
+                  <div class="preferences-heading"><div><small>SHARED DEFAULTS</small><h2>Job preferences</h2></div><button id="pf-close" class="iconbtn" aria-label="Close shared preferences">✕</button></div>
+                  <div class="preference-scope"><span class="chip active">All companies</span><button id="pf-company" class="chip">This company</button></div>
+                  <p class="preferences-explain">Used by every company unless you set a company-specific value.</p>
                   <div class="pf-body">
                     <label class="pf-f"><span class="pf-l">Target titles</span>
                       <input id="pf-titles" class="cp-search" type="text" autocomplete="off"
@@ -398,6 +405,7 @@
                   </div>
                   <div class="cp-role-foot">
                     <span id="pf-state">Applies to the next job scored.</span>
+                    <button id="pf-cancel" class="cp-lk" type="button">Cancel edits</button>
                     <button id="pf-save" class="cp-lk cp-add-btn" type="button">Save preferences</button>
                   </div>
                 </div>
