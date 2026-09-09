@@ -64,6 +64,7 @@ const state = {
   reviewCollapsed: localStorage.getItem("appliedin.reviewCollapsed") === "yes",
   reviewFilter: "active", reviewAnchor: null, reviewNotices: {},
   activityCollapsed: localStorage.getItem("appliedin.activityCollapsed") === "yes",
+  forcePreparing: new Set(),
   reviewPicked: new Set(), // final review: selection never authorizes submission
   reviewSkipped: new Set(),
   qPicked: new Set(),  // queued jobs ticked for a bulk Skip / Remove
@@ -1217,7 +1218,7 @@ function foundRow(r) {
     : `<span class="jr-score jr-none mono">·</span>`;
   return `<div class="jrow" data-open="${esc(r.pk)}" role="button" tabindex="0" title="Open details">
     ${sc}
-    <span class="jr-title">${esc(r.title)}</span>
+    <span class="jr-title">${esc(r.title)}${r.jd_read_error ? `<span class="jr-read-note" title="${esc(r.jd_read_error)}">Posting read paused · Open details</span>` : ""}</span>
     ${r.location ? `<span class="jr-loc" title="${esc(r.location)}">${esc(String(r.location).slice(0, 40))}</span>` : ""}
     ${postedHtml(r.posted_at)}
     <span class="jr-when mono">${r.updated_at ? esc(ago(r.updated_at)) : ""}</span>
@@ -1253,6 +1254,33 @@ function appliedRow(r) {
     <span class="jr-when jr-applied-date mono">${appliedDateHtml(r.applied_at)}</span>
   </div>`;
 }
+function canForceApply(r) {
+  return r.status === "skipped" && r.skip_reason === "low_score" && !r.confirmation_id;
+}
+function forceApplyButton(r, cls = "btn btn-primary") {
+  return canForceApply(r) ? `<button class="${cls}" data-act="force-apply" data-pk="${esc(r.pk)}" title="Bypass this role's match score, tailor the résumé, then review before submission"${state.forcePreparing.has(r.pk) ? " disabled" : ""}>Force apply</button>` : "";
+}
+async function forceApply(pk) {
+  const row = state.apps.find((r) => r.pk === pk);
+  if (demoGuard() || state.forcePreparing.has(pk) || !row || !canForceApply(row)) return;
+  if (!confirm(`Override the match score for ${row.title} at ${row.company}?\n\nThis will tailor the résumé and move this role into the Application queue for your final approval. It does not submit yet.`)) return;
+  state.forcePreparing.add(pk);
+  $$("[data-act=force-apply]").filter((b) => b.dataset.pk === pk).forEach((b) => { b.disabled = true; });
+  try {
+    const result = await post(`/actions/force-apply/${encodeURIComponent(pk)}`);
+    if (!result?.ok) { toast(result?.error || "Could not start preparation. Your role is unchanged."); return; }
+    row.score_override = true;
+    row.skip_reason = "";
+    markTailoring(pk);
+    toast("Score overridden — tailoring for your final review in the Application queue.");
+    pollStats();
+    scheduleReload();
+    return true;
+  } finally {
+    state.forcePreparing.delete(pk);
+    $$("[data-act=force-apply]").filter((b) => b.dataset.pk === pk).forEach((b) => { b.disabled = false; });
+  }
+}
 function closedRow(r) {
   const failed = isStuck(r);
   let act = "";
@@ -1263,6 +1291,7 @@ function closedRow(r) {
     act = `<button class="kc-retry kc-queue jr-act" data-act="queue-apply" data-pk="${esc(r.pk)}"
       title="Clear the failure and put this job back on the apply queue">↻ Requeue</button>`;
   }
+  if (canForceApply(r)) act = forceApplyButton(r, "kc-retry jr-act");
   if (r.review_rejected) act = `<button class="ps-link jr-act" data-review-undo-pk="${esc(r.pk)}" data-company="${esc(r.company)}">Undo rejection</button>`;
   const whyFull = r.closed_reason || r.fail_reason || r.skip_reason || "";
   const why = String(whyFull).replace(/\s+/g, " ").trim().slice(0, 90);
@@ -2861,6 +2890,7 @@ function appsSig() {
        + (a.applied_at || "") + "\u0001"
        + (a.gate_reason || "") + (a.gate_question ? "?" : "") + "\u0001"
        + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001"
+       + (a.jd_read_error || "") + "\u0001" + (a.score_override ? "o" : "") + "\u0001"
        + (a.profile_id || "") + "\u0001" + (a.review_skipped ? "s" : "") + (a.review_rejected ? "r" : "") + "\n";
   }
   return s;
@@ -3877,6 +3907,7 @@ function retailorFoot(pk, busy, kept) {
 
 function paneAction(act, pk, el) {
   if (demoGuard()) return;
+  if (act === "force-apply") { forceApply(pk); return; }
   if (act === "answer") {
     const t = $(`#pane textarea[data-answer-for="${CSS.escape(pk)}"]`);
     const answer = (t?.value || "").trim() || "approved";
@@ -4169,6 +4200,7 @@ function openDrawer(pk) {
       <div class="section-t">why it ${canRetry ? "failed" : "closed"}</div>
       <div class="closed-why">${esc(r.closed_reason)}</div>
       ${canRetry || canReopen ? `<div class="drawer-actions">
+        ${forceApplyButton(r)}
         ${canRetry ? `<button class="btn btn-primary" data-act="retry" data-pk="${esc(r.pk)}">Retry</button>` : ""}
         ${canReopen ? `<button class="btn btn-ghost" data-act="reopen" data-pk="${esc(r.pk)}"
           title="Put it back in play and score it again from scratch, using your preferences as they are now. Nothing is submitted.">↺ Reopen &amp; re-score</button>` : ""}
@@ -4197,7 +4229,7 @@ function openDrawer(pk) {
 
   const metaRows = [
     ["resume version", `<span class="mono">${esc(r.resume_version || "—")}</span>`],
-    ["match score", r.match_score != null ? `${r.match_score} / 10` : "—"],
+    ["match score", r.match_score != null ? `${r.match_score} / 10${r.score_override ? " · threshold overridden by you" : ""}` : "—"],
     r.ats ? ["ATS", esc(r.ats)] : null,
     r.mode ? ["mode", esc(r.mode)] : null,
     ["confirmation", `<span class="mono">${esc(r.confirmation_id || "—")}</span>`],
@@ -4223,6 +4255,7 @@ function openDrawer(pk) {
     ${trackerEditor(r)}
     ${gate}
     ${failBlock}
+    ${r.jd_read_error ? `<div class="section drawer-fail"><div class="section-t">Posting read paused</div><div class="fail-text">${esc(r.jd_read_error)}</div><p>Kept in Found. Run preparation again when the reader is available.</p></div>` : ""}
     ${jdBlock}
     ${closed}
     <div class="section"><div class="section-t">status</div>
@@ -6142,6 +6175,9 @@ function wire() {
     if (demoGuard()) return;
     const pk = act.dataset.pk;
     const kind = act.dataset.act;
+    if (kind === "force-apply") {
+      return forceApply(pk).then((started) => { if (started) closeDrawer(); });
+    }
     if (kind === "answer") {
       const answer = ($("#gate-answer")?.value || "").trim() || "approved";
       post(`/actions/resume/${encodeURIComponent(pk)}`, { answer });
@@ -6169,10 +6205,12 @@ function wire() {
         : "Skip this job"}? It moves to closed.`)) return;
       post(`/actions/skip/${encodeURIComponent(pk)}`);
       toast(st === "submitting" ? "Cancelled — moved to closed." : "Skipped.");
-    } else {
+    } else if (kind === "reopen" || kind === "mark-applied") {
+      paneAction(kind, pk, act);
+    } else if (kind === "skip") {
       post(`/actions/skip/${encodeURIComponent(pk)}`);
       toast("Skipped.");
-    }
+    } else return; // An unfamiliar drawer action must never silently skip a job.
     closeDrawer();
     scheduleReload();
   });

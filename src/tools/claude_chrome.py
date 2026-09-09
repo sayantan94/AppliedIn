@@ -149,6 +149,7 @@ def applies_running() -> int:
 TIMEOUT_OPENING = "The browser session was still working after"
 
 INFRA_OPENINGS = (
+    "The Claude browser reader has reached its usage limit",
     "Rate limited by the model API",
     "The model API returned",
     "The session was cut off",
@@ -242,6 +243,10 @@ def _envelope_reason(stdout: str, returncode: int | None = None) -> str:
     # connection failure sends the owner looking at their network when the answer
     # is that too much was being asked at once.
     if status == 429:
+        said = str(env.get("result") or "").strip()
+        if re.search(r"(?:session|usage|weekly) limit|hit your.*limit", said, re.I):
+            return ("The Claude browser reader has reached its usage limit: "
+                    + said + ". Retry after the limit resets.")
         return ("Rate limited by the model API partway through"
                 + (f", after {turns} steps" if turns else "")
                 + ". Nothing was submitted. This retries by itself; if it keeps "
@@ -557,7 +562,7 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
         # Naming it matters because the two need opposite responses — retry the
         # transport, investigate the page.
         why = _envelope_reason(stdout, proc.returncode)
-        if "Rate limited" in why:
+        if "Rate limited" in why or "usage limit" in why:
             # Same banner the orchestration rate limit uses. A single card saying
             # "rate limited" reads as bad luck; the banner is what makes a pattern
             # visible, and the pattern is the thing worth acting on.
@@ -565,9 +570,7 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
                 from core import flags
 
                 flags.note_llm_error(
-                    "browser", "Applications are being rate limited by the model "
-                    "API and cut off partway through. They retry by themselves. "
-                    "Lower how many run at once in the apply queue if it persists.")
+                    "browser", why)
             except Exception:  # noqa: BLE001 — a banner must never break an apply
                 log.debug("could not record the rate limit banner", exc_info=True)
         return {}, (why or "The Chrome session ended without a structured result, "

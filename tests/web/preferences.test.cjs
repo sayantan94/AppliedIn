@@ -457,3 +457,62 @@ test('phase filters preserve exact company scope and skip running roles in a ran
   assert.deepEqual(Array.from(h.context.reviewRows('OpenAI'), r=>r.pk), ['openai#reject']);
   assert.deepEqual(Array.from(h.context.reviewRows('Beta')), []);
 });
+
+test('Force apply is offered only for a low-score skip and confirms final review', async () => {
+  const h = reviewHarness();
+  const row = h.state.apps[0];
+  Object.assign(row, {status:'skipped',skip_reason:'low_score',match_score:6});
+  assert.match(h.context.closedRow(row), /data-act="force-apply"/);
+  let prompt;
+  h.context.confirm = message => { prompt=message; return false; };
+  await h.context.forceApply(row.pk);
+  assert.equal(h.requests.length, 0);
+  assert.match(prompt, /final approval/);
+  assert.match(prompt, /does not submit yet/);
+  h.context.confirm = () => true;
+  h.context.reply = async () => ({ok:true,next:"review"});
+  h.context.markTailoring = pk => { h.state.apps.find(r=>r.pk===pk).status='tailoring'; };
+  await h.context.forceApply(row.pk);
+  assert.deepEqual(h.requests, [{url:'/actions/force-apply/openai%23keep',body:undefined}]);
+  assert.equal(row.status, 'tailoring');
+  assert.equal(row.score_override, true);
+  row.status='skipped'; row.skip_reason='review_rejected';
+  assert.doesNotMatch(h.context.closedRow(row), /data-act="force-apply"/);
+});
+
+test('Force apply failures preserve the skipped role and repeated clicks do not widen scope', async () => {
+  const h=reviewHarness(), row=h.state.apps[0];
+  Object.assign(row,{status:'skipped',skip_reason:'low_score',match_score:6});
+  let finish;
+  h.context.reply=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=h.context.forceApply(row.pk);
+  await h.context.forceApply(row.pk);
+  assert.equal(h.requests.length,1);
+  finish({ok:false,error:'Reader unavailable'}); await pending;
+  assert.equal(row.status,'skipped');
+  assert.equal(h.state.forcePreparing.size,0);
+});
+
+test('posting read errors are visible in Found and trigger a refresh when the reader recovers', () => {
+  const h=reviewHarness(), row=h.state.apps[0];
+  Object.assign(row,{status:'found',jd_read_error:'Claude session limit resets at 10:10pm'});
+  assert.match(h.context.foundRow(row), /Posting read paused/);
+  assert.match(h.context.foundRow(row), /resets at 10:10pm/);
+  const before=h.context.appsSig(); row.jd_read_error='';
+  assert.notEqual(h.context.appsSig(),before);
+});
+
+test('drawer Force apply routes to preparation and unfamiliar actions never skip a role', async () => {
+  const h=reviewHarness(), row=h.state.apps[0];
+  Object.assign(row,{status:'skipped',skip_reason:'low_score',match_score:6});
+  h.context.reply=async()=>({ok:true,next:'review'});
+  h.context.markTailoring=()=>{}; h.context.closeDrawer=()=>{};
+  const start=source.indexOf('  $("#drawer").addEventListener("click", (e) => {');
+  const end=source.indexOf('  $("#scrim").addEventListener("click", closeDrawer);',start);
+  vm.runInContext(source.slice(start,end),h.context);
+  const click=kind=>h.node('#drawer').emit('click',{target:{closest:selector=>selector==='[data-act]'?{dataset:{act:kind,pk:row.pk}}:null}});
+  await click('force-apply');
+  assert.deepEqual(h.requests.map(r=>r.url),['/actions/force-apply/openai%23keep']);
+  await click('unrecognised-action');
+  assert.equal(h.requests.length,1);
+});

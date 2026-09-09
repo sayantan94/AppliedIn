@@ -236,7 +236,22 @@ def run_job(pk: str, stores: Any = None, *, prepare_only: bool = False) -> dict:
 
 async def _run_job_async(pk: str, row: dict, stores: Any, *,
                          prepare_only: bool = False) -> dict:
-    jd_text = await _jd_text(row)  # fetch the FULL JD (discovery only had the title)
+    from tools.jd import PostingReadUnavailable
+
+    try:
+        jd_text = await _jd_text(row)
+    except PostingReadUnavailable as exc:
+        from core.events import emit
+
+        detail = str(exc)
+        stores.tracking.set_status(pk, Status.FOUND, jd_read_error=detail,
+                                   fail_kind="", fail_reason="")
+        emit("response", pk=pk, detail=f"Posting read deferred: {detail}", url=row.get("jd_url"))
+        log.warning("posting read deferred for pk=%s: %s", pk, detail)
+        return {"result": "deferred", "pk": pk, "reason": "jd_reader_unavailable", "detail": detail}
+
+    if row.get("jd_read_error"):
+        stores.tracking.set_status(pk, Status.TAILORING, jd_read_error="")
 
     if _unreadable(jd_text):
         # A posting we could not read is a posting we must not tailor for. The
@@ -305,7 +320,12 @@ async def _jd_text(row: dict, *, yielding: bool = True) -> str:
     url = row.get("jd_url", "")
     if url and len(captured) < 400:  # looks like just a title — fetch the real thing
         kind = "jd_sweep" if yielding else "jd"
-        fetched = ((await asyncio.to_thread(_jd.fetch_jd, url, kind)) or "").strip()
+        try:
+            fetched = ((await asyncio.to_thread(_jd.fetch_jd, url, kind)) or "").strip()
+        except _jd.PostingReadUnavailable:
+            if _unreadable(captured):
+                raise
+            return captured
         # Never a downgrade. This used to return whatever the fetch produced, so a
         # refusal page replaced a perfectly good listing summary.
         if len(fetched) > len(captured):
@@ -352,7 +372,11 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
     if not need:
         return 0
     log.info("reading %d browser-only posting(s) before the sweep", len(need))
-    got, gone = _jd.read_postings([r["jd_url"] for r in need], with_gone=True)
+    try:
+        got, gone = _jd.read_postings([r["jd_url"] for r in need], with_gone=True)
+    except _jd.PostingReadUnavailable as exc:
+        log.warning("browser prefetch deferred: %s", exc)
+        return 0
     filled = closed = 0
     for r in need:
         if r["jd_url"] in gone:
@@ -366,7 +390,8 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
         text = got.get(r["jd_url"])
         if not text:
             continue
-        stores.tracking.set_status(r["pk"], r.get("status") or Status.FOUND, jd_text=text)
+        stores.tracking.set_status(r["pk"], r.get("status") or Status.FOUND,
+                                   jd_text=text, jd_read_error="")
         filled += 1
     log.info("browser prefetch filled %d and closed %d of %d posting(s)", filled, closed, len(need))
     return filled
@@ -818,7 +843,7 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         emit("error", pk=pk, agent="applier", url=jd_url,
              detail=f"could not read the posting ({exc}) — not submitted, try again")
         log.exception("JD fetch failed for pk=%s", pk)
-        return {"result": "error", "pk": pk, "reason": "jd_fetch_failed"}
+        return {"result": "error", "pk": pk, "reason": "jd_fetch_failed", "detail": str(exc)}
 
     if _no_sponsorship(jd_text):  # don't submit an application that's a guaranteed no
         from core.events import emit
@@ -1127,6 +1152,9 @@ def _score_gate(pk: str, text: str, stores: Any) -> dict | None:
     row = stores.tracking.get(pk) or {}
     stores.tracking.set_status(pk, row.get("status", "running"), match_score=score)
     threshold = _min_score()
+    if score < threshold and row.get("score_override") is True:
+        emit("response", pk=pk, detail=f"match {score}/10 < {threshold} — owner overrode the score; tailoring for review")
+        return None
     if score < threshold:
         stores.tracking.set_status(pk, Status.SKIPPED, skip_reason="low_score", match_score=score)
         emit("skipped", pk=pk, detail=f"match {score}/10 < {threshold} — skipped before tailoring")

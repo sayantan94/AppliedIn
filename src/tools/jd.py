@@ -3,12 +3,35 @@
 from __future__ import annotations
 
 import re
+import time
 
 import httpx
 
 from core.logging import get_logger
 
 log = get_logger(__name__)
+
+
+class PostingReadUnavailable(RuntimeError):
+    """The reader failed before it could establish what is on the page."""
+
+
+# A shared CLI outage must not launch another session for every row in a sweep.
+# HTTP/ATS reads still run; only the browser reader backs off for five minutes.
+_browser_retry: tuple[float, str] = (0, "")
+
+
+def _check_browser_reader() -> None:
+    if _browser_retry[0] > time.monotonic():
+        raise PostingReadUnavailable(_browser_retry[1])
+
+
+def _note_browser_problem(problem: str) -> None:
+    from tools.claude_chrome import is_infrastructure
+
+    global _browser_retry
+    if is_infrastructure(problem):
+        _browser_retry = (time.monotonic() + 300, problem)
 
 _TAG_RX = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.S | re.I)
 _TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
@@ -143,9 +166,12 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
     """
     from tools.claude_chrome import TAB_HYGIENE
 
-    ok, _ = available()
-    if not ok or not urls:
-        return {}
+    if not urls:
+        return ({}, set()) if with_gone else {}
+    _check_browser_reader()
+    ok, why = available()
+    if not ok:
+        raise PostingReadUnavailable(why)
 
     out: dict[str, str] = {}
     gone: set[str] = set()
@@ -171,6 +197,10 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
             continue
         if problem or not isinstance(report.get("postings"), list):
             log.warning("posting batch returned nothing usable: %s", problem or "no list")
+            if problem:
+                _note_browser_problem(problem)
+                if _browser_retry[0] > time.monotonic():
+                    break  # Keep earlier results, and defer unread rows below.
             continue
         wanted = set(chunk)
         for entry in report["postings"]:
@@ -223,9 +253,10 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
 
     from tools.claude_chrome import available, run_task
 
-    ok, _ = available()
+    _check_browser_reader()
+    ok, why = available()
     if not ok:
-        return None
+        raise PostingReadUnavailable(why)
     from tools.claude_chrome import TAB_HYGIENE
 
     task = (f"Open {url}, wait for it to load, and read the job posting.\n\n"
@@ -245,7 +276,9 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
                                              timeout_s=300, kind=kind))).result()
     if problem or not report:
         log.warning("could not read %s in the browser: %s", url, problem)
-        return None
+        why = problem or "The browser reader returned no posting report. Try reading it again."
+        _note_browser_problem(why)
+        raise PostingReadUnavailable(why)
     return {"title": str(report.get("title", ""))[:90],
             "text": str(report.get("description", ""))}
 

@@ -4436,3 +4436,5 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .review-status.applying { color: var(--scan); }
 .review-stop { margin-left: auto; }
 .review-row:has(.un-sel:disabled) .un-sel { cursor: default; }
+
+.jr-read-note { display: block; margin-top: 3px; font-size: 11px; color: var(--run); }

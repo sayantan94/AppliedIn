@@ -238,9 +238,11 @@ def _to_ui(row: dict, artifacts) -> dict:
         "title": row.get("title", ""),
         "status": row.get("status", ""),
         "match_score": row.get("match_score"),
+        "score_override": row.get("score_override") is True,
         "gate_reason": row.get("gate_reason"),
         "fail_kind": row.get("fail_kind") or "",
         "fail_reason": row.get("fail_reason") or "",
+        "jd_read_error": row.get("jd_read_error") or "",
         "tailored_at": row.get("tailored_at") or next(
             (e.get("at", "") for e in events if e.get("status") == "tailored"), ""),
         "retailored_at": row.get("retailored_at") or "",
@@ -1304,6 +1306,39 @@ def create_app() -> FastAPI:
 
         background.add_task(_run)
         return {"ok": True, "status": "running", "pk": pk}
+
+    @app.post("/actions/force-apply/{pk:path}")
+    def force_apply(pk: str, background: BackgroundTasks):
+        """Override only a low match score; tailoring still ends at final review."""
+        from core.apply_queue import ApplyQueue
+
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk) or {}
+        q = ApplyQueue(stores.tracking.r)
+        if (row.get("status") != "skipped" or row.get("skip_reason") != "low_score"
+                or row.get("confirmation_id") or pk in q.in_flight()
+                or any(item["pk"] == pk for item in q.pending())):
+            return {"ok": False, "error": "Force apply is only available for an unsent role skipped for a low match score."}
+        from datetime import datetime, timezone
+
+        stores.tracking.set_status(pk, Status.FOUND, score_override=True,
+                                   score_override_at=datetime.now(timezone.utc).isoformat(),
+                                   skip_reason="", fail_reason="", fail_kind="", error="")
+
+        def prepare() -> None:
+            from agent.run import run_job
+
+            try:
+                # Explicitly preparation-only even when automatic applying is on.
+                run_job(pk, stores, prepare_only=True)
+            except Exception:
+                import logging
+
+                logging.getLogger("server").exception("forced preparation failed for %s", pk)
+                stores.tracking.set_status(pk, Status.ERROR, error="Preparation failed — see Logs and retry.")
+
+        background.add_task(prepare)
+        return {"ok": True, "pk": pk, "status": "preparing", "next": "review"}
 
     @app.post("/actions/reopen/{pk:path}")
     def reopen(pk: str, background: BackgroundTasks):
