@@ -42,6 +42,8 @@ class TrackingStore(AbstractTracking):
             "location": job.location,
             "ats": job.ats,
             "attempts": 0,
+            "discovery_source": job.discovery_source,
+            "jd_text": job.jd_text if job.discovery_source == "career_ops" else "",
         }
         try:
             self._table.put_item(

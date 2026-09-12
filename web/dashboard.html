@@ -11,6 +11,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="career-board.css" />
     <link
       rel="icon"
       type="image/svg+xml"
@@ -248,23 +249,44 @@
           <div class="workbar">
             <nav class="tabs" id="tabs" aria-label="Views">
               <button class="tab active" data-tab="pipeline">Pipeline</button>
-              <button class="tab" data-tab="fresh">Fresh</button>
-              <button class="tab" data-tab="apps">Applications
-                <span class="tab-n mono" id="tab-n-apps">0</span></button>
+              <button class="tab" data-tab="find-jobs">Find jobs</button>
+              <button class="tab" data-tab="apps">Applications</button>
               <button class="tab" data-tab="needs">Needs you
                 <span class="tab-n mono amber" id="tab-n-needs" hidden>0</span></button>
-              <button class="tab" data-tab="stuck">Unable to do it
-                <span class="tab-n mono red" id="tab-n-stuck" hidden>0</span></button>
-              <button class="tab" data-tab="activity">Activity</button>
-              <button class="tab" data-tab="profiles">Profiles
-                <span class="tab-n mono" id="tab-n-profiles" hidden>0</span></button>
-              <button class="tab" data-tab="logs">Logs
-                <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
+              <details class="nav-more" id="nav-more"><summary><span id="nav-more-label">More</span><span aria-hidden="true">⌄</span></summary>
+                <div class="nav-more-panel">
+                  <span class="nav-group-label">Views</span>
+                  <button class="tab" data-tab="stuck">Unsuccessful
+                    <span class="tab-n mono red" id="tab-n-stuck" hidden>0</span></button>
+                  <button class="tab" data-tab="activity">Activity history</button>
+                  <button class="tab" data-tab="profiles">Profiles
+                    <span class="tab-n mono" id="tab-n-profiles" hidden>0</span></button>
+                  <button class="tab" data-tab="logs">Logs
+                    <span class="tab-dot" id="tab-log-dot" data-state="off" aria-hidden="true"></span></button>
+                  <span class="nav-group-label">Tools</span>
+                  <!-- Secondary controls are mounted here once, keeping their state. -->
+                  <button id="btn-activity-panel" class="skipbtn" aria-expanded="true">Hide activity</button>
+                  <div class="qmgr" id="qmgr">
+                    <button id="btn-queue" class="skipbtn queuebtn" aria-haspopup="true" aria-expanded="false"
+                      title="Applications running now, the ones waiting their turn, and the ones that gave up">⇶ Browser controls<span
+                        id="q-count" class="skip-count mono" hidden>0</span></button>
+
+                  </div>
+                  <!-- Only appears once some company rotates: one press re-points
+                       every rotating company's un-sent work at its own address and
+                       puts it all in line. It stops at the queue. -->
+                  <button id="btn-rotate-all" class="skipbtn rotbtn" hidden
+                    title="Every rotating company at once: re-point what has not been sent, tailor what the current address already covers, and queue all of it. Nothing is applied — the queue is where you press Process.">↻ Rotate &amp; queue all<span
+                      id="rot-count" class="skip-count mono" hidden>0</span></button>
+
+                </div>
+              </details>
+              <span id="tab-n-apps" hidden>0</span>
             </nav>
             <div class="workbar-right">
               <div class="rolemgr" id="rolemgr">
                 <button id="btn-role" class="skipbtn rolebtn" aria-haspopup="true" aria-expanded="false"
-                  title="Paste a job URL — tailor your résumé to that one role, no discovery needed">✎ Tailor a role</button>
+                  title="Paste a job URL — tailor your résumé to that one role, no discovery needed">＋ Add a job</button>
                 <div id="rolepicker" class="copicker rolepicker" hidden>
                   <div class="cp-role-h">Tailor your résumé to one role</div>
                   <!-- Two ways in. A URL when there is a posting; pasted text when
@@ -313,24 +335,7 @@
                 </div>
               </div>
               <button id="btn-followups" class="skipbtn" hidden></button>
-              <button id="btn-activity-panel" class="skipbtn" aria-expanded="true">Hide activity</button>
-              <div class="qmgr" id="qmgr">
-                <button id="btn-queue" class="skipbtn queuebtn" aria-haspopup="true" aria-expanded="false"
-                  title="Applications running now, the ones waiting their turn, and the ones that gave up">⇶ Browser controls<span
-                    id="q-count" class="skip-count mono" hidden>0</span></button>
-                <div id="qpicker" class="copicker qpicker" hidden>
-                  <div class="cp-role-h">Browser controls</div>
-                  <div id="q-body" class="q-body"></div>
-                  <div class="cp-foot" id="q-foot"></div>
-                </div>
-              </div>
-              <!-- Only appears once some company rotates: one press re-points
-                   every rotating company's un-sent work at its own address and
-                   puts it all in line. It stops at the queue. -->
-              <button id="btn-rotate-all" class="skipbtn rotbtn" hidden
-                title="Every rotating company at once: re-point what has not been sent, tailor what the current address already covers, and queue all of it. Nothing is applied — the queue is where you press Process.">↻ Rotate &amp; queue all<span
-                  id="rot-count" class="skip-count mono" hidden>0</span></button>
-              <div class="profmgr" id="profmgr">
+              <div class="profmgr" id="profmgr" hidden>
                 <button id="btn-profiles" class="skipbtn profbtn" aria-haspopup="true" aria-expanded="false"
                   title="Which email + phone an application goes out under">◐ Profiles<span
                     id="prof-count" class="skip-count mono" hidden>0</span></button>
@@ -443,6 +448,11 @@
               </button>
             </div>
           </div>
+          <nav id="find-jobs-views" aria-label="Ways to find jobs" hidden>
+            <button type="button" class="chip" data-find-view="fresh" aria-pressed="false">Fresh</button>
+            <button type="button" class="chip" data-find-view="career-ops" aria-pressed="false">Career Ops search</button>
+          </nav>
+          <career-board id="career-ops-board" hidden></career-board>
           <section id="pane" class="pane"></section>
         </main>
 
@@ -492,6 +502,12 @@
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="config.js"></script>
+    <script src="career-board.js" type="module"></script>
     <script src="app.js" type="module"></script>
+    <div id="qpicker" class="copicker qpicker" role="dialog" aria-label="Browser controls" hidden>
+      <div class="cp-role-h">Browser controls<button id="q-close" type="button" class="iconbtn" aria-label="Close browser controls">✕</button></div>
+      <div id="q-body" class="q-body"></div>
+      <div class="cp-foot" id="q-foot"></div>
+    </div>
   </body>
 </html>

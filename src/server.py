@@ -386,6 +386,8 @@ github: {prefs.github or '""'}
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AppliedIn")
+    from discovery.career_ops_api import router as career_ops_router
+    app.include_router(career_ops_router)
     settings = get_settings()
 
     @app.middleware("http")

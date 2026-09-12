@@ -139,6 +139,10 @@ and checks your key and resume before launching, so it either starts properly or
 tells you exactly what is missing. `--no-discover` leaves the scheduled crawler
 off, which is what you want for a first run.
 
+Startup also installs Career Ops for **Find jobs** when it is missing, including
+Git and Node.js through Homebrew if needed. Existing installations are checked
+without downloading again. See [Career Ops setup](docs/career-ops.md).
+
 It runs in the background and logs to `.local/daemon.log`. `./appliedin status`,
 `./appliedin logs` and `./appliedin stop` do what they say.
 

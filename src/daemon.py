@@ -46,6 +46,11 @@ def _discovery_loop() -> None:
              DISCOVER_INTERVAL // 3600)
     while True:
         now = time.monotonic()
+        try:
+            from discovery.career_ops import scheduled_tick
+            scheduled_tick()
+        except Exception:
+            log.exception("Career Ops schedule check failed")
         if not flags.paused() and now - last_discover >= DISCOVER_INTERVAL:
             try:
                 log.info("discovery cycle: %s", run_discovery())

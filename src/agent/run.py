@@ -202,6 +202,10 @@ def run_job(pk: str, stores: Any = None, *, prepare_only: bool = False) -> dict:
     if row is None:
         return {"result": "missing", "pk": pk}
 
+    # A job-board import authorizes preparation only. Keep this durable across
+    # worker restarts and global mode changes; approval uses resume_job instead.
+    prepare_only = prepare_only or row.get("discovery_source") == "career_ops"
+
     # Already past evaluation? Re-scoring a tailored/applied job wastes an LLM
     # round trip and can overwrite a good result with a worse one.
     status = row.get("status")
@@ -1241,7 +1245,10 @@ def _auto_decision(pk: str, stores: Any) -> str:
 
     if flags.apply_mode() != "auto" or flags.paused():
         return ""
-    score = (stores.tracking.get(pk) or {}).get("match_score")
+    row = stores.tracking.get(pk) or {}
+    if row.get("discovery_source") == "career_ops":
+        return ""
+    score = row.get("match_score")
     if score is None or int(score) < get_settings().auto_min_score:
         return ""  # not a confident enough match — a human still decides
     return "go"
@@ -1301,7 +1308,7 @@ async def _drive_async(runner: Runner, pk: str, message: Any, stores: Any, *,
                              url=(stores.tracking.get(pk) or {}).get("jd_url"))
                         log.warning("suppressed apply gate for %s: no resume saved", pk)
                         return {"result": "failed", "pk": pk, "reason": "no_resume"}
-                    if question.startswith("Ready to apply"):
+                    if question.startswith("Ready to apply") and not prepare_only:
                         verdict = _auto_decision(pk, stores)
                         if verdict == "go":
                             auto_go = True

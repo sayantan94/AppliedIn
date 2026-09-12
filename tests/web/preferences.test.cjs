@@ -516,3 +516,52 @@ test('drawer Force apply routes to preparation and unfamiliar actions never skip
   await click('unrecognised-action');
   assert.equal(h.requests.length,1);
 });
+
+function datedReviewHarness() {
+  const h=reviewHarness();
+  h.state.apps = [
+    {pk:'openai#old',company:'OpenAI',title:'Old',status:'tailored',tailored_at:'2026-09-07T18:00:00Z'},
+    {pk:'beta#new',company:'Beta',title:'New',status:'tailored',tailored_at:'2026-09-09T18:00:00Z'},
+    {pk:'openai#new',company:'OpenAI',title:'New',status:'tailored',tailored_at:'2026-09-09T18:00:00Z'},
+    {pk:'openai#unknown',company:'OpenAI',title:'Unknown',status:'tailored',tailored_at:'invalid',updated_at:'2026-09-10T18:00:00Z'},
+  ];
+  return h;
+}
+
+test('queue sorting orders whole processed days across companies and puts missing dates last', () => {
+  const h=datedReviewHarness();
+  assert.deepEqual(Array.from(h.context.sortReviewRows(h.state.apps),r=>r.pk),['beta#new','openai#new','openai#old','openai#unknown']);
+  const markup=h.context.reviewQueueSec(h.state.apps);
+  assert.ok(markup.indexOf('data-review-pick="beta#new"')<markup.indexOf('data-review-pick="openai#old"'));
+  assert.equal((markup.match(/class="review-day"/g)||[]).length,3);
+  h.context.setReviewSort('oldest');
+  assert.deepEqual(Array.from(h.context.sortReviewRows(h.state.apps),r=>r.pk),['openai#old','beta#new','openai#new','openai#unknown']);
+  assert.equal(h.storage.get('appliedin.reviewSort'),'oldest');
+  assert.equal(h.state.apps[0].pk,'openai#old','Sorting never mutates source order');
+});
+
+test('processed date uses latest valid résumé completion, never unrelated activity', () => {
+  const h=datedReviewHarness(), row=h.state.apps[0];
+  row.retailored_at='2026-09-10T18:00:00Z';
+  assert.equal(h.context.sortReviewRows(h.state.apps)[0].pk,row.pk);
+  assert.equal(h.context.reviewDay(row),'2026-09-10');
+  row.retailored_at='invalid';
+  assert.equal(h.context.reviewDay(row),'2026-09-07');
+  assert.equal(h.context.reviewDay(h.state.apps[3]),'undated');
+  h.state.reviewPicked.add(row.pk); h.context.setReviewSort('company');
+  assert.equal(h.state.reviewPicked.has(row.pk),true);
+  assert.doesNotMatch(h.context.reviewQueueSec(h.state.apps),/class="review-day"/);
+});
+
+test('day-group Apply all and Skip never include another day or another company', async () => {
+  const h=datedReviewHarness();
+  h.state.reviewPicked.add('openai#old');
+  await h.context.reviewAction('apply','OpenAI',null,'2026-09-09');
+  assert.deepEqual(h.requests[0].body,{company:'OpenAI',pks:['openai#new']});
+  assert.equal(h.state.reviewPicked.has('openai#old'),true);
+  h.state.reviewPicked.add('openai#new');
+  await h.context.reviewAction('skip','OpenAI',null,'2026-09-09');
+  assert.deepEqual(h.requests[1].body,{company:'OpenAI',pks:['openai#new'],action:'skip'});
+  assert.equal(h.state.apps[0].review_skipped,undefined);
+  assert.equal(h.state.reviewPicked.has('openai#old'),true);
+});

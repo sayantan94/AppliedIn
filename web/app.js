@@ -26,12 +26,14 @@ const state = {
   requests: new Set(), launch: null,
   stats: {},
   events: [],
-  tab: "pipeline",    // pipeline | apps | needs | stuck | activity | logs
+  tab: location.hash === "#career-ops" ? "career-ops" : location.hash === "#fresh" ? "fresh" : "pipeline",
+  findView: location.hash === "#career-ops" ? "career-ops" : "fresh",
   filter: "all",      // status chip on the Applications table
   logKind: "all",     // kind chip on the Logs view
   liveState: "off",   // SSE connection state (off | connecting | live | demo)
   query: "",          // free-text search
   coFilter: "",       // board filter: show one company only ("" = all)
+  careerCompanies: [],
   openPk: "",         // pk in the open detail drawer (streams its agent log)
   locFilter: "",      // Tailored lane: show one location tier only ("" = all)
   profiles: [],       // identities an application can go out under
@@ -62,6 +64,7 @@ const state = {
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
   reviewCollapsed: localStorage.getItem("appliedin.reviewCollapsed") === "yes",
+  reviewSort: localStorage.getItem("appliedin.reviewSort") || "newest",
   reviewFilter: "active", reviewAnchor: null, reviewNotices: {},
   activityCollapsed: localStorage.getItem("appliedin.activityCollapsed") === "yes",
   forcePreparing: new Set(),
@@ -872,10 +875,27 @@ function renderPreparation() {
 }
 
 function renderTabs() {
+  const finding = state.tab === "fresh" || state.tab === "career-ops";
+  if (finding) state.findView = state.tab;
+  $("#find-jobs-views").hidden = !finding;
+  $$("#find-jobs-views button").forEach(b => {
+    b.classList.toggle("active", b.dataset.findView === state.tab);
+    b.setAttribute("aria-pressed", String(b.dataset.findView === state.tab));
+  });
+  document.body.classList.toggle("career-search-page", state.tab === "career-ops");
+  $("#search").placeholder = state.tab === "career-ops" ? "Filter results…" : "Search company or role…";
   renderActivityLayout();
-  $$("#tabs .tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === state.tab));
+  $$("#tabs .tab").forEach(b => {
+    const active = b.dataset.tab === "find-jobs" ? finding : b.dataset.tab === state.tab;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-current", active ? "page" : "false");
+  });
+  const secondary = {stuck:"Unsuccessful", activity:"Activity history", profiles:"Profiles", logs:"Logs"};
+  const moreLabel = $("#nav-more-label");
+  if (moreLabel) moreLabel.textContent = secondary[state.tab] || "More";
+  $("#nav-more")?.classList.toggle("active", !!secondary[state.tab]);
   // The Logs tab is the roomy version of the live rail — hide the rail there.
-  $(".board").classList.toggle("logs-open", state.tab === "logs");
+  $(".board").classList.toggle("logs-open", state.tab === "logs" || state.tab === "career-ops");
   $("#tab-n-apps").textContent = state.apps.length;
   const needs = state.apps.filter((a) => a.status === "needs_human").length;
   const stuck = state.apps.filter(isStuck).length;
@@ -887,7 +907,7 @@ function renderTabs() {
 let _coSig = null;
 function renderCoFilter() {
   const sel = $("#co-filter");
-  const cos = [...new Set(state.apps.map((a) => a.company).filter(Boolean))]
+  const cos = [...new Set([...state.apps.map((a) => a.company), ...state.careerCompanies].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
   if (state.coFilter && !cos.includes(state.coFilter)) { state.coFilter = ""; _coSig = null; }
   sel.classList.toggle("on", !!state.coFilter);
@@ -1363,8 +1383,31 @@ function reviewFilterRows(rows) {
   return rows.filter((r) => state.reviewFilter === "all"
     || (state.reviewFilter === "active" ? reviewPhase(r) !== "later" : reviewPhase(r) === state.reviewFilter));
 }
-function reviewRows(company) {
-  return reviewFilterRows(reviewCandidates()).filter((r) => r.company === company);
+function reviewRows(company, day = null) {
+  return sortReviewRows(reviewFilterRows(reviewCandidates()))
+    .filter((r) => r.company === company && (day == null || reviewDay(r) === day));
+}
+function reviewTimestamp(r) {
+  return [r.retailored_at, r.tailored_at].find((date) => date && Number.isFinite(new Date(date).getTime())) || "";
+}
+function reviewDay(r) { return dayKey(reviewTimestamp(r)) || "undated"; }
+function sortReviewRows(rows) {
+  return [...rows].sort((a, b) => {
+    if (state.reviewSort === "company") return 0; // Preserve the familiar company view.
+    const ad = reviewDay(a), bd = reviewDay(b);
+    if (ad === bd) return 0;
+    // Missing dates always go last; activity dates are not preparation dates.
+    if (ad === "undated") return 1;
+    if (bd === "undated") return -1;
+    return state.reviewSort === "oldest" ? ad.localeCompare(bd) : bd.localeCompare(ad);
+  });
+}
+function setReviewSort(value) {
+  if (!["newest", "oldest", "company"].includes(value)) return;
+  state.reviewSort = value;
+  state.reviewAnchor = null;
+  localStorage.setItem("appliedin.reviewSort", value);
+  renderPane();
 }
 function reviewStatus(r) {
   const phase = reviewPhase(r);
@@ -1374,7 +1417,8 @@ function reviewStatus(r) {
     : item?.blocked === "company_busy" ? " · Behind current application" : "" : "";
   return `<span class="review-status ${phase}">${label}${detail}</span>`;
 }
-function reviewActions(company, rows) {
+function reviewActions(company, rows, day = null) {
+  const scope = day == null ? "" : ` data-review-day="${esc(day)}"`;
   const shown = rows.length;
   const stale = state.apps.some((r) => r.company === company && state.reviewPicked.has(r.pk) && !reviewSelectable(r));
   rows = rows.filter(reviewSelectable);
@@ -1383,11 +1427,11 @@ function reviewActions(company, rows) {
   const later = state.reviewFilter === "later";
   const disabled = state.approvingAll ? " disabled" : "";
   return `<span class="review-count">${esc(company)} · ${picked ? `${picked} selected` : `${shown} shown`}</span>
-    <button class="ps-link" data-review-select="${esc(company)}"${!rows.length ? " disabled" : disabled}>${picked && picked === rows.length ? "Clear selection" : "Select all shown"}</button>
-    ${stale || (picked && picked < rows.length) ? `<button class="ps-link" data-review-clear="${esc(company)}"${disabled}>Clear selection</button>` : ""}
-    <button class="ps-link" data-review-action="reject" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>Reject</button>
-    <button class="ps-link" data-review-action="${later ? "restore" : "skip"}" data-company="${esc(company)}"${!picked ? " disabled" : disabled}>${later ? "Restore" : "Skip"}</button>
-    <button class="ps-link on" data-review-action="apply" data-company="${esc(company)}"${!(picked || remaining) ? " disabled" : disabled}>${picked ? `Apply ${picked}` : `Apply all ${remaining}`}</button>`;
+    <button class="ps-link" data-review-select="${esc(company)}"${scope}${!rows.length ? " disabled" : disabled}>${picked && picked === rows.length ? "Clear selection" : "Select all shown"}</button>
+    ${stale || (picked && picked < rows.length) ? `<button class="ps-link" data-review-clear="${esc(company)}"${scope}${disabled}>Clear selection</button>` : ""}
+    <button class="ps-link" data-review-action="reject" data-company="${esc(company)}"${scope}${!picked ? " disabled" : disabled}>Reject</button>
+    <button class="ps-link" data-review-action="${later ? "restore" : "skip"}" data-company="${esc(company)}"${scope}${!picked ? " disabled" : disabled}>${later ? "Restore" : "Skip"}</button>
+    <button class="ps-link on" data-review-action="apply" data-company="${esc(company)}"${scope}${!(picked || remaining) ? " disabled" : disabled}>${picked ? `Apply ${picked}` : `Apply all ${remaining}`}</button>`;
 }
 function reviewNotice(company) {
   const notice = state.reviewNotices[company];
@@ -1398,7 +1442,7 @@ function reviewNotice(company) {
   </div>`;
 }
 function reviewDate(r) {
-  const date = r.retailored_at || r.tailored_at;
+  const date = reviewTimestamp(r);
   return date && Number.isFinite(new Date(date).getTime())
     ? `<time datetime="${esc(date)}" title="${esc(new Date(date).toLocaleString())}">${esc(new Date(date).toLocaleDateString(undefined, {month:"short",day:"numeric",year:"numeric"}))}</time>`
     : '<span title="No résumé completion date was recorded">Not recorded</span>';
@@ -1408,11 +1452,14 @@ function reviewQueueSec(rows) {
     .filter((r) => !state.locFilter || locTier(r.location).key === state.locFilter);
   const notices = Object.keys(state.reviewNotices).filter((co) => !state.coFilter || co === state.coFilter);
   if (!rows.length && !notices.length) return "";
-  const shown = reviewFilterRows(rows), groups = new Map();
+  const shown = sortReviewRows(reviewFilterRows(rows)), groups = new Map();
   for (const r of shown) {
-    if (!groups.has(r.company)) groups.set(r.company, []);
-    groups.get(r.company).push(r);
+    const day = state.reviewSort === "company" ? null : reviewDay(r);
+    const key = JSON.stringify([day, r.company]);
+    if (!groups.has(key)) groups.set(key, {co:r.company, day, list:[]});
+    groups.get(key).list.push(r);
   }
+  let previousDay = null;
   const later = rows.filter((r) => reviewPhase(r) === "later").length;
   const count = (phase) => rows.filter((r) => reviewPhase(r) === phase).length;
   const pill = (key, label, count) => `<button class="lp${state.reviewFilter === key ? " on" : ""}" data-review-filter="${key}" aria-pressed="${state.reviewFilter === key}">${label} <span class="mono">${count}</span></button>`;
@@ -1423,14 +1470,24 @@ function reviewQueueSec(rows) {
     </button>
     <div id="review-body"${state.reviewCollapsed ? " hidden" : ""}>
     <div class="review-filters">${pill("active", "All active", rows.length-later)}${pill("ready", "Needs approval", count("ready"))}${pill("waiting", "Waiting to apply", count("waiting"))}${pill("applying", "Applying", count("applying"))}${pill("later", "Skipped for later", later)}${count("applying") ? '<button class="ps-link review-stop" data-review-stop>Stop all applying</button>' : ""}</div>
+    <label class="review-sort">Sort by <select id="review-sort" aria-label="Sort application queue">
+      <option value="newest"${state.reviewSort === "newest" ? " selected" : ""}>Processed day · newest first</option>
+      <option value="oldest"${state.reviewSort === "oldest" ? " selected" : ""}>Processed day · oldest first</option>
+      <option value="company"${state.reviewSort === "company" ? " selected" : ""}>Company</option>
+    </select></label>
     ${notices.map(reviewNotice).join("")}
-    <div class="un-groups">${[...groups].map(([co, list]) => `<div class="ung open review-company">
+    <div class="un-groups">${[...groups.values()].map(({co, day, list}) => {
+      const heading = day !== previousDay && day != null
+        ? `<h3 class="review-day">${day === "undated" ? "Processed date unavailable" : esc(dayLabel(day))}</h3>` : "";
+      previousDay = day;
+      const scope = day == null ? "" : ` data-review-day="${esc(day)}"`;
+      return `${heading}<div class="ung open review-company">
       <div class="review-sticky">
-        <div class="review-actions" data-review-actions="${esc(co)}">${reviewActions(co, list)}</div>
-        <div class="review-columns" aria-hidden="true"><span></span><span>Role / application identity</span><span>Location</span><span>Match</span><span>Résumé date</span><span>Résumé</span></div>
+        <div class="review-actions" data-review-actions="${esc(co)}"${scope}>${reviewActions(co, list, day)}</div>
+        <div class="review-columns" aria-hidden="true"><span></span><span>Role / application identity</span><span>Location</span><span>Match</span><span>Processed</span><span>Résumé</span></div>
       </div>
       <ol class="un-list">${list.map((r) => `<li class="un-row review-row${state.reviewPicked.has(r.pk) ? " un-picked" : ""}">
-        <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"
+        <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"${scope}
           aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll || !reviewSelectable(r) ? " disabled" : ""}>
         <div class="review-role"><button class="review-title" data-open="${esc(r.pk)}">${esc(r.title)}</button>
           ${profHtml(r.profile_id, r.company)}${reviewStatus(r)}</div>
@@ -1439,7 +1496,7 @@ function reviewQueueSec(rows) {
         <span class="review-date mono">${reviewDate(r)}</span>
         <button class="ps-link review-preview" data-resume="${esc(r.pk)}"${!r.resume_url ? ' disabled title="No résumé PDF is available"' : ' title="Preview tailored résumé"'}>Preview</button>
       </li>`).join("")}</ol>
-    </div>`).join("") || '<div class="review-empty">No roles in this view. Use the filters above to review other roles.</div>'}</div>
+    </div>`; }).join("") || '<div class="review-empty">No roles in this view. Use the filters above to review other roles.</div>'}</div>
     </div>
   </section>`;
 }
@@ -1450,13 +1507,14 @@ function paintReviewControls() {
   });
   $$("[data-review-actions]").forEach((bar) => {
     const co = bar.dataset.reviewActions;
-    bar.innerHTML = reviewActions(co, reviewRows(co));
+    const day = bar.dataset.reviewDay ?? null;
+    bar.innerHTML = reviewActions(co, reviewRows(co, day), day);
   });
 }
 function paintReviewSelection(tick, shift = false) {
   const pk = tick.dataset.reviewPick;
   const company = state.apps.find((r) => r.pk === pk)?.company;
-  const rows = reviewRows(company).filter(reviewSelectable), pks = rows.map((r) => r.pk);
+  const rows = reviewRows(company, tick.dataset.reviewDay ?? null).filter(reviewSelectable), pks = rows.map((r) => r.pk);
   if (!pks.includes(pk)) return;
   const anchor = pks.indexOf(state.reviewAnchor), end = pks.indexOf(pk);
   const range = shift && anchor >= 0 && end >= 0 ? pks.slice(Math.min(anchor,end), Math.max(anchor,end)+1) : [pk];
@@ -1464,9 +1522,9 @@ function paintReviewSelection(tick, shift = false) {
   state.reviewAnchor = pk;
   paintReviewControls();
 }
-async function reviewAction(action, company, explicitPks = null) {
+async function reviewAction(action, company, explicitPks = null, day = null) {
   if (demoGuard() || state.approvingAll) return;
-  const rows = reviewRows(company);
+  const rows = reviewRows(company, day);
   const selected = rows.filter((r) => state.reviewPicked.has(r.pk));
   if (!explicitPks && state.apps.some((r) => r.company === company && state.reviewPicked.has(r.pk) && !reviewSelectable(r))) {
     toast("A selected role has started applying. Clear the selection and choose again.");
@@ -2889,7 +2947,7 @@ function appsSig() {
     s += a.pk + "\u0001" + a.status + "\u0001" + (a.updated_at || "") + "\u0001"
        + (a.applied_at || "") + "\u0001"
        + (a.gate_reason || "") + (a.gate_question ? "?" : "") + "\u0001"
-       + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001"
+       + (a.match_score ?? "") + "\u0001" + (a.tailored_at || "") + "\u0001" + (a.retailored_at || "") + "\u0001"
        + (a.jd_read_error || "") + "\u0001" + (a.score_override ? "o" : "") + "\u0001"
        + (a.profile_id || "") + "\u0001" + (a.review_skipped ? "s" : "") + (a.review_rejected ? "r" : "") + "\n";
   }
@@ -3068,6 +3126,12 @@ function refreshPane() {
 }
 
 function renderPane() {
+  const careerBoard = $("#career-ops-board");
+  if (careerBoard) {
+    careerBoard.hidden = state.tab !== "career-ops";
+    careerBoard.setAttribute("company", state.coFilter);
+    careerBoard.setAttribute("query", state.query);
+  }
   // The preservation below is now RARE-PATH insurance, not a per-poll crutch:
   // background repaints only reach here when data genuinely changed (a scan
   // landing rows every few seconds is the common case), and that can still
@@ -3088,6 +3152,7 @@ function renderPane() {
   const fsListEl = $("#fs-list");
   const fsScroll = fsListEl ? fsListEl.scrollTop : 0;
   $("#pane").innerHTML =
+    state.tab === "career-ops" ? "" :
     state.tab === "apps" ? viewApps() :
     state.tab === "needs" ? viewNeeds() :
     state.tab === "stuck" ? viewStuck() :
@@ -4738,6 +4803,24 @@ window.addEventListener("resize", () => {
 });
 
 function wire() {
+  document.addEventListener("career-show-all", () => {
+    state.coFilter = ""; state.query = "";
+    $("#co-filter").value = ""; $("#search").value = "";
+    renderPane();
+  });
+  document.addEventListener("career-pipeline", (event) => {
+    state.coFilter = event.detail?.company || "";
+    state.query = ""; $("#search").value = "";
+    state.tab = "pipeline";
+    $("#co-filter").value = state.coFilter;
+    history.replaceState(null, "", location.pathname + location.search);
+    renderTabs(); renderPane();
+    if (!DEMO) loadApps().then(() => { renderTabs(); renderPane(); });
+  });
+  document.addEventListener("career-sources", (event) => {
+    state.careerCompanies = event.detail.companies;
+    renderCoFilter();
+  });
   // The deck changes height as scan receipts appear. Scroll offsets and sticky
   // review controls must follow its actual height on desktop and mobile.
   const measureDeck = () => document.documentElement.style.setProperty("--deck-height", `${Math.ceil($(".deck").getBoundingClientRect().height)}px`);
@@ -4801,6 +4884,9 @@ function wire() {
   $("#drawer").addEventListener("click", (e) => {
     const button = e.target.closest("[data-save-tracker]");
     if (button) saveTracker(button.dataset.saveTracker);
+  });
+  $("#pane").addEventListener("change", (e) => {
+    if (e.target.id === "review-sort") setReviewSort(e.target.value);
   });
   $("#pane").addEventListener("change", (e) => {
     const field = e.target.dataset.appFilter;
@@ -5132,16 +5218,34 @@ function wire() {
     renderPickerState(); renderDiscoverLabel(); // list DOM untouched — scroll stays
   });
 
-  $("#tabs").addEventListener("click", (e) => {
-    const t = e.target.closest(".tab");
-    if (!t) return;
-    state.tab = t.dataset.tab;
+  const more = $("#nav-more");
+  document.addEventListener("click", e => { if (more && !more.contains(e.target)) more.open = false; });
+  more?.addEventListener("keydown", e => {
+    if (e.key === "Escape") { more.open = false; more.querySelector("summary").focus(); e.stopPropagation(); }
+  });
+  const selectView = (next) => {
+    if (next === "career-ops" && !["fresh", "career-ops"].includes(state.tab)) {
+      state.coFilter = ""; state.query = ""; $("#co-filter").value = ""; $("#search").value = "";
+    }
+    state.tab = next;
+    const hash = ["fresh", "career-ops"].includes(next) ? "#" + next : "";
+    history.replaceState(null, "", location.pathname + location.search + hash);
     // Cached data renders at once; the fetch refreshes it behind the paint.
     if (state.tab === "activity") loadActivity();
     if (state.tab === "fresh") loadFresh();
     if (state.tab === "profiles") { loadProfiles(); loadRotation(); }
     renderTabs();
     renderPane();
+  };
+  $("#tabs").addEventListener("click", (e) => {
+    const t = e.target.closest(".tab");
+    if (!t) return;
+    if (more) { more.open = false; if (more.contains(t)) more.querySelector("summary").focus(); }
+    selectView(t.dataset.tab === "find-jobs" ? state.findView : t.dataset.tab);
+  });
+  $("#find-jobs-views").addEventListener("click", e => {
+    const button = e.target.closest("[data-find-view]");
+    if (button) selectView(button.dataset.findView);
   });
 
   const rp = $("#rolepicker"), rpBtn = $("#btn-role");
@@ -5648,12 +5752,13 @@ function wire() {
   const closeQp = () => {
     if (!qp.hidden) { qp.hidden = true; qBtn.setAttribute("aria-expanded", "false"); }
   };
+  $("#q-close").addEventListener("click", () => { closeQp(); more?.querySelector("summary").focus(); });
   qBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     const show = qp.hidden;
     qp.hidden = !show;
     qBtn.setAttribute("aria-expanded", String(show));
-    if (show) { renderQueuePanel(); fitPopover(qp); loadQueue(); }
+    if (show) { if (more) more.open = false; renderQueuePanel(); loadQueue(); $("#q-close").focus(); }
   });
   qp.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -5846,16 +5951,16 @@ function wire() {
     const reviewTick = e.target.closest("[data-review-pick]");
     if (reviewTick) { paintReviewSelection(reviewTick, e.shiftKey); return; }
     const reviewClear = e.target.closest("[data-review-clear]");
-    if (reviewClear) { state.apps.filter((r) => r.company === reviewClear.dataset.reviewClear).forEach((r) => state.reviewPicked.delete(r.pk)); paintReviewControls(); return; }
+    if (reviewClear) { state.apps.filter((r) => r.company === reviewClear.dataset.reviewClear && (reviewClear.dataset.reviewDay == null || reviewDay(r) === reviewClear.dataset.reviewDay || !reviewSelectable(r))).forEach((r) => state.reviewPicked.delete(r.pk)); paintReviewControls(); return; }
     const reviewSelect = e.target.closest("[data-review-select]");
     if (reviewSelect) {
-      const rows = reviewRows(reviewSelect.dataset.reviewSelect).filter(reviewSelectable);
+      const rows = reviewRows(reviewSelect.dataset.reviewSelect, reviewSelect.dataset.reviewDay ?? null).filter(reviewSelectable);
       const all = rows.every((r) => state.reviewPicked.has(r.pk));
       rows.forEach((r) => all ? state.reviewPicked.delete(r.pk) : state.reviewPicked.add(r.pk));
       paintReviewControls(); return;
     }
     const reviewButton = e.target.closest("[data-review-action]");
-    if (reviewButton) { reviewAction(reviewButton.dataset.reviewAction, reviewButton.dataset.company); return; }
+    if (reviewButton) { reviewAction(reviewButton.dataset.reviewAction, reviewButton.dataset.company, null, reviewButton.dataset.reviewDay ?? null); return; }
     if (e.target.closest("[data-approve-all]")) { approveAll(); return; }
     const runAllBtn = e.target.closest("[data-run-all]");
     if (runAllBtn) { e.stopPropagation(); runProcess(); return; }

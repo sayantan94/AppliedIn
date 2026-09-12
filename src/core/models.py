@@ -79,6 +79,7 @@ class JobRecord(BaseModel):
     jd_text: str
     location: str = ""
     ats: str = ""
+    discovery_source: str = ""
     # Set when the posting was read by an agent that judged fit while it was
     # already looking at it. Saves scoring the same text twice; None means the
     # scorer still has to run.

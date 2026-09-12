@@ -99,6 +99,8 @@ class RedisTracking(AbstractTracking):
             # discovered_at, which only records when we looked: on a first sweep
             # every job was discovered seconds ago and none of them are new.
             "posted_at": getattr(job, "posted_at", "") or "",
+            "discovery_source": job.discovery_source,
+            "jd_text": job.jd_text if job.discovery_source == "career_ops" else "",
         }
         self._write(job.pk, row, prev_status=None)
         return True

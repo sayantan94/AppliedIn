@@ -1,0 +1,12 @@
+# Verified against live feeds on 2026-09-12. These replace stale/missing entries
+# in the pinned Career Ops directory; they contain no candidate information.
+companies:
+  - name: Mistral AI
+    # Mistral's careers page links here; its old Lever feed returns zero jobs.
+    careers_url: https://jobs.ashbyhq.com/mistral.ai
+  - name: OpenAI
+    # Public feed verified; also matches AppliedIn's existing OpenAI job IDs.
+    careers_url: https://jobs.ashbyhq.com/openai
+  - name: Oracle
+    # Oracle's candidate site; public feed verified on 2026-09-12.
+    careers_url: https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/jobs

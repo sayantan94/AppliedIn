@@ -11,6 +11,7 @@ cd "$(dirname "$0")"
 
 say()  { printf "\033[1;32m▸\033[0m %s\n" "$1"; }
 warn() { printf "\033[1;33m⚠\033[0m  %s\n" "$1"; }
+source scripts/integrations/career-ops-setup.sh
 
 # --- uv -----------------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
@@ -35,13 +36,16 @@ fi
 if command -v claude >/dev/null 2>&1; then
   say "found the Claude Code CLI"
 else
-  warn "no 'claude' on PATH. Discovery and tailoring still work, but applying"
+  warn "no 'claude' on PATH. Company feeds and tailoring still work; Career Ops web search and applying"
   warn "needs it: https://claude.com/claude-code  (a Claude subscription, not an"
   warn "API key — it refuses API-key auth for this)"
 fi
 
 # --- .env ---------------------------------------------------------------------
 [ -f .env ] || { cp .env.example .env 2>/dev/null && say "created .env from template"; }
+
+# The same check also runs on start even when Python dependencies are unchanged.
+ensure_career_ops
 
 # --- stamp the env version (appliedin reuses it until deps change) ------------
 mkdir -p .venv
