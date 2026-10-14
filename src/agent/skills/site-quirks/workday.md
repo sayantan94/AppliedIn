@@ -4,7 +4,9 @@ match_hosts: [myworkdayjobs.com, myworkdaysite.com]
 ---
 
 - Workday is multi-page and requires an ACCOUNT before the form appears. If there
-  is no saved session, stop and report that a login is needed — do not create one.
+  is no saved session, stop and report that a login is needed. Create an account
+  ONLY when your task has a WORKDAY ACCOUNT section, and only with its email and
+  password.
 - Each page must be completed and "Save and Continue" clicked before the next
   page's fields exist. Never look for a single submit button on page one.
 - Fields are custom widgets, not plain inputs: dropdowns are buttons that open a

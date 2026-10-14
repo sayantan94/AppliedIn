@@ -20,6 +20,7 @@ from core.config import get_settings
 from core.models import Status
 from core.stores import make_stores
 from core.ids import is_internal_pk
+from tools import workday_accounts as _workday
 
 _WEB = Path(__file__).resolve().parents[1] / "web"
 
@@ -509,6 +510,7 @@ def create_app() -> FastAPI:
                 "queue_age_seconds": None, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
                 "headless": flags.browser_headless(),
+                "workday_accounts": _workday.enabled(),
                 "auto_min_score": settings.auto_min_score,
                 "counts_by_status": counts,
                 "discovering": _discovery_running(),
@@ -2454,6 +2456,32 @@ def create_app() -> FastAPI:
         from core import flags
         flags.set_flag("headless", "yes" if (body or {}).get("headless") else "no")
         return {"ok": True, "headless": flags.browser_headless()}
+
+    @app.get("/workday-accounts")
+    def get_workday_accounts():
+        """The setting and the password it signs up with. Not in /stats, which
+        is polled every few seconds."""
+        secrets = make_stores().secrets
+        return {"enabled": _workday.enabled(), "password": _workday.password(secrets),
+                "custom_password": _workday.is_custom_password(secrets)}
+
+    @app.post("/actions/workday-accounts")
+    def set_workday_accounts(body: dict):
+        """Let applies create Workday accounts, and set the password they use."""
+        body = body or {}
+        secrets = make_stores().secrets
+        if body.get("reset_password"):
+            _workday.reset_password(secrets)
+        elif "password" in body:
+            try:
+                _workday.set_password(secrets, str(body["password"]))
+            except ValueError as exc:
+                return {"ok": False, "note": str(exc)}
+        if "enabled" in body:
+            _workday.set_enabled(bool(body["enabled"]))
+        return {"ok": True, "enabled": _workday.enabled(),
+                "password": _workday.password(secrets),
+                "custom_password": _workday.is_custom_password(secrets)}
 
     @app.post("/actions/approve-all")
     def approve_all(body: dict):

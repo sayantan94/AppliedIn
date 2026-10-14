@@ -2,8 +2,8 @@
 
 Holds the logins you saved for employer portals — the sessions `appliedin login`
 captures, so an apply behind a sign-in wall can reuse one instead of asking you
-again. Nothing here is ever created by the pipeline: it only reads credentials
-you chose to store.
+again. The pipeline writes here only for Workday accounts it created after you
+switched that on (tools.workday_accounts).
 """
 
 from __future__ import annotations

@@ -965,7 +965,8 @@ def verify_url(pk: str, company: str = "") -> str:
 
 
 def _task(url: str, company: str, facts: dict, resume_path: str, site_rules: str,
-          resume_skills: str = "", resume_history: str = "", wait_url: str = "") -> str:
+          resume_skills: str = "", resume_history: str = "", wait_url: str = "",
+          account_block: str = "") -> str:
     """What Claude is asked to do. Written for someone acting on another's behalf."""
     wait_block = (f"""
 ONE-TIME CODE CALLBACK — available, but only when this site's rules say to use it
@@ -1029,7 +1030,7 @@ deliberating and spend your attention on the rest of the form:
 
 EVERY APPROVED ANSWER — the only facts you may use:
 {_answer_block(facts)}
-{resume_line}{wait_block}{site_rules}
+{resume_line}{wait_block}{account_block}{site_rules}
 {_skills_block(resume_skills)}{_history_block(resume_history)}
 
 RULES — these are not style preferences, they decide whether this application is
@@ -1183,8 +1184,9 @@ def _verify(report: dict) -> tuple[bool, str]:
 
 async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: str = "",
                        jd_text: str = "", resume_tex: str = "", github: str = "",
-                       resume_path: str = "") -> dict:
-    """Fill and submit `url` in the owner's Chrome. Same shape as every engine."""
+                       resume_path: str = "", account: dict | None = None) -> dict:
+    """Fill and submit `url` in the owner's Chrome. Same shape as every engine.
+    `account` is a Workday login this run may create; None means it may not."""
     from core.config import get_settings
     from core.events import emit
 
@@ -1226,7 +1228,8 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
               # and a session that decides to wait for something nobody will send
               # burns the whole timeout doing nothing.
               # Always offered; the site's own rules decide whether it is used.
-              wait_url=verify_url(pk, company) if pk else ""),
+              wait_url=verify_url(pk, company) if pk else "",
+              account_block=_account_block(account)),
         report_key="outcome",
         model=(getattr(get_settings(), "chrome_model", "") or ""),
         timeout_s=TIMEOUT_S, kind="apply",
@@ -1246,7 +1249,20 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
         for para in [p.strip() for p in transcript.split("\n\n") if p.strip()][:40]:
             emit("running", pk=pk, agent="browser", url=url, detail=para[:400])
 
-    return classify(report)
+    result = classify(report)
+    # Kept on every outcome: an account made before a verification stop still exists.
+    state = str(report.get("account") or "").strip().lower()
+    if account and state:
+        result["account"] = state
+    return result
+
+
+def _account_block(account: dict | None) -> str:
+    if not account:
+        return ""
+    from .workday_accounts import task_block
+
+    return task_block(account)
 
 
 def problem_status(problem: str) -> str:

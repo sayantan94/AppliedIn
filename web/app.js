@@ -56,6 +56,7 @@ const state = {
   coQuery: "",        // search inside the company picker
   mode: "gated",
   headless: false,
+  workday: false,
   paused: false,
   autoMin: 8,
   queue: null,
@@ -674,6 +675,12 @@ function renderMenuState() {
   if (hl) {
     hl.textContent = state.headless ? "headless" : "visible";
     hl.className = "menu-state mono " + (state.headless ? "warn" : "on");
+  }
+  const wd = $("#m-workday-state");
+  if (wd) {
+    wd.textContent = state.workday ? "on" : "off";
+    wd.className = "menu-state mono " + (state.workday ? "on" : "");
+    $("#m-workday-pw-form").hidden = !state.workday;
   }
   $("#m-theme-state").textContent = document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
@@ -3491,6 +3498,7 @@ function applyStats(s) {
   state.stats = s || {};
   if (s && s.apply_mode) state.mode = s.apply_mode;
   if (s && typeof s.headless === "boolean") state.headless = s.headless;
+  if (s && typeof s.workday_accounts === "boolean") state.workday = s.workday_accounts;
   if (s) state.paused = !!s.paused;
   if (s && s.auto_min_score != null) state.autoMin = s.auto_min_score;
   trackScanning();
@@ -4257,6 +4265,55 @@ async function toggleHeadless() {
   toast(state.headless
     ? "Headless — applies run with NO visible Chrome. (A CAPTCHA/handoff shows on the board, not a window.)"
     : "Visible — you'll see the Chrome windows while it applies.");
+}
+
+async function toggleWorkday() {
+  if (demoGuard()) return;
+  state.workday = !state.workday;
+  renderMenuState();
+  await post("/actions/workday-accounts", { enabled: state.workday });
+  toast(state.workday
+    ? "Workday accounts on — new Workday employers get an account under the profile's email."
+    : "Workday accounts off — a Workday login stops and asks you.");
+}
+async function loadWorkday() {
+  try {
+    const r = await fetch(api("/workday-accounts"), { headers: auth.header() });
+    if (!r.ok) return;
+    const d = await r.json();
+    state.workday = !!d.enabled;
+    showWorkdayPassword(d);
+    renderMenuState();
+  } catch { /* the menu still works without it */ }
+}
+async function saveWorkdayPassword(e) {
+  e.preventDefault();
+  if (demoGuard()) return;
+  const input = $("#m-workday-pw");
+  const r = await post("/actions/workday-accounts", { password: input.value });
+  if (r && r.ok) { showWorkdayPassword(r); toast("Workday password saved."); }
+  else toast((r && (r.note || r.error)) || "Could not save the password.");
+}
+async function resetWorkdayPassword() {
+  if (demoGuard()) return;
+  const r = await post("/actions/workday-accounts", { reset_password: true });
+  if (r && r.ok) { showWorkdayPassword(r); toast("Custom password removed — back to the default."); }
+  else toast((r && r.error) || "Could not remove the password.");
+}
+function showWorkdayPassword(d) {
+  $("#m-workday-pw").value = d.password || "";
+  $("#m-workday-pw-note").textContent = d.custom_password ? "custom" : "default";
+  $("#m-workday-pw-reset").disabled = !d.custom_password;
+}
+function toggleWorkdayPwShown() {
+  const input = $("#m-workday-pw");
+  const btn = $("#m-workday-pw-show");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  btn.classList.toggle("shown", show);
+  const label = show ? "Hide password" : "Show password";
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
 }
 
 const MODES = ["gated", "auto", "assisted"];
@@ -6431,6 +6488,7 @@ function wire() {
     e.stopPropagation();
     menu.hidden = !menu.hidden;
     menuBtn.setAttribute("aria-expanded", String(!menu.hidden));
+    if (!menu.hidden) loadWorkday();
   });
   document.addEventListener("click", (e) => {
     if (!menu.hidden && !e.target.closest(".menu-wrap")) closeMenu();
@@ -6439,6 +6497,10 @@ function wire() {
   $("#m-pause").addEventListener("click", () => { togglePause(); closeMenu(); });
   $("#m-mode").addEventListener("click", () => { toggleMode(); closeMenu(); });
   $("#m-headless").addEventListener("click", () => { toggleHeadless(); closeMenu(); });
+  $("#m-workday").addEventListener("click", () => { toggleWorkday(); });
+  $("#m-workday-pw-form").addEventListener("submit", saveWorkdayPassword);
+  $("#m-workday-pw-show").addEventListener("click", toggleWorkdayPwShown);
+  $("#m-workday-pw-reset").addEventListener("click", resetWorkdayPassword);
   $("#m-theme").addEventListener("click", () => {
     const root = document.documentElement;
     root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";

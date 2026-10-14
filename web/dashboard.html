@@ -209,6 +209,31 @@
                   <span>Browser windows</span>
                   <span class="menu-state mono" id="m-headless-state">visible</span>
                 </button>
+                <button class="menu-item" id="m-workday"
+                  title="On a Workday posting with no saved login, sign in or create the account with the profile's email and the password below, then save that login.">
+                  <span>Create Workday accounts</span>
+                  <span class="menu-state mono" id="m-workday-state">off</span>
+                </button>
+                <form class="menu-field" id="m-workday-pw-form" hidden>
+                  <div class="menu-field-row">
+                    <input type="password" id="m-workday-pw" autocomplete="off"
+                      placeholder="Workday password" aria-label="Workday account password">
+                    <button type="button" class="iconbtn" id="m-workday-pw-show"
+                      aria-label="Show password" title="Show password">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                        <line class="eye-slash" x1="3" y1="3" x2="21" y2="21"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <div class="menu-field-row">
+                    <span class="menu-field-note mono" id="m-workday-pw-note">default</span>
+                    <button type="button" class="btn" id="m-workday-pw-reset">Remove</button>
+                    <button type="submit" class="btn">Save</button>
+                  </div>
+                </form>
                 <div class="settings-menu-group">Preferences &amp; appearance</div><button class="menu-item" id="m-shared-prefs">Shared job preferences <span aria-hidden="true">›</span></button><button class="menu-item" id="m-company-prefs">Company preferences <span aria-hidden="true">›</span></button>
                 <button class="menu-item" id="m-theme">
                   <span>Theme</span>

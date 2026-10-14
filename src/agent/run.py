@@ -904,6 +904,11 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
     if creds:
         facts["Login email/username"] = creds.get("username", "")
         facts["Login password"] = creds.get("password", "")
+    from tools import workday_accounts
+    account = workday_accounts.plan(jd_url, company, facts, stores.secrets)
+    if account:
+        emit("running", pk=pk, agent="applier", url=jd_url,
+             detail=f"Workday: will sign in or create the account as {account['username']}")
     resume_tex = ""
     if row.get("resume_tex_key"):
         try:
@@ -917,7 +922,14 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         jd_url, company, facts, get_settings().browser_model,
         pk=pk, jd_text=jd_text, resume_tex=resume_tex,
         github=_github_context(), resume_path=_resume_pdf_path(row),
+        account=account,
     )
+    try:
+        if workday_accounts.remember(company, account, result, stores.secrets):
+            emit("running", pk=pk, agent="applier", url=jd_url,
+                 detail=f"saved the Workday login for {company}")
+    except Exception:  # noqa: BLE001
+        log.warning("could not save the Workday login for %s", company, exc_info=True)
 
     shot = result.pop("screenshot_b64", None)
     if shot:

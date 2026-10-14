@@ -73,7 +73,7 @@ def _duplicate_refusal(pk: str, url: str = "") -> dict | None:
 
 async def apply(url: str, company: str, facts: dict, model: str, *, pk: str = "",
                 jd_text: str = "", resume_tex: str = "", github: str = "",
-                resume_path: str = "") -> dict:
+                resume_path: str = "", account: dict | None = None) -> dict:
     """Fill and SUBMIT this application. Returns one of:
       {status:'applied', confirmation}   {status:'gate', reason, question}
       {status:'failed', reason, detail}  {status:'unknown', detail}
@@ -98,7 +98,7 @@ async def apply(url: str, company: str, facts: dict, model: str, *, pk: str = ""
     try:
         return await apply_chrome(url, company, facts, model, pk=pk, jd_text=jd_text,
                                   resume_tex=resume_tex, github=github,
-                                  resume_path=resume_path)
+                                  resume_path=resume_path, account=account)
     except Exception as exc:  # noqa: BLE001
         # The form may already have been filled and submitted, so re-running could
         # send a SECOND application. A duplicate under someone's real name is
