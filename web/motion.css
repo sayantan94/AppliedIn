@@ -143,8 +143,8 @@ tbody tr { transition: background-color .15s var(--fj-ease); }
   .btn:active, .chip:active, .kcard:active, #tabs .tab:active { transform: none; }
 }
 
-/* ─── Find jobs: the three ways to search, each naming its sources ─── */
-#find-jobs-views.fj-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; }
+/* ─── Find jobs: the ways to search, each naming its sources ─── */
+#find-jobs-views.fj-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; }
 #find-jobs-views .fj-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; padding: 11px 14px;
   border-radius: 12px; border: 1px solid var(--border); background: transparent; text-align: left; white-space: normal; font-weight: 400; }
 #find-jobs-views .fj-opt:hover { border-color: var(--border-2); background: color-mix(in srgb, var(--card-2) 50%, transparent); }
@@ -156,6 +156,9 @@ tbody tr { transition: background-color .15s var(--fj-ease); }
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--scan) 60%, var(--border)), var(--shadow-1); }
 #find-jobs-views.fj-options.seg-ready .fj-opt.active { color: var(--fg); background: transparent; border-color: transparent; }
 #find-jobs-views .fj-opt.active .fj-opt-name { color: var(--fg); }
+@media (max-width: 1100px) {
+  #find-jobs-views.fj-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 760px) {
   #find-jobs-views.fj-options { grid-template-columns: 1fr; gap: 6px; }
   .fj-opt-desc { display: none; }

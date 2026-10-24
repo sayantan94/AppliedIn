@@ -259,14 +259,7 @@ def _view(raw: dict, prefs: dict, tracked: dict, handled: set, board: dict) -> d
     if raw.get("closed") or not url.startswith("https://") or not raw.get("title"):
         return None
     url = career_ops.canonical(url)
-    identity = career_ops.normalize({"url": url, "title": raw["title"]}, "", "cosign")["id"]
-    state, pk = "new", ""
-    if url in tracked:
-        state, pk = "pipeline", tracked[url]
-    elif url in handled:
-        state = "handled"
-    elif identity in board and board[identity]["state"] != "new":
-        state, pk = board[identity]["state"], board[identity].get("pk", "")
+    state, pk = state_of(url, raw["title"], tracked, handled, board)
     return {
         "id": str(raw["postingId"]),
         "title": raw["title"].strip(),
@@ -285,6 +278,34 @@ def _view(raw: dict, prefs: dict, tracked: dict, handled: set, board: dict) -> d
         "state": state,
         "pk": pk,
     }
+
+
+def known() -> tuple[dict, dict, set, dict]:
+    """What a result is checked against: preferences, the URLs already tracked
+    (to their application), the URLs already handled, and the Career Ops board."""
+    prefs = career_ops.search_preferences()
+    stores = career_ops.make_stores()
+    tracked = {
+        career_ops.canonical(r["jd_url"]): r["pk"] for r in stores.tracking.all() if r.get("jd_url")
+    }
+    from tools import seen
+
+    handled = {career_ops.canonical(u) for u in seen.load()}
+    with career_ops._LOCK:
+        board = career_ops._read()["jobs"]
+    return prefs, tracked, handled, board
+
+
+def state_of(url: str, title: str, tracked: dict, handled: set, board: dict) -> tuple[str, str]:
+    """A result's state ("new", "pipeline", "handled", …) and its application, if any."""
+    identity = career_ops.normalize({"url": url, "title": title}, "", "cosign")["id"]
+    if url in tracked:
+        return "pipeline", tracked[url]
+    if url in handled:
+        return "handled", ""
+    if identity in board and board[identity]["state"] != "new":
+        return board[identity]["state"], board[identity].get("pk", "")
+    return "new", ""
 
 
 def _redis():
@@ -325,16 +346,7 @@ def _recall(ids: list[str]) -> list[dict | None]:
 def search(filters: dict, cursor: str | None = None, client: httpx.Client | None = None) -> dict:
     # A city already names a place, so the US filter only applies without one.
     us_only = filters.get("region") == "us" and not filters.get("city")
-    prefs = career_ops.search_preferences()
-    stores = career_ops.make_stores()
-    tracked = {
-        career_ops.canonical(r["jd_url"]): r["pk"] for r in stores.tracking.all() if r.get("jd_url")
-    }
-    from tools import seen
-
-    handled = {career_ops.canonical(u) for u in seen.load()}
-    with career_ops._LOCK:
-        board = career_ops._read()["jobs"]
+    prefs, tracked, handled, board = known()
     jobs, done = [], False
     # Filtering to the US can empty a page of a global index, so read on until
     # there is a useful page or a bounded number of requests has been spent.
@@ -355,8 +367,12 @@ def search(filters: dict, cursor: str | None = None, client: httpx.Client | None
     return {"jobs": jobs, "cursor": cursor, "done": done}
 
 
-def stage(ids: list[str], *, apply_requested: bool = False) -> dict:
-    """Put picked roles on the board, then hand them to the Career Ops path."""
+def stage(ids: list[str], *, apply_requested: bool = False, network: str = "cosign") -> dict:
+    """Put picked roles on the board, then hand them to the Career Ops path.
+
+    `network` names the index the roles came from (a key of `career_ops.INDEXES`).
+    Both indexes share this path, so their roles get the same guarantees.
+    """
     ids = list(dict.fromkeys(ids))
     if not ids or len(ids) > STAGE_MAX:
         raise ValueError(f"Choose between 1 and {STAGE_MAX} roles at a time.")
@@ -375,11 +391,15 @@ def stage(ids: list[str], *, apply_requested: bool = False) -> dict:
                     "description": job["description"],
                     "location": job["location"],
                     "postedAt": job["posted"],
-                    "why": "Found in the Cosign network" + (f" · {salary}" if salary else ""),
-                    "verification": "cosign",
+                    # The index's own posting id, where the URL's last segment is
+                    # not one (an ADP page, a careers page keyed by query).
+                    "id": job.get("posting_id") or None,
+                    "why": f"Found in the {career_ops.INDEXES[network]}"
+                    + (f" · {salary}" if salary else ""),
+                    "verification": network,
                 },
                 job["company"],
-                "cosign",
+                network,
             )
             old = data["jobs"].get(row["id"])
             if old:
@@ -444,6 +464,7 @@ def _moment(event: dict) -> dict | None:
     if kind == "discovered":
         # Older events say "Cosign:"; newer ones "Cosign network:".
         text = ("Added from the Cosign network" if detail.startswith("Cosign")
+                else "Added from the a16z portfolio" if detail.startswith("a16z")
                 else "Added to the pipeline")
     elif kind == "running" and not agent:
         text = "You asked to apply" if detail.startswith("Apply selected") else ""

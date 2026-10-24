@@ -161,6 +161,10 @@ def _settings(data: dict, sources: list[dict]) -> dict:
     return settings
 
 
+# Job indexes whose roles are staged through this board, by provider name.
+INDEXES = {"cosign": "Cosign network", "a16z": "a16z portfolio"}
+
+
 def canonical(url: str) -> str:
     p = urlsplit(url)
     host = (p.hostname or "").lower()
@@ -520,8 +524,8 @@ def prepare(ids: list[str], stores=None, *, apply_requested: bool = False) -> di
                 jd_url=url,
                 jd_text=row["description"],
                 location=row["location"],
-                # Cosign is an index, not an ATS; the posting URL names the real one.
-                ats=detect_ats(url) if row["provider"] == "cosign" else row["provider"],
+                # Cosign and a16z are indexes, not ATSs; the posting URL names the real one.
+                ats=detect_ats(url) if row["provider"] in INDEXES else row["provider"],
                 posted_at=row["posted_at"],
                 discovery_source="career_ops",
                 apply_requested_at=now() if apply_requested else "",
@@ -535,7 +539,7 @@ def prepare(ids: list[str], stores=None, *, apply_requested: bool = False) -> di
                 emit(
                     "discovered",
                     pk=job.pk,
-                    detail=f"{'Cosign network' if row['provider'] == 'cosign' else 'Career Ops'}: "
+                    detail=f"{INDEXES.get(row['provider'], 'Career Ops')}: "
                     f"{job.title} @ {job.company}",
                     url=url,
                 )

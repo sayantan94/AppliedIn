@@ -1,6 +1,8 @@
 // Cosign search. Mounted outside #pane, like <career-board>, so pipeline polling
 // never repaints it mid-selection. Picking a role only stages it: Score & tailor
 // stops for review; Apply scores, tailors and submits what clears the bar.
+// `network="a16z"` points the same board at the a16z portfolio index, whose
+// routes (/a16z/…) answer in the same shape as Cosign's.
 import { auth } from './auth.js';
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -51,11 +53,12 @@ const SKELETON = n => Array.from({length: n}, (_, i) =>
 const STEP_NAMES = ['Score', 'Tailor', 'Check', 'Apply', 'Submitted'];
 const clock = at => { const d = new Date(at); return Number.isFinite(+d) ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : ''; };
 const FINAL = new Set(['applied', 'attention']);
+const NETWORKS = {cosign: 'Cosign network', a16z: 'a16z portfolio'};
 // What was sent from this board, per viewer, so the pane survives a reload.
 // Browser storage is a convenience here; the pipeline holds the real record.
-const SENT_KEY = 'appliedin.cosign.sent';
-const loadSent = () => { try { return new Map(JSON.parse(localStorage.getItem(SENT_KEY) || '[]')); } catch { return new Map(); } };
-const saveSent = sent => { try { localStorage.setItem(SENT_KEY, JSON.stringify([...sent].slice(-300))); } catch { /* private window */ } };
+const sentKey = network => network === 'cosign' ? 'appliedin.cosign.sent' : `appliedin.${network}.sent`;
+const loadSent = network => { try { return new Map(JSON.parse(localStorage.getItem(sentKey(network)) || '[]')); } catch { return new Map(); } };
+const saveSent = (network, sent) => { try { localStorage.setItem(sentKey(network), JSON.stringify([...sent].slice(-300))); } catch { /* private window */ } };
 const CHECK = '<svg class="co-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>';
 // Adds a city's page to the results in place: a role listed in two cities appears
 // once, and several cities interleave newest first. Returns only the new roles.
@@ -98,13 +101,14 @@ class CosignBoard extends HTMLElement {
   connectedCallback() {
     if (this.ready) return;
     this.ready = true;
+    this.network = NETWORKS[this.getAttribute('network')] ? this.getAttribute('network') : 'cosign';
     this.jobs = []; this.selected = new Set(); this.cursors = {}; this.done = true;
     this.cities = []; this.progress = {}; this.region = 'us'; this.preferred = [];
-    this.sent = loadSent(); this.live = {}; this.paneView = 'role';
+    this.sent = loadSent(this.network); this.live = {}; this.paneView = 'role';
     this.active = null; this.showExcluded = false; this.examples = [];
     this.innerHTML = `<section class="co-page">
       <header class="co-hero">
-        <p class="co-eyebrow">Cosign network</p>
+        <p class="co-eyebrow">${NETWORKS[this.network]}</p>
         <h2>Search <span class="co-count">open</span> roles</h2>
         <p class="co-sub">Starts from your preferences. Anything you pick is scored and tailored first, then waits for your approval.</p>
         <form class="co-composer" role="search">
@@ -195,7 +199,7 @@ class CosignBoard extends HTMLElement {
       if (event.target.closest('.co-answer')) this.dispatchEvent(new CustomEvent('cosign-needs', {bubbles: true}));
       if (event.target.closest('.co-clear-done')) {
         for (const [pk, a] of this.sent) if (FINAL.has(this.live[pk]?.phase)) this.sent.delete(pk);
-        saveSent(this.sent); this.sent.size ? this.showApps() : this.active && this.open(this.active);
+        saveSent(this.network, this.sent); this.sent.size ? this.showApps() : this.active && this.open(this.active);
       }
       const toggle = event.target.closest('.co-steps-toggle');
       if (toggle) {
@@ -240,13 +244,13 @@ class CosignBoard extends HTMLElement {
 
   async request(path, body) {
     const cfg = window.APPLIEDIN_CONFIG || {};
-    if (cfg.demo === true || new URLSearchParams(location.search).has('demo')) throw new Error('Cosign network search is available when connected to your local AppliedIn server.');
-    const response = await fetch((cfg.apiUrl || '').replace(/\/$/, '') + '/cosign' + path, {
+    if (cfg.demo === true || new URLSearchParams(location.search).has('demo')) throw new Error(`${NETWORKS[this.network]} search is available when connected to your local AppliedIn server.`);
+    const response = await fetch((cfg.apiUrl || '').replace(/\/$/, '') + `/${this.network}` + path, {
       method: body === undefined ? 'GET' : 'POST', headers: {'Content-Type': 'application/json', ...auth.header()},
       ...(body === undefined ? {} : {body: JSON.stringify(body)}),
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(response.status === 404 ? 'Restart AppliedIn to enable Cosign network search.' : typeof result.detail === 'string' ? result.detail : 'Could not complete this action. Try again.');
+    if (!response.ok) throw new Error(response.status === 404 ? `Restart AppliedIn to enable ${NETWORKS[this.network]} search.` : typeof result.detail === 'string' ? result.detail : 'Could not complete this action. Try again.');
     return result;
   }
 
@@ -693,7 +697,7 @@ class CosignBoard extends HTMLElement {
         const job = this.jobs.find(j => j.id === id) || {};
         this.sent.set(pk, {id, title: job.title, company: job.company, logo: job.logo, apply, at: Date.now()});
       }
-      saveSent(this.sent);
+      saveSent(this.network, this.sent);
       this.selected.clear();
       this.renderList(new Set());
       const dupes = result.duplicates ? ` · ${result.duplicates} already tracked` : '';

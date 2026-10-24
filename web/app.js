@@ -27,8 +27,8 @@ const state = {
   requests: new Set(), launch: null,
   stats: {},
   events: [],
-  tab: ["#steering", "#career-ops", "#cosign", "#fresh"].includes(location.hash) ? location.hash.slice(1) : "pipeline",
-  findView: ["#career-ops", "#cosign"].includes(location.hash) ? location.hash.slice(1) : "fresh",
+  tab: ["#steering", "#career-ops", "#cosign", "#a16z", "#fresh"].includes(location.hash) ? location.hash.slice(1) : "pipeline",
+  findView: ["#career-ops", "#cosign", "#a16z"].includes(location.hash) ? location.hash.slice(1) : "fresh",
   filter: "all",      // status chip on the Applications table
   logKind: "all",     // kind chip on the Logs view
   liveState: "off",   // SSE connection state (off | connecting | live | demo)
@@ -910,8 +910,8 @@ function renderPreparation() {
 }
 
 function renderTabs() {
-  const finding = ["fresh", "career-ops", "cosign"].includes(state.tab);
-  const searching = state.tab === "career-ops" || state.tab === "cosign";
+  const finding = FIND_VIEWS.includes(state.tab);
+  const searching = INDEX_VIEWS.includes(state.tab) || state.tab === "career-ops";
   if (finding) state.findView = state.tab;
   $("#find-jobs-views").hidden = !finding;
   $$("#find-jobs-views button").forEach(b => {
@@ -920,7 +920,7 @@ function renderTabs() {
   });
   if (finding) placeFindPill();
   document.body.classList.toggle("career-search-page", searching);
-  document.body.classList.toggle("cosign-page", state.tab === "cosign");
+  document.body.classList.toggle("cosign-page", INDEX_VIEWS.includes(state.tab));
   document.body.classList.toggle("steering-page", state.tab === "steering");
   $("#search").placeholder = state.tab === "career-ops" ? "Filter results…" : "Search company or role…";
   renderActivityLayout();
@@ -3208,11 +3208,13 @@ function placeTabPill() {
 }
 
 // Entrances play when the owner changes view, never on background repaints.
-const FIND_VIEWS = ["fresh", "career-ops", "cosign"];
+// Job indexes, each a <cosign-board> with id "<view>-board".
+const INDEX_VIEWS = ["cosign", "a16z"];
+const FIND_VIEWS = ["fresh", "career-ops", ...INDEX_VIEWS];
 const VIEW_ORDER = ["pipeline", ...FIND_VIEWS, "apps", "needs", "steering", "stuck", "activity", "profiles", "logs"];
 function enterFindView(prev, next) {
   if (prev === next) return;
-  const target = next === "cosign" ? $("#cosign-board") : next === "career-ops" ? $("#career-ops-board")
+  const target = INDEX_VIEWS.includes(next) ? $(`#${next}-board`) : next === "career-ops" ? $("#career-ops-board")
     : next === "steering" ? $("#steering-panel") : $("#pane");
   if (!target) return;
   const from = VIEW_ORDER.indexOf(prev), to = VIEW_ORDER.indexOf(next);
@@ -3230,8 +3232,10 @@ function renderPane() {
     careerBoard.setAttribute("company", state.coFilter);
     careerBoard.setAttribute("query", state.query);
   }
-  const cosignBoard = $("#cosign-board");
-  if (cosignBoard) cosignBoard.hidden = state.tab !== "cosign";
+  for (const view of INDEX_VIEWS) {
+    const board = $(`#${view}-board`);
+    if (board) board.hidden = state.tab !== view;
+  }
   // The preservation below is now RARE-PATH insurance, not a per-poll crutch:
   // background repaints only reach here when data genuinely changed (a scan
   // landing rows every few seconds is the common case), and that can still
@@ -3252,7 +3256,7 @@ function renderPane() {
   const fsListEl = $("#fs-list");
   const fsScroll = fsListEl ? fsListEl.scrollTop : 0;
   $("#pane").innerHTML =
-    ["career-ops", "cosign", "steering"].includes(state.tab) ? "" :
+    ["career-ops", ...INDEX_VIEWS, "steering"].includes(state.tab) ? "" :
     state.tab === "apps" ? viewApps() :
     state.tab === "needs" ? viewNeeds() :
     state.tab === "stuck" ? viewStuck() :
@@ -5375,12 +5379,12 @@ function wire() {
     if (e.key === "Escape") { more.open = false; more.querySelector("summary").focus(); e.stopPropagation(); }
   });
   const selectView = (next) => {
-    if (["career-ops", "cosign"].includes(next) && !["fresh", "career-ops", "cosign"].includes(state.tab)) {
+    if (["career-ops", ...INDEX_VIEWS].includes(next) && !FIND_VIEWS.includes(state.tab)) {
       state.coFilter = ""; state.query = ""; $("#co-filter").value = ""; $("#search").value = "";
     }
     const prev = state.tab;
     state.tab = next;
-    const hash = ["fresh", "career-ops", "cosign", "steering"].includes(next) ? "#" + next : "";
+    const hash = [...FIND_VIEWS, "steering"].includes(next) ? "#" + next : "";
     history.replaceState(null, "", location.pathname + location.search + hash);
     // Cached data renders at once; the fetch refreshes it behind the paint.
     if (state.tab === "activity") loadActivity();
