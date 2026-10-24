@@ -10,6 +10,7 @@ DynamoDB — same contract, different host.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI
@@ -2687,9 +2688,24 @@ def create_app() -> FastAPI:
     # Locally, "/" should still open the dashboard.
     @app.get("/", include_in_schema=False)
     def _dashboard():
-        from fastapi.responses import FileResponse
+        from fastapi.responses import HTMLResponse
 
-        return FileResponse(_WEB / "dashboard.html")
+        def versioned(m: re.Match) -> str:
+            path = _WEB / m.group(2)
+            if not path.is_file():
+                return m.group(0)
+            return f"{m.group(1)}{m.group(2)}?v={path.stat().st_mtime_ns}{m.group(3)}"
+    # Revalidation alone still let a tab pair a new page with a stylesheet held
+    # in memory: four Find jobs cards laid out by the three-column CSS. Each
+    # stylesheet and script the page loads carries its file's modification time,
+    # so a changed file is a new URL and can never come from cache.
+    _ASSET_RX = re.compile(
+        r'(<(?:link rel="stylesheet"|script)[^>]*?(?:href|src)=")([\w./-]+\.(?:css|js))(")'
+    )
+
+
+        html = _ASSET_RX.sub(versioned, (_WEB / "dashboard.html").read_text(encoding="utf-8"))
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     # Static assets (app.js, styles.css, …) at the root, last so
     # the explicit API routes above win.
