@@ -1455,7 +1455,24 @@ function reviewStatus(r) {
   const label = {ready:"Needs approval", waiting:"Waiting to apply", applying:"Applying", later:"Skipped for later"}[phase];
   const detail = phase === "waiting" ? item?.blocked === "backoff" ? " · Retry pending"
     : item?.blocked === "company_busy" ? " · Behind current application" : "" : "";
-  return `<span class="review-status ${phase}">${label}${detail}</span>`;
+  const spin = phase === "applying" ? '<span class="rv-spin" aria-hidden="true"></span>' : "";
+  return `<span class="review-status ${phase}">${spin}${label}${detail}</span>`;
+}
+// One row's own action: Apply on a role waiting for approval, a pending
+// "Applying" while the browser works on it. One press, no confirm: the score
+// gate and never-apply-twice are enforced on the server.
+function reviewRowAction(r, day) {
+  const phase = reviewPhase(r);
+  const scope = day == null ? "" : ` data-review-day="${esc(day)}"`;
+  if (phase === "applying") return `<button class="rv-btn rv-busy" disabled><span class="rv-spin" aria-hidden="true"></span>Applying</button>`;
+  if (phase !== "ready") return "";
+  return `<button class="rv-btn rv-apply" data-review-apply-one="${esc(r.pk)}" data-company="${esc(r.company)}"${scope}
+    ${state.approvingAll ? " disabled" : ""} aria-label="Apply to ${esc(r.title)} at ${esc(r.company)}">Apply</button>`;
+}
+function reviewLive(r) {
+  if (reviewPhase(r) !== "applying") return "";
+  const detail = state.activity[r.pk]?.detail;
+  return `<span class="rv-live"><span class="kc-live-dot"></span>${esc(detail ? detail.replace(/^[^\w]+/, "").slice(0, 90) : "Filling the form in your Chrome")}</span>`;
 }
 function reviewActions(company, rows, day = null) {
   const scope = day == null ? "" : ` data-review-day="${esc(day)}"`;
@@ -1524,17 +1541,20 @@ function reviewQueueSec(rows) {
       return `${heading}<div class="ung open review-company">
       <div class="review-sticky">
         <div class="review-actions" data-review-actions="${esc(co)}"${scope}>${reviewActions(co, list, day)}</div>
-        <div class="review-columns" aria-hidden="true"><span></span><span>Role / application identity</span><span>Location</span><span>Match</span><span>Processed</span><span>Résumé</span></div>
+        <div class="review-columns" aria-hidden="true"><span></span><span>Role</span><span>Match</span><span>Status</span><span></span></div>
       </div>
-      <ol class="un-list">${list.map((r) => `<li class="un-row review-row${state.reviewPicked.has(r.pk) ? " un-picked" : ""}">
+      <ol class="un-list">${list.map((r) => `<li class="un-row review-row rv-${reviewPhase(r)}${state.reviewPicked.has(r.pk) ? " un-picked" : ""}" data-review-row="${esc(r.pk)}">
         <input type="checkbox" class="un-sel" data-review-pick="${esc(r.pk)}"${scope}
           aria-label="Select ${esc(r.title)} at ${esc(co)}"${state.reviewPicked.has(r.pk) ? " checked" : ""}${state.approvingAll || !reviewSelectable(r) ? " disabled" : ""}>
         <div class="review-role"><button class="review-title" data-open="${esc(r.pk)}">${esc(r.title)}</button>
-          ${profHtml(r.profile_id, r.company)}${reviewStatus(r)}</div>
-        <span class="review-location">${esc(r.location || "Not listed")}</span>
-        <span class="review-score" aria-label="Match score">${Number.isFinite(Number(r.match_score)) && r.match_score != null ? `${esc(r.match_score)}/10` : "—"}</span>
-        <span class="review-date mono">${reviewDate(r)}</span>
-        <button class="ps-link review-preview" data-resume="${esc(r.pk)}"${!r.resume_url ? ' disabled title="No résumé PDF is available"' : ' title="Preview tailored résumé"'}>Preview</button>
+          <span class="review-sub">${[esc(co), r.location ? esc(r.location) : "", reviewTimestamp(r) ? `<span class="review-date">${reviewDate(r)}</span>` : ""].filter(Boolean).join(" · ")}</span>
+          ${profHtml(r.profile_id, r.company)}${reviewLive(r)}</div>
+        <span class="review-score" aria-label="Match score">${Number.isFinite(Number(r.match_score)) && r.match_score != null ? `<b>${esc(r.match_score)}</b><span class="review-of">/10</span>` : "—"}</span>
+        ${reviewStatus(r)}
+        <span class="review-btns">
+          <button class="rv-btn rv-ghost review-preview" data-resume="${esc(r.pk)}"${!r.resume_url ? ' disabled title="No résumé PDF is available"' : ' title="Preview tailored résumé"'}>Preview</button>
+          ${reviewRowAction(r, day)}
+        </span>
       </li>`).join("")}</ol>
     </div>`; }).join("") || '<div class="review-empty">No roles in this view. Use the filters above to review other roles.</div>'}</div>
     </div>
@@ -1573,14 +1593,16 @@ async function reviewAction(action, company, explicitPks = null, day = null) {
   const picks = explicitPks ? state.apps.filter((r) => r.company === company && explicitPks.includes(r.pk))
     : selected.length ? selected : action === "apply" ? rows.filter((r) => reviewSelectable(r) && !reviewIsSkipped(r)) : [];
   if (!picks.length || !["reject", "apply", "skip", "restore", "undo"].includes(action)) return;
-  if (["reject", "apply"].includes(action)) {
+  // A row's own Apply is one press; bulk actions still ask first.
+  const oneRowApply = action === "apply" && explicitPks?.length === 1;
+  if (["reject", "apply"].includes(action) && !oneRowApply) {
     const detail = action === "reject" ? "They move to Closed. You can undo this decision."
       : "Only these roles will start. Other roles in this company's queue are left for their own run.";
     if (!confirm(`${action === "reject" ? "Reject" : "Apply to"} ${picks.length} role${picks.length === 1 ? "" : "s"} at ${company}?\n\n${detail}`)) return;
   }
   state.approvingAll = true;
   state.reviewNotices[company] = {message: `${action === "apply" ? "Starting" : "Saving"} ${picks.length} role${picks.length === 1 ? "" : "s"}…`};
-  const controls = $$("[data-review-action], [data-review-pick], [data-review-select], [data-review-clear], [data-review-undo], [data-approve-all]");
+  const controls = $$("[data-review-action], [data-review-apply-one], [data-review-pick], [data-review-select], [data-review-clear], [data-review-undo], [data-approve-all]");
   controls.forEach((el) => { el.disabled = true; });
   paintReviewControls();
   try {
@@ -3393,6 +3415,8 @@ function renderLiveLine(pk) {
   const a = state.apps.find((r) => r.pk === pk);
   const act = state.activity[pk];
   if (!a || !act || !act.detail || !["tailoring", "submitting"].includes(a.status)) return;
+  const live = $(`#pane [data-review-row="${CSS.escape(pk)}"] .rv-live`);
+  if (live) live.innerHTML = `<span class="kc-live-dot"></span>${esc(act.detail.replace(/^[^\w]+/, "").slice(0, 90))}`;
   const card = $(`#pane .kcard[data-open="${CSS.escape(pk)}"]`);
   if (!card) return;
   let el = card.querySelector(".kc-live");
@@ -6119,6 +6143,8 @@ function wire() {
       rows.forEach((r) => all ? state.reviewPicked.delete(r.pk) : state.reviewPicked.add(r.pk));
       paintReviewControls(); return;
     }
+    const applyOne = e.target.closest("[data-review-apply-one]");
+    if (applyOne) { reviewAction("apply", applyOne.dataset.company, [applyOne.dataset.reviewApplyOne], applyOne.dataset.reviewDay ?? null); return; }
     const reviewButton = e.target.closest("[data-review-action]");
     if (reviewButton) { reviewAction(reviewButton.dataset.reviewAction, reviewButton.dataset.company, null, reviewButton.dataset.reviewDay ?? null); return; }
     if (e.target.closest("[data-approve-all]")) { approveAll(); return; }

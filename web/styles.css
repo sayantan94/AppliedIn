@@ -4388,21 +4388,38 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .review-sticky { position: sticky; top: var(--deck-height); z-index: 12; background: var(--panel-solid); border-bottom: 1px solid var(--border-2); box-shadow: 0 2px 4px #0002; }
 .review-actions { display: flex; align-items: center; gap: 6px; padding: 8px 12px; flex-wrap: wrap; }
 .review-count { margin-right: auto; color: var(--fg); font-weight: 600; font-size: 12px; }
-.review-columns, .un-row.review-row { display: grid; grid-template-columns: 18px minmax(150px, 1fr) minmax(90px, 140px) 45px 105px 64px; gap: 10px; align-items: center; padding: 9px 12px; }
-.review-columns { padding-top: 2px; padding-bottom: 7px; font-size: 10px; color: var(--muted); }
+/* Queue rows read like the homepage demo: the role and where it is, one big
+   score, one status pill, and the row's own Apply. */
+.review-columns, .un-row.review-row { display: grid; grid-template-columns: 18px minmax(160px, 1fr) 56px 128px auto; gap: 12px; align-items: center; padding: 12px 14px; }
+.review-columns { padding-top: 4px; padding-bottom: 8px; font-size: 11px; color: var(--muted); }
 .review-row .un-sel { opacity: 1; width: 16px; height: 16px; }
-.review-row { border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+.review-row { border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); transition: background-color .2s ease; }
 .review-row:last-child { border-bottom: 0; }
-.review-title { padding: 0; border: 0; background: none; color: var(--fg); text-align: left; font: inherit; line-height: 1.5; cursor: pointer; overflow-wrap: anywhere; }
+.review-row.rv-applying { background: color-mix(in srgb, var(--scan) 7%, transparent); }
+.review-title { padding: 0; border: 0; background: none; color: var(--fg); text-align: left; font: inherit; font-size: 14px; font-weight: 600; line-height: 1.35; cursor: pointer; overflow-wrap: anywhere; }
 .review-title:hover { text-decoration: underline; text-underline-offset: 3px; }
-.review-role { min-width: 0; }
-.review-role .kc-prof { margin: 3px 0 0; font-size: 11px; color: var(--muted); }
+.review-role { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.review-sub { margin-top: 2px; font-size: 12px; line-height: 1.35; color: var(--muted); overflow-wrap: anywhere; }
+.review-role .kc-prof { margin: 4px 0 0; font-size: 11px; color: var(--muted); }
 .review-later { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
-.review-location { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; line-height: 1.4; }
-.review-score { color: var(--fg); font-size: 12px; font-variant-numeric: tabular-nums; }
-.review-date { color: var(--muted); font-size: 11px; }
-.review-preview { margin: 0; padding: 5px 7px; }
-.review-preview:disabled { opacity: .55; }
+.review-score { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.review-score b { color: var(--fg); font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.review-of { font-size: 11px; color: var(--faint); }
+.review-date, .review-date time { color: inherit; font-size: inherit; }
+.review-btns { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.rv-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border-2); background: var(--card); color: var(--fg); font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+.rv-btn:disabled { cursor: default; }
+.rv-ghost { border-color: transparent; background: transparent; color: var(--muted); font-weight: 500; }
+.rv-ghost:hover:not(:disabled) { color: var(--fg); background: var(--card-2); }
+.rv-ghost:disabled { opacity: .5; }
+.rv-apply { background: var(--scan); border-color: var(--scan); color: var(--scan-ink); }
+.rv-apply:hover:not(:disabled) { background: var(--scan-deep); border-color: var(--scan-deep); }
+.rv-apply:disabled { opacity: .55; }
+.rv-busy { background: var(--scan-deep); border-color: var(--scan-deep); color: var(--scan-ink); }
+.rv-spin { width: 12px; height: 12px; flex: none; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: rv-turn .8s linear infinite; }
+@keyframes rv-turn { to { transform: rotate(360deg); } }
+.rv-live { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--fg); }
+@media (prefers-reduced-motion: reduce) { .rv-spin { animation: none; } }
 .review-empty { padding: 16px; font-size: 13px; color: var(--muted); }
 .review-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 12px 8px; padding: 10px; background: var(--card-2); border-radius: 6px; font-size: 12px; color: var(--fg); }
 .review-notice details { flex: 1 1 100%; color: var(--muted); }
@@ -4434,13 +4451,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .review-actions { gap: 6px; }
   .review-count { flex: 1 1 100%; }
   .review-columns { display: none; }
-  .un-row.review-row { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 6px 10px; }
-  .review-row .un-sel { grid-column: 1; grid-row: 1; align-self: start; margin-top: 4px; }
-  .review-role { grid-column: 2 / 4; }
-  .review-location { grid-column: 2; }
-  .review-score { grid-column: 3; grid-row: 2; font-size: 11px; }
-  .review-date { grid-column: 2; }
-  .review-preview { grid-column: 3; grid-row: 3; }
+  .un-row.review-row { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px 10px; }
+  .review-row .un-sel { grid-column: 1; grid-row: 1; align-self: start; margin-top: 3px; }
+  .review-role { grid-column: 2; grid-row: 1; }
+  .review-score { grid-column: 3; grid-row: 1; align-self: start; }
+  .review-row .review-status { grid-column: 2; grid-row: 2; }
+  .review-btns { grid-column: 2 / 4; grid-row: 3; justify-content: flex-start; }
   .prep-stage { max-width: 100%; }
   .preference-scope { margin: 0 14px; }
 }
@@ -4453,9 +4469,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 /* Keep status beside each role without adding another wide table column. */
-.review-status { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); }
-.review-status.waiting { color: var(--run); }
-.review-status.applying { color: var(--scan); }
+.review-status { display: inline-flex; align-items: center; gap: 6px; justify-self: start; width: max-content; max-width: 100%; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.3; color: var(--muted); background: var(--card-2); }
+.review-status.ready { color: var(--scan-deep); background: color-mix(in srgb, var(--scan) 13%, transparent); }
+.review-status.waiting, .review-status.applying { color: var(--run-deep); background: color-mix(in srgb, var(--run) 15%, transparent); }
+.review-status .rv-spin { width: 10px; height: 10px; }
 .review-stop { margin-left: auto; }
 .review-row:has(.un-sel:disabled) .un-sel { cursor: default; }
 
