@@ -239,17 +239,22 @@ def available():
 def _run(coro):
     import asyncio
 
+    # Ask whether a loop is running; do not infer it from a RuntimeError. The
+    # task's OWN RuntimeErrors were caught here too, and re-running the spent
+    # coroutine replaced the real cause with "cannot reuse already awaited
+    # coroutine" — or, where a fresh coroutine was built, opened a second
+    # browser session.
     try:
+        asyncio.get_running_loop()
+    except RuntimeError:
         return asyncio.run(coro)
-    except RuntimeError:  # already inside a loop
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(coro)).result()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 def _from_chrome(url: str, kind: str = "jd") -> dict | None:
     """Read the posting in the owner's own browser. Last resort, and slow."""
-    import asyncio
 
     from tools.claude_chrome import available, run_task
 
@@ -265,15 +270,8 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
             "and repeat it in your reply:\n"
             '{"title": "<the role title>", "description": "<the full posting text, '
             'verbatim: responsibilities, requirements, everything>"}')
-    try:
-        report, problem = asyncio.run(
-            run_task(task, report_key="description", timeout_s=300, kind=kind))
-    except RuntimeError:  # already inside a loop
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            report, problem = pool.submit(
-                lambda: asyncio.run(run_task(task, report_key="description",
-                                             timeout_s=300, kind=kind))).result()
+    report, problem = _run(
+        run_task(task, report_key="description", timeout_s=300, kind=kind))
     if problem or not report:
         log.warning("could not read %s in the browser: %s", url, problem)
         why = problem or "The browser reader returned no posting report. Try reading it again."

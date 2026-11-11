@@ -9,6 +9,8 @@ Artifacts (PDFs) live on disk, not in Redis. Local mode is the real product.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,13 @@ from .base import (
     AbstractTracking,
 )
 
+_SECRETS_LOCK = threading.Lock()
+_FACTS_LOCK = threading.Lock()
+# A line break inside one answer, as it is stored in facts.md. The file is one
+# entry per line and meant to be edited by hand, and <br> is what a person
+# reading markdown would expect a line break to look like.
+_BR = "<br>"
+
 
 class FileArtifactStore(AbstractArtifactStore):
     """S3 ArtifactStore analogue, backed by a directory tree."""
@@ -31,25 +40,41 @@ class FileArtifactStore(AbstractArtifactStore):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def _path(self, key: str) -> Path:
+        """The file for `key`, refused if it lands outside the store.
+
+        Keys reach here from a URL (/artifact/<key>) and from job ids read off
+        employers' pages. `root / "../secrets.json"` and `root / "/etc/hosts"`
+        are both valid Path arithmetic, so the containment has to be checked.
+        """
+        base = self.root.resolve()
+        full = (base / key).resolve()
+        if full == base or not full.is_relative_to(base):
+            raise ValueError(f"artifact key escapes the store: {key!r}")
+        return full
+
     def put(self, prefix: str, key: str, data: bytes, content_type: str) -> str:
-        full = self.root / prefix / key
+        full = self._path(f"{prefix}/{key}")
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_bytes(data)
         return f"{prefix}/{key}"
 
     def get(self, key: str) -> bytes:
-        return (self.root / key).read_bytes()
+        return self._path(key).read_bytes()
 
     def presign(self, key: str, *, expires: int = 3600) -> str:
-        return (self.root / key).resolve().as_uri()
+        return self._path(key).as_uri()
 
     def exists(self, key: str) -> bool:
-        return (self.root / key).is_file()
+        try:
+            return self._path(key).is_file()
+        except ValueError:
+            return False
 
     def version(self, key: str) -> str:
         try:
-            return str(int((self.root / key).stat().st_mtime))
-        except OSError:
+            return str(int(self._path(key).stat().st_mtime))
+        except (OSError, ValueError):
             return ""
 
 
@@ -116,17 +141,17 @@ class RedisTracking(AbstractTracking):
         # and one written against a posting that has since changed. Stamped on the
         # TRANSITION so a later edit to the row does not move the date.
         if val == "tailored" and prev != "tailored" and not row.get("tailored_at"):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
-            row["tailored_at"] = datetime.now(timezone.utc).isoformat()
+            row["tailored_at"] = datetime.now(UTC).isoformat()
         # And when it went out. Nothing recorded this, so "how many did I send last
         # Tuesday" could not be answered at all: an applied row knew only when it
         # was DISCOVERED, which for a job found in a sweep and applied to a week
         # later is a different week.
         if val in ("applied", "applied_manual") and not row.get("applied_at"):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
-            row["applied_at"] = datetime.now(timezone.utc).isoformat()
+            row["applied_at"] = datetime.now(UTC).isoformat()
         row.update(attrs)
         self._write(pk, row, prev_status=prev)
 
@@ -153,7 +178,7 @@ class RedisTracking(AbstractTracking):
         keys = list(self.r.scan_iter("status:*"))
         for k in keys:
             pipe.scard(k)
-        for k, n in zip(keys, pipe.execute()):
+        for k, n in zip(keys, pipe.execute(), strict=True):
             if n:
                 counts[str(k).split(":", 1)[1]] = int(n)
         return counts
@@ -195,7 +220,9 @@ class MarkdownAnswerBank(AbstractAnswerBank):
                                  "_Human-editable: add or fix answers; the agent reads them._\n")
 
     def _scope_pk(self, scope: AnswerScope, company: str | None) -> str:
-        return "global" if scope is AnswerScope.GLOBAL else f"company#{(company or '').strip().lower()}"
+        if scope is AnswerScope.GLOBAL:
+            return "global"
+        return f"company#{(company or '').strip().lower()}"
 
     def _load(self) -> dict[str, list[tuple[str, str]]]:
         sections: dict[str, list[tuple[str, str]]] = {}
@@ -212,7 +239,8 @@ class MarkdownAnswerBank(AbstractAnswerBank):
                 body = line.strip()[2:]
                 end = body.find("**", 2)
                 if end != -1:
-                    sections[cur].append((body[2:end], body[end + 2:].lstrip(": ").strip()))
+                    answer = body[end + 2:].lstrip(": ").strip()
+                    sections[cur].append((body[2:end], answer.replace(_BR, "\n")))
         return sections
 
     def _write(self, data: dict[str, list[tuple[str, str]]]) -> None:
@@ -222,9 +250,18 @@ class MarkdownAnswerBank(AbstractAnswerBank):
             if pk not in data:
                 continue
             out.append(f"## {'global' if pk == 'global' else 'company: ' + pk.split('#', 1)[1]}")
-            out += [f"- **{q}**: {a}" for q, a in data[pk]]
+            # One entry, one line: that is how the file is read back. A drafted
+            # essay with paragraphs used to be written as it came, and on the next
+            # load only its first line was the answer, so a later application got
+            # a truncated essay. A multi-line question did not parse at all and
+            # was erased by the next write, so the same gate was asked again.
+            out += [f"- **{' '.join(str(q).split())}**: "
+                    f"{str(a).strip().replace(chr(13), '').replace(chr(10), _BR)}"
+                    for q, a in data[pk]]
             out.append("")
-        self.path.write_text("\n".join(out))
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        tmp.write_text("\n".join(out))
+        os.replace(tmp, self.path)
 
     def lookup(self, question: str, company: str) -> str | None:
         data, label = self._load(), normalize_label(question)
@@ -236,16 +273,19 @@ class MarkdownAnswerBank(AbstractAnswerBank):
 
     def put(self, question: str, answer: str, scope: AnswerScope, *,
             company: str | None = None, source: str = "local", approved_at: str = "") -> None:
-        data = self._load()
-        entries = data.setdefault(self._scope_pk(scope, company), [])
-        label = normalize_label(question)
-        for i, (q, _) in enumerate(entries):
-            if normalize_label(q) == label:
-                entries[i] = (question, answer)
-                break
-        else:
-            entries.append((question, answer))
-        self._write(data)
+        # Two applications finishing together each read the file, added their
+        # own answer and wrote it back; the second write dropped the first's.
+        with _FACTS_LOCK:
+            data = self._load()
+            entries = data.setdefault(self._scope_pk(scope, company), [])
+            label = normalize_label(question)
+            for i, (q, _) in enumerate(entries):
+                if normalize_label(q) == label:
+                    entries[i] = (question, answer)
+                    break
+            else:
+                entries.append((question, answer))
+            self._write(data)
 
     def seed_global(self, entries: dict[str, str], *, source: str = "seed") -> None:
         for q, a in entries.items():
@@ -283,12 +323,28 @@ class FileSecrets(AbstractSecrets):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self.path.write_text("{}")
+            self._write({})
+
+    def _write(self, data: dict) -> None:
+        # Temp file then rename, owner-only. This file holds portal logins: a
+        # crash mid-write used to leave it truncated, after which every read
+        # raised, and it was created readable by every local account.
+        import os
+
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, default=str))
+        os.replace(tmp, self.path)
 
     def get_json(self, name: str) -> dict | None:
         return json.loads(self.path.read_text() or "{}").get(name)
 
     def put_json(self, name: str, obj: dict) -> None:
-        data = json.loads(self.path.read_text() or "{}")
-        data[name] = obj
-        self.path.write_text(json.dumps(data, indent=2, default=str))
+        # Read, change, write as one step: up to six apply threads share this
+        # file, and two interleaved writers each wrote back a copy missing the
+        # other's entry.
+        with _SECRETS_LOCK:
+            data = json.loads(self.path.read_text() or "{}")
+            data[name] = obj
+            self._write(data)

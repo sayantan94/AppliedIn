@@ -7,6 +7,8 @@ fetch detail if needed. Paginated via ``offset``/``limit``.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import httpx
 
 from core.models import JobRecord
@@ -18,14 +20,14 @@ def _iso(v: object) -> str:
     """A date string from whatever the feed used. Epoch milliseconds, epoch
     seconds and an ISO string all appear across these boards; anything else
     becomes empty rather than a wrong date."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     if v in (None, ""):
         return ""
     if isinstance(v, (int, float)):
         secs = float(v) / 1000 if float(v) > 1e11 else float(v)
         try:
-            return datetime.fromtimestamp(secs, timezone.utc).isoformat()
+            return datetime.fromtimestamp(secs, UTC).isoformat()
         except (OSError, OverflowError, ValueError):
             return ""
     return str(v)

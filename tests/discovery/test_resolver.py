@@ -1,4 +1,5 @@
 import httpx
+
 from core.models import DiscoveryMode
 from discovery.resolver import detect_from_url, resolve
 

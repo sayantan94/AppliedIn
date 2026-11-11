@@ -14,8 +14,6 @@ Two rules keep a batch honest, both in code:
 
 from __future__ import annotations
 
-import asyncio
-
 from agent.run import _unreadable, prefetch_browser_jds
 from tools import jd
 

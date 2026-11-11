@@ -89,7 +89,11 @@ def _workday(host: str, path: str, url: str) -> AtsMatch | None:
     if "myworkdayjobs.com" in host:
         tenant = host.split(".")[0]
         parts = [p for p in path.split("/") if p]
-        site = parts[-1] if parts else ""
+        # The site is the segment after the optional locale, not the last one:
+        # /en-US/Site/jobs and /Site/job/<posting> both ended in something else.
+        if parts and re.fullmatch(r"[a-z]{2}(?:[-_][A-Za-z]{2})?", parts[0]):
+            parts = parts[1:]
+        site = parts[0] if parts else ""
         if site:
             base = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
             return AtsMatch("workday", base)
@@ -109,14 +113,24 @@ _URL_DETECTORS = (_greenhouse, _lever, _ashby, _smartrecruiters, _workday, _eigh
 # Signatures to look for inside a fetched custom careers page (many custom pages
 # embed or link their real ATS board). Only ATSes we have a feed adapter for.
 _PAGE_SIGNATURES = (
-    (re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"),
+    # Order matters and so do the exclusions. The commonest Greenhouse embed is
+    # ".../embed/job_board/js?for=acme", which the bare pattern read as a board
+    # called "embed"; Ashby's API URL was read as a board called "posting-api".
+    # Either turns the company into a feed that 404s on every run and never
+    # falls back to crawling. Tokens are matched case-insensitively because
+    # "jobs.lever.co/AcmeCo" is a real board.
+    (re.compile(r"(?:boards|job-boards)\.greenhouse\.io/embed/job_(?:board|app)"
+                r"(?:/js)?\?(?:[^\"'\s]*&(?:amp;)?)?for=([a-z0-9_-]+)", re.I), "greenhouse"),
+    (re.compile(r"api\.greenhouse\.io/v1/boards/([a-z0-9_-]+)", re.I), "greenhouse"),
+    (re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?!embed\b)([a-z0-9_-]+)", re.I),
      "greenhouse"),
-    (re.compile(r"api\.greenhouse\.io/v1/boards/([a-z0-9_-]+)"), "greenhouse"),
-    (re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)"), "lever"),
-    (re.compile(r"api\.lever\.co/v0/postings/([a-z0-9_-]+)"), "lever"),
-    (re.compile(r"(?:jobs\.)?ashbyhq\.com/([a-z0-9_-]+)"), "ashby"),
-    (re.compile(r"api\.ashbyhq\.com/posting-api/job-board/([a-z0-9_-]+)"), "ashby"),
-    (re.compile(r"api\.smartrecruiters\.com/v1/companies/([a-z0-9_-]+)"), "smartrecruiters"),
+    (re.compile(r"api\.lever\.co/v0/postings/([a-z0-9_-]+)", re.I), "lever"),
+    (re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)", re.I), "lever"),
+    (re.compile(r"api\.ashbyhq\.com/posting-api/job-board/([a-z0-9_.-]+)", re.I), "ashby"),
+    (re.compile(r"(?<!api\.)(?:jobs\.)?ashbyhq\.com/(?!posting-api\b|api\b)([a-z0-9_.-]+)",
+                re.I), "ashby"),
+    (re.compile(r"api\.smartrecruiters\.com/v1/companies/([a-z0-9_-]+)", re.I),
+     "smartrecruiters"),
 )
 
 
@@ -200,7 +214,14 @@ def _same_company(board_name: str, company: str, slug: str) -> bool:
     b, c = norm(board_name), norm(company)
     if not b or not c:
         return False
-    return b in c or c in b or b == norm(slug)
+    if b == c or b == norm(slug):
+        return True
+    # Whole words, not substrings: "Meta" is inside "Metabase" and "Block" is
+    # inside "Blockchain", and neither pair is the same employer. "Scale" for
+    # "Scale AI" and "Stripe, Inc." for "Stripe" still line up.
+    words = lambda s: set(re.findall(r"[a-z0-9]+", (s or "").lower()))  # noqa: E731
+    bw, cw = words(board_name), words(company)
+    return bool(bw and cw) and (bw <= cw or cw <= bw)
 
 
 def probe_boards(name: str, careers_url: str,

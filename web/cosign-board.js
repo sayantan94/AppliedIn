@@ -6,6 +6,8 @@
 import { auth } from './auth.js';
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Posting links come from scraped pages: web URLs only, never a script scheme.
+const href = value => { const s = String(value ?? '').trim(); return esc(/^https?:\/\//i.test(s) ? s : '#'); };
 const still = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 const money = v => v >= 1000 ? `$${Math.round(v / 1000)}K` : `$${v}`;
 const salary = job => job.salary_min && job.salary_max ? `${money(job.salary_min)} – ${money(job.salary_max)}`
@@ -573,7 +575,7 @@ class CosignBoard extends HTMLElement {
       <div class="co-detail-actions">${staged
         ? `<span class="co-tag co-tag-on">${esc(STATES[job.state] || job.state)}</span>${live ? `<span class="co-live" data-phase="${esc(live.phase)}">${esc(live.label)}</span>` : ''}`
         : `<button type="button" class="btn btn-primary" data-act="prepare">Score & tailor</button><button type="button" class="btn btn-amber" data-act="apply">Apply</button>`}
-        <a class="btn btn-ghost" href="${esc(job.url)}" target="_blank" rel="noopener noreferrer">Posting ↗</a></div>
+        <a class="btn btn-ghost" href="${href(job.url)}" target="_blank" rel="noopener noreferrer">Posting ↗</a></div>
       ${staged ? '' : '<p class="co-hint">Score & tailor stops for your review. Apply scores, tailors and submits if it passes your bar.</p>'}
       <hr>
       <div class="co-desc${job.description.length > 1600 ? ' co-collapsed' : ''}">${esc(job.description || 'No description was found for this role. Open the posting to read it.')}</div>

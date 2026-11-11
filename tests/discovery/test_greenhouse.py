@@ -1,4 +1,5 @@
 import httpx
+
 from discovery.adapters.greenhouse import GreenhouseAdapter
 from discovery.watchlist import CompanyConfig
 

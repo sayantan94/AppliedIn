@@ -331,11 +331,29 @@ def stop_epoch() -> int:
         return 0
 
 
-def bump_stop_epoch() -> int:
-    """Assert Stop: end the runs that are currently going. Best effort like the
-    rest of this module — a failure here must never take the pipeline down."""
+def run_epoch(kind: str) -> int:
+    """The stop signal as one kind of run ("discover", "process") sees it.
+
+    There was a single counter, and every Stop bumped it. So Stop next to
+    Discover also ended a Process pass that was running, and "Stop applying"
+    ended both, each logged as stopped by the owner. A run now watches the
+    counter for everything plus its own; both only ever go up, so their sum
+    changes exactly when either is bumped.
+    """
     try:
-        return int(_redis().hincrby(_KEY, "stop_epoch", 1))
+        own = int(get_flag(f"stop_epoch:{kind}", "0") or 0)
+    except (TypeError, ValueError):
+        own = 0
+    return stop_epoch() + own
+
+
+def bump_stop_epoch(kind: str = "") -> int:
+    """Assert Stop: end the runs that are currently going, or only those of one
+    `kind`. Best effort like the rest of this module — a failure here must never
+    take the pipeline down."""
+    try:
+        return int(_redis().hincrby(
+            _KEY, f"stop_epoch:{kind}" if kind else "stop_epoch", 1))
     except Exception:  # noqa: BLE001
         log.debug("bump_stop_epoch failed", exc_info=True)
         return stop_epoch()

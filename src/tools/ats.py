@@ -63,7 +63,8 @@ _ASHBY_FIELDS_JS = r"""
     // A PRIMARY text/combo/select control wins — its radios (e.g. a phone
     // country-code widget) are auxiliary, not the field's answer.
     const ctrl = fe.querySelector(
-      'input:not([type=hidden]):not([type=radio]):not([type=checkbox]), textarea, select, [role=combobox]');
+      'input:not([type=hidden]):not([type=radio]):not([type=checkbox]), ' +
+      'textarea, select, [role=combobox]');
 
     // No primary control but radio/checkbox options → a real choice GROUP.
     if (!ctrl) {

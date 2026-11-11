@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -274,7 +275,8 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
                "no text. Nothing was tailored. Retry once the site is reachable.")
         stores.tracking.set_status(pk, Status.FAILED, fail_reason=why, fail_kind="no_jd")
         emit("failed", pk=pk, detail="posting unreadable — not tailored", url=row.get("jd_url"))
-        log.warning("unreadable posting for pk=%s (%d chars) — closed as no_jd", pk, len(jd_text or ""))
+        log.warning("unreadable posting for pk=%s (%d chars) — closed as no_jd",
+                    pk, len(jd_text or ""))
         return {"result": "failed", "pk": pk, "reason": "no_jd"}
 
     if _no_sponsorship(jd_text):  # dead end before we waste tailoring / an application
@@ -400,8 +402,12 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
         text = got.get(r["jd_url"])
         if not text:
             continue
-        stores.tracking.set_status(r["pk"], r.get("status") or Status.FOUND,
-                                   jd_text=text, jd_read_error="")
+        # The status as it is NOW. `r` is a snapshot from before browser reads
+        # that can wait half an hour behind a live apply; writing its status back
+        # turned a row the owner had since skipped or marked applied into `found`
+        # again, which is a row the pipeline will apply to.
+        _keep_status(r["pk"], r.get("status") or Status.FOUND, stores,
+                     jd_text=text, jd_read_error="")
         filled += 1
     log.info("browser prefetch filled %d and closed %d of %d posting(s)", filled, closed, len(need))
     return filled
@@ -500,6 +506,20 @@ def _enqueue_apply(pk: str, stores: Any, *, priority: bool = False) -> dict:
         return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
 
     q = ApplyQueue(stores.tracking.r)
+    # A second answer to the same gate (a double click, a stale tab) arrives while
+    # the first is already in the browser. The queue only dedupes PENDING items, so
+    # it took a second copy and reset the row to `tailored` under the live session;
+    # when that session ended uncertain or failed, the copy applied again.
+    if row.get("status") == Status.SUBMITTING.value or pk in q.in_flight():
+        log.warning("refusing to queue %s: it is being applied right now", pk)
+        return {"result": "already_running", "pk": pk}
+    # May already have gone. Only the owner's explicit Retry clears this.
+    if row.get("fail_kind") == "uncertain":
+        log.warning("refusing to queue %s: its last submit was unconfirmed", pk)
+        return {"result": "duplicate", "pk": pk, "reason": "uncertain"}
+    if row.get("status") == Status.SKIPPED.value:
+        log.warning("refusing to queue %s: the owner skipped it", pk)
+        return {"result": "skipped", "pk": pk, "reason": "user_skipped"}
     # A role the owner pressed Apply on already has its go-ahead. Marking it
     # "approval" is what put it back in front of them as a question.
     requested = bool(row.get("apply_requested_at"))
@@ -547,9 +567,39 @@ def _gate_label(question: str) -> str | None:
     if not spans:
         return None
     asked = [s for s in spans if s.endswith("?")]
+    # Two quoted questions and no way to tell which one is unanswered: 'The form
+    # asks "Are you authorized to work in the US?" (answered) but I have nothing
+    # for "Notice period?"' filed "2 weeks" under work authorization, for every
+    # employer. A key nothing queries is survivable; a wrong key is not.
+    if len(set(asked)) > 1:
+        return None
     # Longest wins: gates quote the role and the field in one breath, and the
     # field is the longer, more specific of the two.
     return max(asked or spans, key=len)
+
+
+# Statuses only the owner or a live browser session puts a row in. A slow step
+# that finishes afterwards must not write its older idea of the row over them.
+_SETTLED = frozenset({"applied", "applied_manual", "skipped", "submitting"})
+
+
+def _keep_status(pk: str, fallback: Any, stores: Any, *, settled: bool = False,
+                 **attrs: Any) -> None:
+    """Write `attrs` without undoing a status change made in the meantime.
+
+    Several steps here read a row, work for minutes, then write the row back with
+    the status they read. If the owner marked the job applied or skipped it in
+    that window, the write reverted it, and a reverted row is one the duplicate
+    guard no longer recognises. By default the row keeps whatever status it has
+    now; with `settled`, `fallback` is restored unless the row has moved to a
+    status that must never be undone.
+    """
+    cur = (stores.tracking.get(pk) or {}).get("status")
+    if settled:
+        status = cur if cur in _SETTLED else fallback
+    else:
+        status = cur or fallback
+    stores.tracking.set_status(pk, status, **attrs)
 
 
 def _session_state(row: dict, jd_text: str) -> dict:
@@ -629,7 +679,6 @@ def retailor(pk: str, note: str | None = None, stores: Any = None) -> dict:
     a browser is on the form, and swapping the PDF under it is how one job's
     résumé ends up attached to another job's application.
     """
-    import asyncio
 
     stores = stores or make_stores()
     row = stores.tracking.get(pk)
@@ -676,12 +725,12 @@ def retailor(pk: str, note: str | None = None, stores: Any = None) -> dict:
     try:
         _run(_tailor_only(pk, state, row.get("title", ""), row.get("company", "")))
     except Exception as exc:  # noqa: BLE001 — the status must come back regardless
-        stores.tracking.set_status(pk, status or Status.FOUND)
+        _keep_status(pk, status or Status.FOUND, stores, settled=True)
         log.exception("re-tailor failed for %s", pk)
         return {"result": "error", "pk": pk, "reason": str(exc)}
-    from datetime import datetime, timezone
-    stores.tracking.set_status(pk, status or Status.FOUND,
-                               retailored_at=datetime.now(timezone.utc).isoformat())
+    from datetime import datetime
+    _keep_status(pk, status or Status.FOUND, stores, settled=True,
+                 retailored_at=datetime.now(UTC).isoformat())
     after = stores.tracking.get(pk) or {}
     return {"result": "ok", "pk": pk,
             "resume_key": after.get("resume_s3_key", ""),
@@ -824,6 +873,22 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.warning("duplicate apply refused for pk=%s (status=%s)", pk, row.get("status"))
         return {"result": "duplicate", "pk": pk, "reason": "already_applied"}
 
+    # A queue entry can outlive the run that made it stale: a second copy of a
+    # job whose first attempt ended with Submit pressed and nothing confirmed.
+    # That form may have gone, so it is not sent again from the queue. The
+    # owner's Retry clears the mark once they have checked the portal.
+    if row.get("fail_kind") == "uncertain":
+        detail = ("Refusing to apply: the last attempt pressed Submit and could not "
+                  "confirm it. Check the portal, then press Retry if it did not go.")
+        emit("response", pk=pk, agent="applier", detail=f"🛑 {detail}", url=jd_url)
+        log.warning("apply refused for pk=%s: previous submit was unconfirmed", pk)
+        return {"result": "duplicate", "pk": pk, "reason": "uncertain"}
+
+    if not str(jd_url or "").strip():
+        log.warning("apply refused for pk=%s: no posting URL", pk)
+        return {"result": "failed", "pk": pk, "reason": "no_url",
+                "detail": "This role has no posting URL to apply on."}
+
     # STALE RÉSUMÉ GUARD — the tailored .tex is a snapshot of base.tex taken when
     # the row was tailored. Editing base.tex does not touch it, so without this an
     # approved-but-old row keeps going out with the content you just removed. Send
@@ -867,61 +932,87 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
         log.info("no-sponsorship, skipping apply for pk=%s", pk)
         return {"result": "failed", "pk": pk, "reason": "no_sponsorship"}
 
-    facts = stores.answer_bank.all_facts(company)
-    # Last call on which address this goes out under. A job tailored before this
-    # company started rotating still carries the old one, and this is the last
-    # moment to fix it — the résumé is re-rendered from its saved .tex, so the
-    # PDF and the form still agree.
-    from core import rotation as _rotation
+    # Everything from here to the browser is preparation, and any of it can
+    # raise — rotation.ensure does so on purpose. The row was claimed as
+    # SUBMITTING above, so an exception that escaped left it there: the queue
+    # retried three times and dead-lettered it, then the reclaim loop found a
+    # `submitting` row with no lease, called it an orphan and queued it again
+    # with its attempts reset, every two minutes. Nothing has touched a form
+    # yet, so the row goes back exactly as it was and the error stays loud.
+    try:
+        facts = stores.answer_bank.all_facts(company)
+        # Last call on which address this goes out under. A job tailored before this
+        # company started rotating still carries the old one, and this is the last
+        # moment to fix it — the résumé is re-rendered from its saved .tex, so the
+        # PDF and the form still agree.
+        from core import rotation as _rotation
 
-    # Deliberately NOT wrapped. If this company rotates and no address can be
-    # assigned, the application must not go out at all — falling back to the base
-    # address is the one outcome rotation exists to prevent, and it cannot be
-    # undone. The failure is loud and nothing is submitted.
-    _rotation.ensure(pk, company, stores)
-    # Whichever profile this application is going out under supplies the contact
-    # details, overriding the bank's defaults for this job only.
-    from core import profiles as _profiles
-    _row = stores.tracking.get(pk) or {}
-    _prof = _profiles.resolve_for(_row)
-    # The PDF is rendered for the profile it is SENT under, here, every time.
-    # Not only when the stamp changed: a board-wide re-render was once cut off by
-    # a restart at 141 of 378 rows, leaving 237 rows stamped with a profile whose
-    # address their PDF did not carry — a form saying one address while the
-    # résumé says another is the mismatch a recruiter notices. Two seconds of
-    # LaTeX per application buys the invariant outright. Rotating companies did
-    # this in ensure() already; for them it is a second, harmless render.
-    if _prof and _row.get("resume_tex_key"):
-        if _prof.id != str(_row.get("profile_id") or ""):
-            stores.tracking.set_status(pk, _row.get("status") or Status.SUBMITTING,
-                                       profile_id=_prof.id)
-            log.info("dispatching %s under %s's standing profile %s", pk, company, _prof.id)
-        _profiles.retarget(pk, _prof, stores)
-    if _prof:
-        facts = _prof.override(facts)
-    facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date
-    creds = get_login(company, stores.secrets)
-    if creds:
-        facts["Login email/username"] = creds.get("username", "")
-        facts["Login password"] = creds.get("password", "")
-    from tools import workday_accounts
-    account = workday_accounts.plan(jd_url, company, facts, stores.secrets)
-    if account:
-        emit("running", pk=pk, agent="applier", url=jd_url,
-             detail=f"Workday: will sign in or create the account as {account['username']}")
-    resume_tex = ""
-    if row.get("resume_tex_key"):
-        try:
-            resume_tex = stores.artifacts.get(row["resume_tex_key"]).decode()
-        except Exception:
-            pass
+        # Deliberately NOT swallowed. If this company rotates and no address can be
+        # assigned, the application must not go out at all — falling back to the base
+        # address is the one outcome rotation exists to prevent, and it cannot be
+        # undone. The failure is loud and nothing is submitted.
+        _rotation.ensure(pk, company, stores)
+        # Whichever profile this application is going out under supplies the contact
+        # details, overriding the bank's defaults for this job only.
+        from core import profiles as _profiles
+        _row = stores.tracking.get(pk) or {}
+        _prof = _profiles.resolve_for(_row)
+        # The PDF is rendered for the profile it is SENT under, here, every time.
+        # Not only when the stamp changed: a board-wide re-render was once cut off by
+        # a restart at 141 of 378 rows, leaving 237 rows stamped with a profile whose
+        # address their PDF did not carry — a form saying one address while the
+        # résumé says another is the mismatch a recruiter notices. Two seconds of
+        # LaTeX per application buys the invariant outright. Rotating companies did
+        # this in ensure() already; for them it is a second, harmless render.
+        if _prof and _row.get("resume_tex_key"):
+            if _prof.id != str(_row.get("profile_id") or ""):
+                stores.tracking.set_status(pk, _row.get("status") or Status.SUBMITTING,
+                                           profile_id=_prof.id)
+                log.info("dispatching %s under %s's standing profile %s", pk, company, _prof.id)
+            _profiles.retarget(pk, _prof, stores)
+        if _prof:
+            facts = _prof.override(facts)
+        facts = _profiles.expand_all(facts)   # "{date:+6w}" -> a real date
+        creds = get_login(company, stores.secrets)
+        if creds:
+            facts["Login email/username"] = creds.get("username", "")
+            facts["Login password"] = creds.get("password", "")
+        from tools import workday_accounts
+        account = workday_accounts.plan(jd_url, company, facts, stores.secrets)
+        if account:
+            doing = "sign in or create the account" if account["may_create"] else "signing in"
+            emit("running", pk=pk, agent="applier", url=jd_url,
+                 detail=f"Workday: {doing} as {account['username']} on {account['tenant']}")
+        resume_tex = ""
+        if row.get("resume_tex_key"):
+            try:
+                resume_tex = stores.artifacts.get(row["resume_tex_key"]).decode()
+            except Exception:
+                pass
+
+    except Exception:
+        stores.tracking.set_status(pk, prior_status,
+                                   gate_reason=row.get("gate_reason", ""))
+        raise
+
+    # No PDF, no application. The path is empty when the résumé never compiled
+    # (only the .tex was saved) or the file is gone, and the task then simply
+    # omitted the upload: on a form where the résumé is optional, that is an
+    # application sent under the owner's name with nothing attached.
+    resume_path = _resume_pdf_path(stores.tracking.get(pk) or row)
+    if not resume_path:
+        why = "No résumé PDF exists for this role, so nothing was submitted. Re-tailor it."
+        stores.tracking.set_status(pk, Status.FAILED, fail_kind="no_resume", fail_reason=why)
+        emit("failed", pk=pk, agent="applier", detail=why, url=jd_url)
+        log.warning("apply refused for pk=%s: no résumé PDF", pk)
+        return {"result": "failed", "pk": pk, "reason": "no_resume", "detail": why}
 
     emit("running", pk=pk, agent="applier", detail="filling the form…", url=jd_url)
 
     result = await browser_apply(
         jd_url, company, facts, get_settings().browser_model,
         pk=pk, jd_text=jd_text, resume_tex=resume_tex,
-        github=_github_context(), resume_path=_resume_pdf_path(row),
+        github=_github_context(), resume_path=resume_path,
         account=account,
     )
     try:
@@ -941,15 +1032,22 @@ async def _apply_direct(pk: str, stores: Any) -> dict:
                                        screenshot_s3_key=key)
         except Exception as exc:
             log.warning("could not save screenshot for %s: %s", pk, exc)
-    fields = result.pop("fields", None)
-    if fields:  # what the form REALLY held (incl. every checkbox) — for the drawer
-        cur = stores.tracking.get(pk) or {}
-        stores.tracking.set_status(pk, cur.get("status", "submitting"), fields=fields)
-    for q, a in (result.pop("drafted", None) or {}).items():
-        # Bank writer-drafted answers (company scope) so a re-run or another job at
-        # the same company reuses them instead of redrafting from scratch.
-        from core.models import AnswerScope
-        stores.answer_bank.put(q, a, AnswerScope.COMPANY, company=company, source="writer")
+    # Bookkeeping, and it runs BEFORE the outcome is recorded. If it raises, a
+    # confirmed submission never reaches `applied`, the worker sees a crash and
+    # retries, and the job is applied to a second time. So none of it may raise.
+    try:
+        fields = result.pop("fields", None)
+        if fields:  # what the form REALLY held (incl. every checkbox) — for the drawer
+            cur = stores.tracking.get(pk) or {}
+            stores.tracking.set_status(pk, cur.get("status", "submitting"), fields=fields)
+        for q, a in (result.pop("drafted", None) or {}).items():
+            # Bank writer-drafted answers (company scope) so a re-run or another job at
+            # the same company reuses them instead of redrafting from scratch.
+            from core.models import AnswerScope
+            stores.answer_bank.put(q, a, AnswerScope.COMPANY, company=company, source="writer")
+    except Exception:  # noqa: BLE001
+        log.warning("could not save the form fields / drafted answers for %s", pk,
+                    exc_info=True)
 
     status = result.get("status")
     if status == "applied":
@@ -1185,7 +1283,9 @@ def _score_gate(pk: str, text: str, stores: Any) -> dict | None:
     stores.tracking.set_status(pk, row.get("status", "running"), match_score=score)
     threshold = _min_score()
     if score < threshold and row.get("score_override") is True:
-        emit("response", pk=pk, detail=f"match {score}/10 < {threshold} — owner overrode the score; tailoring for review")
+        emit("response", pk=pk,
+             detail=(f"match {score}/10 < {threshold} — owner overrode the score; "
+                     "tailoring for review"))
         return None
     if score < threshold:
         stores.tracking.set_status(pk, Status.SKIPPED, skip_reason="low_score", match_score=score)

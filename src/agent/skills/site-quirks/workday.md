@@ -3,10 +3,11 @@ name: Workday
 match_hosts: [myworkdayjobs.com, myworkdaysite.com]
 ---
 
-- Workday is multi-page and requires an ACCOUNT before the form appears. If there
-  is no saved session, stop and report that a login is needed. Create an account
-  ONLY when your task has a WORKDAY ACCOUNT section, and only with its email and
-  password.
+- Workday is multi-page and requires an ACCOUNT before the form appears. When
+  your task has a WORKDAY ACCOUNT section, follow it exactly: it says whether to
+  only sign in or whether you may create the account, and with which login.
+  Without that section and without a signed-in session, stop and report that a
+  login is needed. Never create an account the section does not allow.
 - Each page must be completed and "Save and Continue" clicked before the next
   page's fields exist. Never look for a single submit button on page one.
 - Fields are custom widgets, not plain inputs: dropdowns are buttons that open a

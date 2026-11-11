@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_settings
-from .logging import get_logger
 from .ids import is_internal_pk
+from .logging import get_logger
 
 log = get_logger(__name__)
 

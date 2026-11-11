@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+
 from core.models import JobRecord
 from core.storage.tracking import TrackingStore
 from discovery import handler as h

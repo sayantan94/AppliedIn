@@ -67,3 +67,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# UP042 wants (str, Enum) rewritten as StrEnum. That changes what str() and an
+# f-string give for a Status ("Status.APPLIED" becomes "applied"), and statuses
+# are written to Redis and compared as strings all over, so it is not a rename.
+ignore = ["UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixture rows and quoted page text read better on one line than wrapped.
+"tests/**" = ["E501"]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC
 
 from core.logging import get_logger
 from core.models import JobRecord
@@ -32,6 +33,24 @@ HEARTBEAT_S = 45
 # owner cannot tell the difference from the outside. The session says when it
 # truncated, so at least the ceiling is visible.
 MAX_JOBS = 60
+
+
+def _job_id(url: str, title: str) -> str:
+    """A stable id for a posting from its URL.
+
+    The id used to be the last path segment WITH its query string. The prompt
+    asks for several searches merged, and on a site whose result links carry the
+    search (…/123-swe?q=agentic, …/123-swe?q=senior) one posting came back under
+    two ids: two rows, two tailored résumés, and two applications, because the
+    duplicate guard keys on the id. The query is dropped when the path segment
+    already identifies the posting (it carries a number); a link whose identity
+    lives in the query (/apply?id=5) keeps it.
+    """
+    whole = url.rstrip("/").rsplit("/", 1)[-1]
+    segment = whole.split("#", 1)[0].split("?", 1)[0]
+    if any(ch.isdigit() for ch in segment):
+        return segment[:80]
+    return whole[:80] or title[:80]
 
 
 def _as_score(v: object) -> int | None:
@@ -175,7 +194,8 @@ Search with COMBINATIONS, not just single terms. One query per role title return
 that title only; pairing a title with a topic ("Senior Software Engineer" plus
 "agentic") surfaces roles whose title is generic but whose work is exactly the
 fit, and a topic on its own ("ai agents") catches the ones titled nothing like the
-target. Run several queries and merge what they return rather than trusting one. If the page turns out to be a wrapper around a job board (Greenhouse, Ashby,
+target. Run several queries and merge what they return rather than trusting one.
+If the page turns out to be a wrapper around a job board (Greenhouse, Ashby,
 Lever, Workday), say so: it can then be read directly, which is faster and
 complete.
 
@@ -222,31 +242,51 @@ def _posted_iso(raw: object) -> str:
     unknown, and an unknown date keeps the posting.
     """
     import re
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     text = str(raw or "").strip().lower()
     if not text:
         return ""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if text in ("new", "just posted", "today", "just now"):
         return now.isoformat()
     if text in ("yesterday",):
         return (now - timedelta(days=1)).isoformat()
-    if (m := re.search(r"(\d+)\s*(hour|hr|h|day|d|week|w|month|mo)", text)):
-        n = int(m.group(1))
-        unit = m.group(2)
-        hours = (n if unit in ("hour", "hr", "h")
-                 else n * 24 if unit in ("day", "d")
-                 else n * 24 * 7 if unit in ("week", "w")
-                 else n * 24 * 30)
-        return (now - timedelta(hours=hours)).isoformat()
-    for fmt in ("%Y-%m-%d", "%d %b %Y", "%b %d, %Y", "%d/%m/%Y", "%m/%d/%Y",
+    # Real dates FIRST. The relative-age pattern below used to run before them
+    # with no word boundary, so "3 Dec 2025" read as "3 d" — three days ago — and
+    # a year-old role passed a 24 hour window looking fresh.
+    stamp = re.sub(r"^(?:posted on|date posted|posted)[:\s]+", "", str(raw).strip(),
+                   flags=re.I)
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return (when if when.tzinfo else when.replace(tzinfo=UTC)).isoformat()
+    except ValueError:
+        pass
+    # 03/04/2026 is 3 April or 4 March depending on who wrote it, and the page
+    # does not say. Guessing wrong either drops a fresh role or passes a stale
+    # one, so a date both readings accept stays undated; one only a single
+    # reading accepts (25/03/2026) is unambiguous and parsed below.
+    if (m := re.fullmatch(r"(\d{1,2})/(\d{1,2})/\d{4}", stamp)) and (
+            m.group(1) != m.group(2) and int(m.group(1)) <= 12 and int(m.group(2)) <= 12):
+        return ""
+    for fmt in ("%d %b %Y", "%b %d, %Y", "%d/%m/%Y", "%m/%d/%Y",
                 "%B %d, %Y", "%d %B %Y"):
         try:
-            return datetime.strptime(str(raw).strip(), fmt).replace(
-                tzinfo=timezone.utc).isoformat()
+            return datetime.strptime(stamp, fmt).replace(
+                tzinfo=UTC).isoformat()
         except ValueError:
             continue
+    # "30+ days ago" is a floor, not an age: it stays undated rather than being
+    # read as exactly thirty days.
+    if (m := re.search(r"(\d+)(\+?)\s*(hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mos?)\b",
+                       text)) and not m.group(2):
+        n = int(m.group(1))
+        unit = m.group(3)
+        hours = (n if unit[0] == "h"
+                 else n * 24 if unit[0] == "d"
+                 else n * 24 * 7 if unit[0] == "w"
+                 else n * 24 * 30)
+        return (now - timedelta(hours=hours)).isoformat()
     return ""
 
 
@@ -322,7 +362,7 @@ async def find_jobs(company: str, careers_url: str, *, prefs: object = None,
             continue
         jobs.append(JobRecord(
             company=company,
-            job_id=url.rstrip("/").rsplit("/", 1)[-1][:80] or title[:80],
+            job_id=_job_id(url, title),
             title=title,
             jd_url=url,
             # What the listing showed. Enough for the relevance screen, so a job
@@ -357,7 +397,6 @@ def find_jobs_sync(company: str, careers_url: str, **kw: object) -> tuple[list, 
         return asyncio.run(find_jobs(company, careers_url, **kw))  # type: ignore[arg-type]
     # Already inside a loop (the daemon): run it on its own.
     import concurrent.futures
-
     from contextvars import copy_context
     context = copy_context()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

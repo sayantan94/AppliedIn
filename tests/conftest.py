@@ -51,6 +51,7 @@ def _isolate_owner_state(tmp_path, monkeypatch):
     #    dashboard renders. Point it at an in-memory server instead.
     try:
         import fakeredis
+
         from core import events
 
         fake = fakeredis.FakeRedis(decode_responses=True)

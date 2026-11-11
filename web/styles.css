@@ -742,6 +742,10 @@ button:disabled { cursor: default; }
 .menu-field { display: flex; flex-direction: column; gap: 6px; padding: 2px 10px 8px; }
 .menu-field-row { display: flex; align-items: center; gap: 6px; }
 .menu-field-note { flex: 1; font-size: 11px; color: var(--muted); }
+.wd-accounts { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow: auto; }
+.wd-accounts li { display: grid; gap: 1px; padding: 5px 0; border-top: 1px solid var(--border); font-size: 11.5px; }
+.wd-accounts .wd-host { color: var(--fg); overflow-wrap: anywhere; }
+.wd-accounts .wd-meta { color: var(--muted); overflow-wrap: anywhere; }
 #m-workday-pw-show .eye-slash { display: none; }
 #m-workday-pw-show.shown .eye-slash { display: inline; }
 .menu-field input {
@@ -1881,7 +1885,10 @@ a.rowlk, button.rowlk { display: inline-block; }
   bottom: 22px;
   left: 50%;
   transform: translateX(-50%) translateY(8px);
-  z-index: 80;
+  /* Above every drawer and dialog (the preferences drawers are 1000, the health
+     panel 1100). At 80 the "Couldn't save preferences" toast was drawn behind
+     the very drawer that caused it. */
+  z-index: 1200;
   font-size: 12.5px;
   background: var(--panel-solid);
   border: 1px solid var(--border-2);
@@ -2285,6 +2292,12 @@ a.rowlk, button.rowlk { display: inline-block; }
    Which identity an application goes out under. Kept beside the other
    top-level tools rather than in settings, because it is a per-run choice. */
 .profmgr { position: relative; }
+/* The add-identity dialog. It used to hang off a toolbar button that no longer
+   exists, so it is centred on the page instead. */
+.profpicker.pm-modal {
+  position: fixed; top: 50%; left: 50%; right: auto; transform: translate(-50%, -50%);
+  max-height: calc(100dvh - 32px); z-index: 1000; box-shadow: 0 0 0 100vmax #0008;
+}
 .profpicker { left: 0; right: auto; width: min(420px, calc(100vw - 32px)); }
 /* The list is what the panel is FOR, so it gets the room: nine profiles used to
    render as one and a half visible rows, because the add form and the footer
@@ -2439,7 +2452,7 @@ a.rowlk, button.rowlk { display: inline-block; }
 .jd-text {
   margin-top: 8px; max-height: 340px; overflow-y: auto;
   white-space: pre-wrap; font-size: 13px; line-height: 1.55;
-  color: var(--ink-2, var(--ink)); padding-right: 6px;
+  color: var(--fg); padding-right: 6px;
 }
 
 /* Why a run failed, in the drawer. The owner can usually fix these (Chrome

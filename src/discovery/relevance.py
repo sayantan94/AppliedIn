@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 
 from core.logging import get_logger
-from core.steering import messages
 from core.models import JobRecord
+from core.steering import messages
 from tools.schema import RelevanceResult
 
 from .watchlist import Preferences

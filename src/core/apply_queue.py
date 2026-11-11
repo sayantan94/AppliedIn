@@ -75,6 +75,8 @@ TERMINAL = frozenset({
     "uncertain",            # may already have submitted — the owner must check
     "user_skipped",         # the owner said no; retrying would argue with them
     "stale_resume",         # handled by re-tailoring, not by re-applying
+    "no_resume",            # nothing to attach; a retry has nothing either
+    "no_url",               # a role with no posting has nowhere to apply
 })
 
 

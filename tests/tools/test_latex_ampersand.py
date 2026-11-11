@@ -34,16 +34,16 @@ DOC = r"""\documentclass{article}
 def test_a_bare_ampersand_in_a_line_ending_in_a_break_is_escaped():
     """The Skills block ends lines with \\\\ and is not a tabular."""
     out = sanitize_latex(DOC)
-    skills = next(l for l in out.splitlines() if "Applied AI" in l)
+    skills = next(ln for ln in out.splitlines() if "Applied AI" in ln)
     assert r"Applied AI \& Agents" in skills, "the bare & was left as an alignment tab"
 
 
 def test_separators_inside_a_real_tabular_are_left_alone():
     """Escaping these would collapse the contact header into one column."""
     out = sanitize_latex(DOC)
-    header = next(l for l in out.splitlines() if "Ada Lovelace" in l)
+    header = next(ln for ln in out.splitlines() if "Ada Lovelace" in ln)
     assert "} & ada@example.com" in header, "a real column separator was escaped"
-    links = next(l for l in out.splitlines() if "href" in l and "x}" in l)
+    links = next(ln for ln in out.splitlines() if "href" in ln and "x}" in ln)
     assert "{x} & " in links
 
 

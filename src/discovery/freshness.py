@@ -22,7 +22,7 @@ roles from boards that timestamp", which is a different and much worse filter.
 from __future__ import annotations
 
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from core.logging import get_logger
 
@@ -40,8 +40,8 @@ def age_hours(posted_at: str, *, now: datetime | None = None) -> float | None:
         log.debug("could not read a posting date from %r", raw)
         return None
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    delta = (now or datetime.now(timezone.utc)) - when
+        when = when.replace(tzinfo=UTC)
+    delta = (now or datetime.now(UTC)) - when
     hours = delta.total_seconds() / 3600
     # A future date is a board with a clock problem or a scheduled publish. Treat
     # it as brand new rather than as an error, since it is certainly not stale.

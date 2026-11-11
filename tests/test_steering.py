@@ -39,7 +39,7 @@ def test_instances_use_their_own_local_directory(tmp_path, monkeypatch):
 def test_api_validation_conflict_and_persistence():
     from server import create_app
 
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(), base_url="http://127.0.0.1:8787") as client:
         original = client.get("/steering").json()
         response = client.post(
             "/steering", json={"content": "Use concise prose.", "revision": original["revision"]}

@@ -136,6 +136,10 @@ def _id_from(url: str) -> str:
     for s in parts:
         if s.lower() in _JOB_SEGMENTS:
             continue
+        # /jobs/2026/senior-engineer: a year folder looks like an id, and every
+        # posting under it then shared one, so all but the first were dropped.
+        if re.fullmatch(r"(?:19|20)\d\d", s):
+            continue
         if _ID_RX.match(s):
             return s
     return ""

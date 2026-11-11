@@ -51,7 +51,8 @@ def test_a_stale_wait_stops_being_offered(monkeypatch, v):
 
 def test_clearing_stops_a_code_being_reused(v):
     """A code left behind would be typed into the NEXT application and rejected."""
-    v.start_waiting("oracle#1"); v.give("oracle#1", "483920")
+    v.start_waiting("oracle#1")
+    v.give("oracle#1", "483920")
     v.clear("oracle#1")
     assert v.code_for("oracle#1") == ""
     assert v.pending() == []
@@ -116,6 +117,7 @@ def test_a_session_that_stopped_looking_is_visible(v, monkeypatch):
 
 
 def test_clearing_forgets_the_read_record_too(v):
-    v.start_waiting("oracle#1"); v.clear("oracle#1")
+    v.start_waiting("oracle#1")
+    v.clear("oracle#1")
     assert v.polls("oracle#1") == 0
     assert v.last_seen("oracle#1") == 0.0

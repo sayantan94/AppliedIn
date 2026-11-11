@@ -119,11 +119,18 @@ def _default_extractor(html: str, company: str) -> list[JobRecord]:
     except json.JSONDecodeError as exc:
         log.warning("%s: could not parse extracted jobs: %s", company, exc)
         return []
-    return [
-        JobRecord(company=company, job_id=str(it["job_id"]), title=it.get("title", ""),
-                  jd_url=it.get("url", ""), jd_text=it.get("title", ""), ats="custom")
-        for it in items if it.get("job_id")
-    ]
+    # The model's JSON is not a schema. A null title or url used to reach
+    # JobRecord and raise, which ended the whole company's scan as "failed"
+    # before the sitemap or the browser could be tried.
+    jobs = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict) or not it.get("job_id"):
+            continue
+        title = str(it.get("title") or "").strip()
+        jobs.append(JobRecord(company=company, job_id=str(it["job_id"]), title=title,
+                              jd_url=str(it.get("url") or "").strip(), jd_text=title,
+                              ats="custom"))
+    return jobs
 
 
 def _age_limit(company_name: str) -> float:
@@ -168,7 +175,8 @@ def _note_screened_out(stores: Any, company: str, before: list, after: list) -> 
                        "did not match your title, seniority or keyword preferences")
 
 
-def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
+def _enqueue(company: CompanyConfig, jobs: list, stores: Any,
+             profile_id: str = "", top_n: int = 0) -> int:
     """Drop anything too old, dedup against past runs, queue what is genuinely new.
 
     The age check lives HERE because every path arrives here: the feed adapters, the
@@ -176,7 +184,6 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     left the others unfiltered, and the browser path is the one most likely to
     surface an ancient listing.
     """
-    from core import flags as _flags
     from core.events import emit
     from tools import seen
 
@@ -250,12 +257,33 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     progress.record(relevant=len(jobs))
     if progress.cancelled():
         return 0
-    already = seen.load()
-    jobs = [j for j in jobs if j.jd_url not in already]
+    jobs = seen.unseen(jobs)
+
+    # The best few per run, as the feed path already does. Nothing read "Top N /
+    # run" here, so the setting did nothing for exactly the big career sites: a
+    # browser crawl that matched sixty roles sent all sixty to tailoring. The
+    # ones left behind are not marked seen, so the next run picks them up.
+    if top_n > 0 and len(jobs) > top_n:
+        log.info("%s: keeping the top %d of %d matches this run",
+                 company.name, top_n, len(jobs))
+        jobs = sorted(jobs, key=lambda j: -(getattr(j, "crawl_score", 0) or 0))[:top_n]
+
+    # The identity this run was started under. Only the feed path used to stamp
+    # it, so "discover as personal 2" on a crawl or browser company produced rows
+    # with no profile, and those applied under the default address instead. A
+    # company's own standing profile still wins, exactly as it does for feeds.
+    stamp_profile = ""
+    if profile_id:
+        from core import flags as _flags
+        from core.models import Status
+
+        stamp_profile = _flags.company_pref(company.name).get("profile_id") or profile_id
 
     enqueued, new_jobs = 0, []
     for job in jobs:
         if stores.tracking.put_new(job):
+            if stamp_profile:
+                stores.tracking.set_status(job.pk, Status.FOUND, profile_id=stamp_profile)
             stores.queue.enqueue(stores.tailor_queue, {"pk": job.pk})
             emit("discovered", pk=job.pk, detail=(
                 f"{job.title} @ {job.company}"
@@ -269,7 +297,8 @@ def _enqueue(company: CompanyConfig, jobs: list, stores: Any) -> int:
     return enqueued
 
 
-def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any) -> int | None:
+def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any,
+                       profile_id: str = "") -> int | None:
     """Screen and enqueue what the site's sitemap lists; None when it lists nothing.
 
     Tried before the browser whenever the page itself gave nothing: a sitemap is
@@ -291,7 +320,8 @@ def _listed_in_sitemap(company: CompanyConfig, prefs: Preferences, stores: Any) 
         jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
     progress.record(relevant=len(jobs), stage="Saving new matches")
-    return 0 if progress.cancelled() else _enqueue(company, jobs, stores)
+    return 0 if progress.cancelled() else _enqueue(
+        company, jobs, stores, profile_id, top_n=getattr(prefs, "max_new_per_run", 0) or 0)
 
 
 def crawl_company(
@@ -301,6 +331,7 @@ def crawl_company(
     *,
     client: httpx.Client | None = None,
     extractor: Callable[[str, str], list[JobRecord]] | None = None,
+    profile_id: str = "",
 ) -> int:
     """Crawl one custom career page; returns the number of jobs newly enqueued.
 
@@ -353,7 +384,7 @@ def crawl_company(
             log.info("%s: client-rendered careers page — reading the full listing "
                      "in the browser", company.name)
         else:
-            if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
+            if (listed := _listed_in_sitemap(company, prefs, stores, profile_id)) is not None:
                 return listed
         found = _browser_extract(company.careers_url, company.name, prefs)
         progress.record(found=len(found), stage="Matching preferences")
@@ -377,18 +408,26 @@ def crawl_company(
         if kws:
             jobs = [j for j in jobs if _flags.title_matches_filter(j.title, kws)]
         progress.record(relevant=len(jobs), stage="Saving new matches")
-        return 0 if progress.cancelled() else _enqueue(company, jobs, stores)
+        return 0 if progress.cancelled() else _enqueue(
+        company, jobs, stores, profile_id, top_n=getattr(prefs, "max_new_per_run", 0) or 0)
 
     # If the page actually embeds a known ATS, we shouldn't be here — log it so
     # the watchlist can be corrected to feed mode.
     if embedded := detect_from_page(html):
         log.info("%s embeds %s — consider switching it to feed mode", company.name, embedded.ats)
 
-    from core.events import emit
 
     extract = extractor or _default_extractor
     extracted = extract(html, company.name)
-    from tools import seen
+    # Only the browser path resolved links against the page. A plain fetch that
+    # returned href="/careers/123" stored that as the posting's URL: nothing to
+    # read, nothing to apply to, and a ledger key with no host in it.
+    if company.careers_url:
+        from urllib.parse import urljoin
+
+        for j in extracted:
+            if j.jd_url and not j.jd_url.startswith(("http://", "https://")):
+                j.jd_url = urljoin(company.careers_url, j.jd_url)
 
     progress.record(found=len(extracted), stage="Matching preferences")
     jobs = relevant(extracted, prefs)
@@ -396,7 +435,7 @@ def crawl_company(
     # Nothing relevant may mean an unrendered listing; try the browser before
     # concluding the company has no matches. Browser mode already ran above.
     if extractor is None and not extracted:
-        if (listed := _listed_in_sitemap(company, prefs, stores)) is not None:
+        if (listed := _listed_in_sitemap(company, prefs, stores, profile_id)) is not None:
             return listed
     if extractor is None and not jobs:
         log.info("%s: nothing from the plain fetch — reading the full listing "
@@ -430,4 +469,5 @@ def crawl_company(
         log.info("%s: title filter %s kept %d/%d", company.name, kws, len(jobs), before)
 
     progress.record(relevant=len(jobs), stage="Saving new matches")
-    return 0 if progress.cancelled() else _enqueue(company, jobs, stores)
+    return 0 if progress.cancelled() else _enqueue(
+        company, jobs, stores, profile_id, top_n=getattr(prefs, "max_new_per_run", 0) or 0)

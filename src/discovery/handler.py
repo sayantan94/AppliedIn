@@ -9,9 +9,8 @@ storage comes from the mode factory, never constructed directly.
 
 from __future__ import annotations
 
-import time as _time
-
 import threading
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +21,8 @@ from core.logging import get_logger
 from core.models import DiscoveryMode, Status
 from core.stores import make_stores
 
-from .adapters import ADAPTERS
 from . import progress
+from .adapters import ADAPTERS
 from .relevance import relevant
 from .resolver import BROWSER_HEADERS, resolve
 from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
@@ -105,7 +104,7 @@ def discover_company(
     # dates. Filtering here also means a stale posting never costs a relevance
     # call: Scale AI fetched 208 and screened all of them to find 40.
     from .crawler import _age_limit
-    from .freshness import age_hours, describe, is_fresh
+    from .freshness import age_hours, is_fresh
 
     limit = _age_limit(company.name)
     if limit:
@@ -162,8 +161,7 @@ def discover_company(
 
     from tools import seen
 
-    already = seen.load()
-    matched = [j for j in matched if j.jd_url not in already]  # skip past-run URLs
+    matched = seen.unseen(matched)  # skip past-run URLs
 
     progress.record(relevant=len(matched), stage="Saving new matches")
     if progress.cancelled():
@@ -397,7 +395,7 @@ def run_discovery(only: list[str] | None = None, profile_id: str = "",
     # can end the run. A board that was already paused does not.
     from core import flags as _flags
 
-    epoch0 = _flags.stop_epoch()
+    epoch0 = _flags.run_epoch("discover")
     with _LOCK:
         for name in claimed:
             _SCANS[name] = progress.Scan(name)
@@ -447,7 +445,7 @@ def _stop_requested(manual: bool = False, epoch0: int = 0) -> bool:
         from core import flags as _flags
 
         if manual:
-            return _flags.stop_epoch() != epoch0
+            return _flags.run_epoch("discover") != epoch0
         return bool(_flags.paused())
     except Exception:  # noqa: BLE001 - a stop check must never break a scan
         return False
@@ -510,7 +508,8 @@ def _run_discovery(only: list[str] | None, profile_id: str,
                                                  stores.tailor_queue, profile_id)
                             total += n
                         else:
-                            n = crawl_company(company, prefs, stores)
+                            n = crawl_company(company, prefs, stores,
+                                              profile_id=profile_id)
                             crawl_total += n
             except Exception:
                 scan.note = "Scan failed. Check Logs for the cause and retry."

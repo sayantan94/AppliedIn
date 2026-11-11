@@ -20,6 +20,25 @@ from .logging import get_logger
 log = get_logger(__name__)
 
 CHANNEL = "appliedin:events"
+
+
+def channel() -> str:
+    """The pub/sub channel for THIS instance's live activity.
+
+    Keys are per Redis database, so two instances on one server never see each
+    other's rows. Pub/sub is not: a channel is server-wide, whatever database the
+    connection selected. With one shared name, every event from the instance on
+    port 8788 was pushed to the dashboard on 8787 and the reverse, so each Live
+    activity panel showed the other board's companies, answers and transcripts.
+    The database index is what already makes an instance its own, so it names
+    the channel too.
+    """
+    from urllib.parse import urlsplit
+
+    db = urlsplit(get_settings().redis_url).path.strip("/") or "0"
+    return f"{CHANNEL}:{db}"
+
+
 HISTORY = "appliedin:events:log"
 HISTORY_MAX = 2000  # keep the full day's activity — logs must not disappear
 
@@ -49,7 +68,7 @@ def emit(kind: str, *, pk: str | None = None, detail: str = "", **extra: Any) ->
         if get_settings().mode == "local":
             r = _redis()
             pipe = r.pipeline()
-            pipe.publish(CHANNEL, payload)
+            pipe.publish(channel(), payload)
             pipe.lpush(HISTORY, payload)
             pipe.ltrim(HISTORY, 0, HISTORY_MAX - 1)
             pipe.execute()

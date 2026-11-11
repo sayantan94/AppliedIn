@@ -6,13 +6,13 @@ EMPLOYER, since `discovered_at` only says when we looked, which makes every job 
 a first sweep look brand new and every job on the next sweep look stale.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from discovery.freshness import age_hours, describe, is_fresh
 
-NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 
 
 def iso(**delta) -> str:
@@ -129,14 +129,14 @@ def test_every_age_rejection_names_the_job_and_its_date(caplog):
     log names each skipped role, the date it was judged on, and the window.
     """
     import logging
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from unittest.mock import patch
 
     from core.models import JobRecord
     from discovery.crawler import _enqueue
     from discovery.watchlist import CompanyConfig
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     def job(title, hours):
         return JobRecord(company="Scale AI", job_id=title[:8], title=title,

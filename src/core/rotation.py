@@ -96,6 +96,30 @@ def _words_path() -> Path:
 _EMPTY: dict = {"companies": {}, "aliases": [], "used_words": [], "used_emails": []}
 
 
+def _fresh() -> dict:
+    return {k: (dict(v) if isinstance(v, dict) else list(v)) for k, v in _EMPTY.items()}
+
+
+def _load_for_write() -> dict:
+    """The ledger for a caller about to save it back.
+
+    `_load() or dict(_EMPTY)` had two faults in one line. A ledger that exists
+    but cannot be parsed loads as empty, so the save that followed replaced every
+    burned word and submission count with a blank — a spent address could be
+    minted again and take five more applications. And `dict(_EMPTY)` is a shallow
+    copy: the first bind wrote its company into the module's own template.
+    """
+    data = _load()
+    if data:
+        return data
+    path = _path()
+    if path.exists() and path.read_text().strip():
+        raise RuntimeError(
+            f"{path} exists but could not be read as a rotation ledger. Refusing "
+            "to overwrite it — fix or move the file first.")
+    return _fresh()
+
+
 def _load() -> dict:
     """The ledger, or an empty one. A file nobody can parse must never be able to
     stop an application, so a broken ledger reads as 'no rotation configured' —
@@ -169,7 +193,7 @@ def bind(company: str, profile_id: str, limit: int = 0, style: str = "") -> dict
     row = {"profile": prof.id, "limit": int(limit or prof.limit or DEFAULT_LIMIT),
            "style": chosen}
     with _lock:
-        data = _load() or dict(_EMPTY)
+        data = _load_for_write()
         data.setdefault("companies", {})[norm(company)] = row
         _save(data)
     log.info("rotation bound: %s → %s (limit %s, %s)", company, prof.id,
@@ -182,7 +206,7 @@ def unbind(company: str) -> bool:
     deleted: the ledger is the record of which address received which employer's
     mail, and a job already stamped with one keeps applying under it."""
     with _lock:
-        data = _load() or dict(_EMPTY)
+        data = _load_for_write()
         gone = (data.get("companies") or {}).pop(norm(company), None)
         for alias in data.get("aliases") or []:
             if alias.get("company") == norm(company):
@@ -255,7 +279,11 @@ def _dot_addresses(local_part: str):
     """
     from itertools import combinations
 
-    slots = range(1, len(local_part))
+    # Not next to a dot that is already there: "first.last" used to come back as
+    # "first..last", which no mail server accepts, typed into a real form and
+    # burned in the ledger as a used address.
+    slots = [i for i in range(1, len(local_part))
+             if local_part[i - 1] != "." and local_part[i] != "."]
     for count in (1, 2, 3):
         for spots in combinations(slots, count):
             if any(b - a == 1 for a, b in zip(spots, spots[1:], strict=False)):
@@ -373,7 +401,7 @@ def retire(company: str) -> bool:
     still below the limit: the alias is spent whatever we counted.
     """
     with _lock:
-        data = _load() or dict(_EMPTY)
+        data = _load_for_write()
         live = _live(data, company)
         if not live:
             return False
@@ -452,6 +480,11 @@ def backfill(company: str, stores) -> dict:  # noqa: ANN001
         if current == alias.id or alias_of_company(current, company):
             continue                      # already on a rotating address here
         pk = row.get("pk", "")
+        # The row as it is now, not as the snapshot had it: each row before this
+        # one cost a render, and writing a stale status back un-applies a job.
+        row = stores.tracking.get(pk) or row
+        if row.get("status") in _SPENT:
+            continue
         if not room:
             # Past what this address can carry. It still must not keep the old
             # identity — that is the address being retired — but it must not be

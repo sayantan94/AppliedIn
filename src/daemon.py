@@ -19,9 +19,9 @@ import threading
 import time
 from typing import Any
 
+from core.ids import is_internal_pk
 from core.logging import get_logger
 from core.stores import make_stores
-from core.ids import is_internal_pk
 
 log = get_logger(__name__)
 
@@ -68,6 +68,11 @@ def _sweep_found(stores) -> None:  # noqa: ANN001
 
     waiting = [r for r in stores.tracking.query_status(Status.FOUND)
                if not is_internal_pk(r.get("pk", ""))]
+    # Rows whose posting could not be read go last. They come back `found` every
+    # time the browser reader is down, and when three of them happened to be
+    # first, the sweep re-queued those same three forever while every readable
+    # role behind them waited for someone to press Process.
+    waiting.sort(key=lambda r: bool(r.get("jd_read_error")))
     for row in waiting[:3]:  # small batches — pace the LLM spend
         stores.queue.enqueue(stores.tailor_queue, {"pk": row["pk"]})
         log.info("sweep: queued waiting job %s", row["pk"])
@@ -185,6 +190,13 @@ def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
             continue
         if pk in live:
             continue                       # genuinely being filled right now
+        # Look again before acting. Reading every row takes seconds on a big
+        # board, and an Apply pressed in that window takes its lease and marks
+        # the row submitting after `live` was read: it looked orphaned, was reset
+        # under the browser and queued a second time.
+        if pk in q.in_flight() or (
+                (stores.tracking.get(pk) or {}).get("status") != Status.SUBMITTING.value):
+            continue
         stores.tracking.set_status(pk, Status.TAILORED, gate_reason="approval")
         q.put(pk, r.get("company", ""))
         n += 1
@@ -198,6 +210,12 @@ def _reclaim_orphans(stores, q) -> None:  # noqa: ANN001
     # reads `tailoring` for hours, and every other job at that company waits on
     # a ghost — Netflix sat like that for three and a half hours. A lease whose
     # row is not `submitting` gets a grace period for the re-tailor, then goes.
+    # A sighting only means something while the lease it saw is still held. One
+    # left behind by a lease that ended normally made the NEXT lease on that pk
+    # look twenty minutes old the moment it was taken, and it was stripped
+    # mid re-tailor.
+    for pk in [p for p in _LEASE_SEEN if p not in live]:
+        _LEASE_SEEN.pop(pk, None)
     for pk in list(live):
         r = by_pk.get(pk)
         st = str((r or {}).get("status") or "")
@@ -377,7 +395,7 @@ def _pass_cancelled(manual: bool = False, epoch0: int = 0) -> bool:
         from core import flags as _flags
 
         if manual:
-            return _flags.stop_epoch() != epoch0
+            return _flags.run_epoch("process") != epoch0
         return bool(_flags.paused())
     except Exception:  # noqa: BLE001 - a stop check must never break a pass
         return False
@@ -394,11 +412,9 @@ def process_backlog_once(companies: list | None = None,
     later run. None/empty = the whole backlog.
     Self-contained (does its own draining), so it works whether or not the 24/7
     loops are running. Blocking — run it in a background thread."""
-    import asyncio
 
-    from agent.run import _apply_direct, prefetch_browser_jds, run_job
+    from agent.run import prefetch_browser_jds, run_job
     from core import flags as _flags
-    from core.config import get_settings
     from core.models import Status
 
     stores = make_stores()
@@ -419,7 +435,7 @@ def process_backlog_once(companies: list | None = None,
         found = [r for r in found if _in_scope(r.get("company"))]
     from core import preparation
 
-    epoch0 = _flags.stop_epoch()
+    epoch0 = _flags.run_epoch("process")
     with preparation.track(found) as progress:
         # Browser-only postings (Meta) are read a batch per session HERE, before the
         # per-row pass, so each row below finds its description already on the row
@@ -538,6 +554,41 @@ def _heartbeat_loop() -> None:
         time.sleep(10)
 
 
+def _claim_instance() -> None:
+    """Refuse to start on a Redis database another running instance owns.
+
+    An instance is a port, a state directory and a Redis database, and the
+    database is derived from the port (or set by hand in .env). Nothing checked
+    that two instances had ended up with different ones: ports fifteen apart map
+    to the same index, and a copied .env points a second checkout at db 0. Two
+    daemons on one database share a board, and the first thing this one does on
+    startup is "recover" rows that are mid-application in the other.
+    """
+    import socket
+
+    from core import flags
+
+    mine = str(WEB_PORT)
+    owner = flags.get_flag("instance_port", "")
+    if owner and owner != mine:
+        try:
+            with socket.create_connection(("127.0.0.1", int(owner)), timeout=1):
+                alive = True
+        except (OSError, ValueError):
+            alive = False      # that instance is gone; this database is free
+        if alive:
+            from core.config import get_settings
+
+            raise SystemExit(
+                f"Refusing to start on port {mine}: its Redis database "
+                f"({get_settings().redis_url}) belongs to the AppliedIn instance "
+                f"running on port {owner}. Two instances on one database share a "
+                "board and would apply each other's jobs. Start this one with "
+                "`./appliedin start --port <port>` so it gets its own, or set a "
+                "different APPLIEDIN_REDIS_URL.")
+    flags.set_flag("instance_port", mine)
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -546,6 +597,8 @@ def main() -> None:
     stores = make_stores()
     if not hasattr(stores.queue, "drain"):
         raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
+
+    _claim_instance()   # before recovery: recovery rewrites rows on this database
 
     _recover_orphans(stores)  # never leave a killed apply stuck at 'submitting'
     discovery_on = os.environ.get("APPLIEDIN_DISCOVERY", "on").lower() not in (

@@ -7,14 +7,15 @@ cannot race (HLD premise 5 + guardrail 1).
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
+from ..ids import is_internal_pk
 from ..models import JobRecord, Status
 from .base import AbstractTracking
-from ..ids import is_internal_pk
 
 JD_HASH_INDEX = "jd_hash-index"
 STATUS_INDEX = "status-index"
@@ -64,13 +65,13 @@ class TrackingStore(AbstractTracking):
         names = {"#s": "status"}
         values = {":s": status.value}
         sets = ["#s = :s"]
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         stamp = {"tailored": "tailored_at", "applied": "applied_at",
                  "applied_manual": "applied_at"}.get(status.value)
         if stamp and stamp not in attrs:
             names["#date"] = stamp
-            values[":date"] = datetime.now(timezone.utc).isoformat()
+            values[":date"] = datetime.now(UTC).isoformat()
             sets.append("#date = if_not_exists(#date, :date)")
         for i, (key, value) in enumerate(attrs.items()):
             names[f"#a{i}"] = key

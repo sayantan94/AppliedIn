@@ -123,6 +123,12 @@ def _wipe_instance() -> dict:
     if port == DEFAULT_PORT:
         return {"refused": "--fresh will not wipe the default instance on port "
                            f"{DEFAULT_PORT}; give it a --port of its own"}
+    # Checked before anything is deleted. `start --fresh` on an instance that
+    # was already up used to wipe its directory and flush its Redis database
+    # underneath the running daemon, and only then report "already running".
+    if (pid := (_running_pid() or _port_pid())) is not None:
+        return {"refused": f"an instance is running on port {port} (pid {pid}); "
+                           "stop it before starting it fresh"}
     s = get_settings()
     done: dict = {"local_dir": s.local_dir, "redis": s.redis_url}
     local = Path(s.local_dir)

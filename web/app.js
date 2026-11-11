@@ -20,6 +20,13 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const api = (p) => (CONFIG.apiUrl || "").replace(/\/$/, "") + p;
 
+/* A stored preference, or null. Reading localStorage throws outright when the
+   browser blocks site data, and four reads below ran while this module was
+   loading: one refusal and the dashboard never booted at all. */
+const stored = (key) => {
+  try { return localStorage.getItem(key); } catch { return null; }
+};
+
 const state = {
   apps: [],
   tracker: {}, trackerDrafts: {}, trackerSaving: new Set(),
@@ -65,10 +72,10 @@ const state = {
   secOpen: { closed: false }, // pipeline stack: which foldable sections are open
   openCos: new Set(), // pipeline stack: companies expanded inside Found
   openQCos: new Set(), // pipeline stack: companies expanded inside Queued to apply
-  reviewCollapsed: localStorage.getItem("appliedin.reviewCollapsed") === "yes",
-  reviewSort: localStorage.getItem("appliedin.reviewSort") || "newest",
+  reviewCollapsed: stored("appliedin.reviewCollapsed") === "yes",
+  reviewSort: stored("appliedin.reviewSort") || "newest",
   reviewFilter: "active", reviewAnchor: null, reviewNotices: {},
-  activityCollapsed: localStorage.getItem("appliedin.activityCollapsed") === "yes",
+  activityCollapsed: stored("appliedin.activityCollapsed") === "yes",
   forcePreparing: new Set(),
   reviewPicked: new Set(), // final review: selection never authorizes submission
   reviewSkipped: new Set(),
@@ -99,6 +106,14 @@ try {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+/* A posting URL for an href. These come off scraped pages and third-party
+   indexes. esc() stops one breaking out of the attribute; it does nothing about
+   the scheme, and a "javascript:" URL in a crawled listing would be a clickable
+   script running as this dashboard. Only web links and our own paths pass. */
+function href(u) {
+  const s = String(u ?? "").trim();
+  return esc(/^https?:\/\//i.test(s) || /^\/(?!\/)/.test(s) ? s : "#");
 }
 // Minimal, self-contained markdown → HTML for agent messages (bold, italic,
 // code, links, bullet/numbered lists). Escapes first, so it's XSS-safe.
@@ -312,10 +327,17 @@ function renderCompanyOptions() {
   const sel = $("#rp-url-company");
   if (!sel) return;
   const keep = sel.value;
-  const names = (state.companies || []).map((c) => (c && c.name) || c).filter(Boolean);
+  const names = (state.companies || []).map((c) => (c && c.name) || c).filter(Boolean)
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: "base" }));
+  // The custom entry sits at the TOP, above the tracked companies. At the bottom
+  // it was under a hundred names: adding a role at an employer that is not
+  // tracked yet, which is what this panel is most often for, meant scrolling the
+  // whole watchlist to find out it was possible.
   sel.innerHTML = `<option value="">Guess it from the URL</option>`
-    + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
-    + `<option value="__new__">＋ Add a new company…</option>`;
+    + `<option value="__new__">＋ Add a new company…</option>`
+    + (names.length ? `<optgroup label="Tracked companies">`
+        + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
+        + `</optgroup>` : "");
   if (keep) sel.value = keep;
   toggleNewCompany();
 }
@@ -2125,7 +2147,7 @@ function viewApps() {
       ? `<button class="rowlk" data-resume="${esc(r.pk)}" title="View tailored résumé" aria-label="View tailored résumé">${ICON.cv}</button>`
       : `<span class="rowlk off" title="No tailored résumé yet">${ICON.cv}</span>`;
     const jd = r.jd_url
-      ? `<a class="rowlk" href="${esc(r.jd_url)}" target="_blank" rel="noopener" title="Open job posting" aria-label="Open job posting">${ICON.jd}</a>`
+      ? `<a class="rowlk" href="${href(r.jd_url)}" target="_blank" rel="noopener" title="Open job posting" aria-label="Open job posting">${ICON.jd}</a>`
       : `<span class="rowlk off" title="No posting link">${ICON.jd}</span>`;
     const sc = r.screenshot_url
       ? `<a class="rowlk" href="${esc(r.screenshot_url)}" target="_blank" rel="noopener" title="Last screenshot" aria-label="Last screenshot">${ICON.shot}</a>`
@@ -2178,7 +2200,7 @@ function needsCard(r) {
       <div class="gc-actions">
         <button class="btn btn-primary" data-act="answer" data-pk="${esc(r.pk)}">Approve &amp; continue</button>
         <button class="btn btn-ghost" data-act="skip" data-pk="${esc(r.pk)}">Skip job</button>
-        ${r.jd_url ? `<a class="gc-jd" href="${esc(r.jd_url)}" target="_blank" rel="noopener">view posting ↗</a>` : ""}
+        ${r.jd_url ? `<a class="gc-jd" href="${href(r.jd_url)}" target="_blank" rel="noopener">view posting ↗</a>` : ""}
       </div>
     </div>
   </article>`;
@@ -2233,7 +2255,7 @@ function viewStuck() {
         ${steps ? `<div class="mini-timeline">${steps}</div>` : ""}
         <div class="stuck-meta mono">
           ${r.discovered_at ? `found ${when(r.discovered_at)} · ` : ""}${esc(r.pk)}
-          ${r.jd_url ? ` · <a href="${esc(r.jd_url)}" target="_blank" rel="noopener">posting ↗</a>` : ""}
+          ${r.jd_url ? ` · <a href="${href(r.jd_url)}" target="_blank" rel="noopener">posting ↗</a>` : ""}
         </div>
         <div class="gc-actions">
           ${RETRYABLE.includes(r.status)
@@ -2835,7 +2857,7 @@ function passedOverPanel() {
     const list = open ? `<ol class="po-list">${rows.map((j) => {
       const when = j.posted_label || "no publish date";
       const title = j.url
-        ? `<a class="po-t" href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>`
+        ? `<a class="po-t" href="${href(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>`
         : `<span class="po-t">${esc(j.title)}</span>`;
       return `<li class="po-row">
         ${title}
@@ -3839,6 +3861,13 @@ function finishLaunch(key, result) {
     state.launch.accepted = !!result?.ok;
     state.launch.label = result?.ok ? "Request accepted — starting work…"
       : result?.error || "Could not start. Check the connection and try again.";
+    // Nothing else ever cleared this line: a failed press, or a run that began
+    // and ended between two polls, left its message in the deck until the next
+    // launch.
+    const mine = state.launch;
+    setTimeout(() => {
+      if (state.launch === mine) { state.launch = null; renderDeck(); }
+    }, result?.ok ? 12000 : 8000);
   }
   renderDeck();
 }
@@ -4123,14 +4152,18 @@ function paneAction(act, pk, el) {
     if (demoGuard()) return;
     el.disabled = true;
     el.classList.add("is-busy");
+    const label = el.textContent;
     el.textContent = "↻ rotating…";
     post("/actions/rotate-and-approve", { company: co }).then((r) => {
       el.disabled = false;
       el.classList.remove("is-busy");
-      el.textContent = "↻ Rotate & queue";
+      el.textContent = label;
+      // "Rotate & queue all" answers for every company at once and names no
+      // single address, so this read "__all__: 3 queued, applying as undefined".
+      const who = co === "__all__" ? "Every rotating company" : co;
       toast(r && r.ok
-        ? `${co}: ${r.queued} queued, applying as ${r.email} onward${
-            r.tailoring ? ` · ${r.tailoring} tailoring first` : ""} — hit Process to run them.`
+        ? `${who}: ${r.queued ?? 0} queued${r.email ? `, applying as ${r.email} onward` : ""}${
+            r.tailoring ? ` · ${r.tailoring} tailoring first` : ""}.`
         : (r && r.error) || "Could not rotate that company.");
       loadQueue(); loadApps();
     });
@@ -4278,18 +4311,37 @@ async function approveAll() {
   }
 }
 
+/* Whether a POST actually happened. post() returns null when the request never
+   reached the server and {ok:false, error} when the server refused it; in both
+   cases it (or the caller) has already said why. */
+function took(d) {
+  if (d && d.ok === false && (d.error || d.note)) toast(d.error || d.note);
+  return !!d && d.ok !== false;
+}
+
 async function togglePause() {
   if (demoGuard()) return;
   state.paused = !state.paused;
   renderDeck();
-  await post("/actions/pause", { paused: state.paused });
+  // A failed request must not be followed by "Automation paused": the owner
+  // walks away believing nothing will run. Put the switch back and say nothing
+  // more than post() already did.
+  if (!took(await post("/actions/pause", { paused: state.paused }))) {
+    state.paused = !state.paused;
+    renderDeck();
+    return;
+  }
   toast(state.paused ? "Automation paused — nothing will run on its own." : "Automation resumed.");
 }
 async function toggleHeadless() {
   if (demoGuard()) return;
   state.headless = !state.headless;
   renderMenuState();
-  await post("/actions/browser-mode", { headless: state.headless });
+  if (!took(await post("/actions/browser-mode", { headless: state.headless }))) {
+    state.headless = !state.headless;
+    renderMenuState();
+    return;
+  }
   toast(state.headless
     ? "Headless — applies run with NO visible Chrome. (A CAPTCHA/handoff shows on the board, not a window.)"
     : "Visible — you'll see the Chrome windows while it applies.");
@@ -4299,7 +4351,11 @@ async function toggleWorkday() {
   if (demoGuard()) return;
   state.workday = !state.workday;
   renderMenuState();
-  await post("/actions/workday-accounts", { enabled: state.workday });
+  if (!took(await post("/actions/workday-accounts", { enabled: state.workday }))) {
+    state.workday = !state.workday;
+    renderMenuState();
+    return;
+  }
   toast(state.workday
     ? "Workday accounts on — new Workday employers get an account under the profile's email."
     : "Workday accounts off — a Workday login stops and asks you.");
@@ -4328,7 +4384,20 @@ async function resetWorkdayPassword() {
   if (r && r.ok) { showWorkdayPassword(r); toast("Custom password removed — back to the default."); }
   else toast((r && r.error) || "Could not remove the password.");
 }
+function renderWorkdayAccounts() {
+  const list = state.workdayAccounts || [];
+  const shown = $("#m-workday-pw").type === "text";
+  $("#m-workday-accounts-t").textContent = list.length
+    ? `Saved logins (${list.length}) — reused on the next apply` : "No saved logins yet";
+  $("#m-workday-accounts").innerHTML = list.map((a) => `<li>
+    <span class="wd-host mono">${esc(a.tenant)}</span>
+    <span class="wd-meta mono">${esc(a.username)} · ${shown ? esc(a.password) : "••••••••"}</span>
+    <span class="wd-meta">${esc(a.company || "")}${a.created ? " · created " + esc(a.created.slice(0, 10)) : ""}${a.last_used ? " · used " + esc(a.last_used.slice(0, 10)) : ""}</span>
+  </li>`).join("");
+}
 function showWorkdayPassword(d) {
+  if (d.accounts) state.workdayAccounts = d.accounts;
+  renderWorkdayAccounts();
   $("#m-workday-pw").value = d.password || "";
   $("#m-workday-pw-note").textContent = d.custom_password ? "custom" : "default";
   $("#m-workday-pw-reset").disabled = !d.custom_password;
@@ -4342,14 +4411,20 @@ function toggleWorkdayPwShown() {
   const label = show ? "Hide password" : "Show password";
   btn.setAttribute("aria-label", label);
   btn.title = label;
+  renderWorkdayAccounts();
 }
 
 const MODES = ["gated", "auto", "assisted"];
 async function toggleMode() {
   if (demoGuard()) return;
+  const before = state.mode;
   state.mode = MODES[(MODES.indexOf(state.mode) + 1) % MODES.length];
   renderDeck();
-  await post("/actions/mode", { mode: state.mode });
+  if (!took(await post("/actions/mode", { mode: state.mode }))) {
+    state.mode = before;
+    renderDeck();
+    return;
+  }
   toast({
     auto: `Auto ☾ — applies jobs scoring ≥ ${state.autoMin} by itself.`,
     gated: "Gated — every application waits for your approval.",
@@ -4361,7 +4436,7 @@ async function resetPipeline() {
   if (demoGuard()) return;
   if (!confirm("Reset the pipeline?\n\nClears all tracked jobs, the queue, live logs and "
     + "stored résumés/screenshots. Your facts and saved logins are kept.")) return;
-  await post("/actions/reset");
+  if (!took(await post("/actions/reset"))) return;
   state.apps = [];
   state.events = [];
   toast("Pipeline reset.");
@@ -4490,7 +4565,7 @@ function openDrawer(pk) {
   const jdText = (r.jd_text || "").trim();
   const jdBlock = jdText
     ? `<details class="section jd-block"><summary class="section-t">the posting${
-         r.jd_url ? ` · <a href="${esc(r.jd_url)}" target="_blank" rel="noopener">open ↗</a>` : ""
+         r.jd_url ? ` · <a href="${href(r.jd_url)}" target="_blank" rel="noopener">open ↗</a>` : ""
        }</summary><div class="jd-text">${esc(jdText)}</div></details>`
     : "";
 
@@ -4576,7 +4651,7 @@ function openDrawer(pk) {
   // The posting URL, always one click away — not buried in the artifacts row.
   const loc = r.location ? ` · <span class="drawer-loc">${esc(r.location)}</span>` : "";
   $("#drawer-sub").innerHTML = r.jd_url
-    ? `${esc(r.title)}${loc} · <a class="drawer-jd" href="${esc(r.jd_url)}" target="_blank"
+    ? `${esc(r.title)}${loc} · <a class="drawer-jd" href="${href(r.jd_url)}" target="_blank"
          rel="noopener" title="${esc(r.jd_url)}">open job posting ↗</a>`
     : esc(r.title) + loc;
   $("#scrim").hidden = false;
@@ -4608,7 +4683,9 @@ function loadAgentLog(pk) {
     .then((r) => r.json())
     .then((d) => {
       const el = $("#agentlog");
-      if (!el) return;
+      // A slow answer for the job that was open a moment ago must not paint
+      // itself into the drawer of the one that is open now.
+      if (!el || state.openPk !== pk) return;
       // Was the reader parked at the bottom? Then keep following the transcript.
       const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40 || !el.dataset.seeded;
       el.dataset.seeded = "1";
@@ -4639,7 +4716,7 @@ function loadDiff(pk) {
     .then((r) => r.json())
     .then((d) => {
       const el = $("#diff-body");
-      if (!el) return;
+      if (!el || state.openPk !== pk) return;
       const changes = (d.changes || []).filter((c) => c.before?.length || c.after?.length);
       if (!changes.length) {
         el.innerHTML = `<span class="muted">${esc(d.note || "no bullet changes")}</span>`;
@@ -4661,7 +4738,12 @@ function closeDrawer() {
   rtStop();
   $("#scrim").classList.remove("show");
   $("#drawer").classList.remove("show");
-  setTimeout(() => { $("#scrim").hidden = true; $("#drawer").hidden = true; }, 260);
+  // Only if it is still closed when the animation ends: opening another card
+  // within the 260ms used to have this timer hide the drawer it had just shown.
+  setTimeout(() => {
+    if (state.openPk) return;
+    $("#scrim").hidden = true; $("#drawer").hidden = true;
+  }, 260);
 }
 
 // --- résumé viewer ---------------------------------------------------------
@@ -4785,6 +4867,24 @@ function renderVerify() {
   // "I typed it and nothing happened" is exactly the state worth showing.
   const rows = (state.verifying || []).filter((v) => !v.answered || v.unseen_s > 90);
   if (!rows.length) { host.hidden = true; host.innerHTML = ""; return; }
+  // What is being typed, and where. This bar is rebuilt on every queue refresh
+  // (after any action, on gate events, every 3s with Browser controls open), and
+  // each rebuild used to empty the code box mid-entry, inside a nine minute
+  // window to enter it.
+  const typed = {};
+  $$(".vf-in", host).forEach((el) => { typed[el.dataset.vfPk] = el.value; });
+  const active = document.activeElement?.classList?.contains("vf-in")
+    ? { pk: document.activeElement.dataset.vfPk, at: document.activeElement.selectionStart }
+    : null;
+  setTimeout(() => {
+    $$(".vf-in", host).forEach((el) => {
+      if (typed[el.dataset.vfPk]) el.value = typed[el.dataset.vfPk];
+      if (active && el.dataset.vfPk === active.pk) {
+        el.focus();
+        try { el.setSelectionRange(active.at, active.at); } catch { /* not selectable */ }
+      }
+    });
+  }, 0);
   host.innerHTML = rows.map((v) => {
     const left = Math.max(0, 9 - Math.floor(v.waiting_s / 60));
     // Say whether the session is still LOOKING. A code that is ready but never
@@ -5061,6 +5161,11 @@ function wire() {
     $("#tracker-state").textContent = "Unsaved changes";
   });
   $("#drawer").addEventListener("click", (e) => {
+    // Links from one application to another ("Already applied again as: #2").
+    // They carried data-open, which only the board listens for, so a click did
+    // nothing but put "#" in the address bar.
+    const jump = e.target.closest("a[data-open]");
+    if (jump) { e.preventDefault(); openDrawer(jump.dataset.open); return; }
     const button = e.target.closest("[data-save-tracker]");
     if (button) saveTracker(button.dataset.saveTracker);
   });
@@ -5260,9 +5365,14 @@ function wire() {
     for (const f of CPREF_FIELDS) {
       if (!(f.k in draft) || f.prof) continue;
       const raw = canonical(draft[f.k], f);
-      const shown = cpAsText(over[f.k] ?? (state.prefs || {})[f.k], f);
+      // Both sides canonical. The shared Hard rules come from a YAML block and
+      // end in a newline; the draft is trimmed. Unequal by one invisible
+      // character, a field that was touched and put back was stored as an
+      // override identical to the default, and the company silently stopped
+      // following the shared value.
+      const shown = canonical(cpAsText(over[f.k] ?? (state.prefs || {})[f.k], f), f);
       if (raw === shown) continue;
-      changes[f.k] = raw === cpAsText((state.prefs || {})[f.k], f)
+      changes[f.k] = raw === canonical(cpAsText((state.prefs || {})[f.k], f), f)
         ? null : (f.bool ? raw === "yes" : raw);
     }
     state.cpSaving = true;
@@ -5437,20 +5547,38 @@ function wire() {
   const runRole = async () => {
     if (demoGuard()) return;
     const url = $("#rp-url").value.trim();
-    if (!url) { toast("Paste the job URL first."); return; }
+    if (!url) { toast("Paste the job URL first."); $("#rp-url").focus(); return; }
+    // "Add a new company" with nothing typed used to fall through as blank, and
+    // blank means "guess from the URL": the role was filed under whatever the
+    // host suggested, not the employer the owner was about to name.
+    if ($("#rp-url-company")?.value === "__new__" && !chosenCompany()) {
+      toast("Type the new company's name, or pick one from the list.");
+      $("#rp-url-newco").focus();
+      return;
+    }
+    // One press, one run. The request takes a moment and a second press started
+    // a second tailor of the same role.
+    const go = $("#rp-go");
+    if (go.disabled) return;
+    go.disabled = true;
+    const goLabel = go.textContent;
+    go.textContent = "Starting…";
+    const done = () => { go.disabled = false; go.textContent = goLabel; };
     // Naming the company matters beyond tidiness: it is the key the queue, the
     // per-company preferences and the board filter all work from. Guessed from
     // the URL when left blank, which is right for the big boards and wrong for
     // a vendor host that names the software rather than the employer.
     const company = chosenCompany();
     const d = await post("/actions/apply-role", { url, company });
+    done();
     if (d && d.ok) {
       $("#rp-url").value = "";
       if ($("#rp-url-company")) $("#rp-url-company").value = "";
       if ($("#rp-url-newco")) { $("#rp-url-newco").value = ""; $("#rp-url-newco").hidden = true; }
       closeRp();
-      toast("▶ Tailoring your résumé to that role — it'll land in Tailored when ready.");
-      pollStats();
+      toast(d.note || `▶ Tailoring your résumé for ${d.company || "that role"} — `
+          + "it'll land in Tailored when ready.");
+      pollStats(); loadApps();
     } else if (d) toast(d.error || "Couldn't start — check the URL.");
   };
   // Tailor from PASTED text: a recruiter's message with the role in it, where
@@ -5504,9 +5632,16 @@ function wire() {
   $("#rp-url-company")?.addEventListener("change", toggleNewCompany);
   $("#rp-go").addEventListener("click", runRole);
   $("#rp-url").addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
+  $("#rp-url-newco")?.addEventListener("keydown", (e) => { if (e.key === "Enter") runRole(); });
 
   // --- profiles: which identity an application goes out under ---------------
   const pm = $("#profpicker"), pmBtn = $("#btn-profiles");
+  // The picker sat inside #profmgr, the toolbar slot for a Profiles button that
+  // is no longer shown. That slot is hidden for good, so "＋ New identity"
+  // unhid a form inside a hidden parent and nothing appeared: no profile could
+  // be added from the interface at all. It is its own dialog now.
+  document.body.appendChild(pm);
+  pm.classList.add("pm-modal");
   const closePm = () => {
     if (!pm.hidden) { pm.hidden = true; pmBtn.setAttribute("aria-expanded", "false"); }
   };
@@ -5608,8 +5743,13 @@ function wire() {
   }
   async function saveProfiles(profiles, def) {
     const d = await post("/profiles", { profiles, default: def });
-    if (d && d.ok) { state.profiles = d.profiles; state.profileDefault = d.default;
-                     renderProfiles(); renderProfilePickers(); }
+    if (d && d.ok) {
+      state.profiles = d.profiles; state.profileDefault = d.default;
+      renderProfiles(); renderProfilePickers();
+      // The save answers without usage, so every card read "never used" until
+      // the tab was reopened. Fetch the full picture again.
+      loadProfiles();
+    }
     else toast((d && d.error) || "Couldn't save profiles.");
   }
   pmBtn.addEventListener("click", (e) => {
@@ -5654,7 +5794,10 @@ function wire() {
   });
   pm.addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
-    if (!pm.hidden && !e.target.closest(".profmgr")) closePm();
+    // Not the button that opens it: both listeners sit on the document, so
+    // stopPropagation in the opener does not keep this one from closing the
+    // dialog in the same click.
+    if (!pm.hidden && !e.target.closest("#profpicker, [data-pv-new]")) closePm();
   });
   loadProfiles();          // boot: the board needs these to label its cards
 
@@ -5762,14 +5905,15 @@ function wire() {
       if (!confirm(`Re-render every tailored résumé with ${p.label}'s details `
                  + `(${p.email})?\n\nThe tailoring itself is kept — only the contact `
                  + `line changes, so no model is called and nothing is re-written.`)) return;
+      const allLabel = all.textContent;
       all.textContent = "re-rendering…";
       post("/actions/apply-profile-to-all", { profile_id: all.dataset.profAll })
         .then((d) => {
-          all.textContent = "use for all";
+          all.textContent = allLabel;
           if (d && d.ok) {
             toast(`${d.rerendered} résumé(s) now go out as ${p.label}`
                 + (d.left_alone ? ` · ${d.left_alone} already applied, left alone` : ""));
-            reload();
+            loadApps(); loadQueue();
           } else toast((d && d.error) || "Couldn't re-render.");
         });
       return;
@@ -5812,7 +5956,12 @@ function wire() {
   const pf = $("#prefpicker"), pfBtn = $("#btn-prefs");
   let prefsLoading = false, prefsSaving = false, prefsDirty = false, prefsLoaded = false;
   const lockPrefs = (locked) => {
-    $$("input, textarea, button", pf).forEach((el) => { el.disabled = locked; });
+    // Never the ways out. When /preferences fails (always, in the demo) every
+    // button here was disabled including Close and Cancel, leaving a modal with
+    // the page scroll locked and only Escape to leave it.
+    $$("input, textarea, button", pf).forEach((el) => {
+      if (!["pf-close", "pf-cancel", "pf-company"].includes(el.id)) el.disabled = locked;
+    });
   };
   const closePf = () => {
     if (!pf.hidden) { pf.hidden = true; pfBtn.setAttribute("aria-expanded", "false"); pfBtn.focus(); }
@@ -6177,7 +6326,14 @@ function wire() {
       rotOn.classList.add("is-busy");
       post("/actions/rotation", { company, profile_id: rotOn.dataset.profile })
         .then(async (d) => {
-          if (!d || !d.ok) { toast((d && d.error) || "Couldn't set that up."); return; }
+          if (!d || !d.ok) {
+            // Give the button back: the pane only repaints when data changes,
+            // so a failed request left it disabled.
+            rotOn.disabled = false;
+            rotOn.classList.remove("is-busy");
+            toast((d && d.error) || "Couldn't set that up.");
+            return;
+          }
           await loadRotation();
           toast(`${company}: a new address every ${d.limit} applications. `
               + `Rotate & queue moves its un-sent work over.`);
@@ -6247,9 +6403,14 @@ function wire() {
     if (row) openDrawer(row.dataset.pk);
   });
   $("#pane").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
+    if (e.key !== "Enter" && e.key !== " ") return;
     const el = e.target.closest("[data-open]");
-    if (el && !e.target.closest("textarea")) openDrawer(el.dataset.open);
+    // Only when the ROW has focus. Enter on a button inside the row ("Run now",
+    // "Force apply") ran that action and opened the drawer as well. Space is the
+    // other key a role=button answers to.
+    if (!el || e.target !== el) return;
+    e.preventDefault();
+    openDrawer(el.dataset.open);
   });
 
   // Fresh rail: both search boxes repaint the DATA regions in place and never
@@ -6453,7 +6614,11 @@ function wire() {
     toast(d.retailoring
       ? "Profile set — re-tailoring so the résumé carries that address."
       : "Profile set for this application.");
-    reload();
+    // There is no reload() in this module (the only one is private to
+    // steering.js), so this threw after the toast and the drawer kept showing
+    // the old identity.
+    await loadApps(); loadQueue();
+    if (state.openPk === pk) openDrawer(pk);
   });
 
   $("#drawer").addEventListener("click", (e) => {
@@ -6490,17 +6655,22 @@ function wire() {
     } else if (kind === "retry") {
       post(`/actions/retry/${encodeURIComponent(pk)}`);
       toast("Retrying — re-running the pipeline.");
-    } else if (kind === "cancel") {
+    } else if (kind === "cancel" || kind === "skip") {
       const st = (state.apps.find((a) => a.pk === pk) || {}).status;
-      if (!confirm(`${st === "submitting" ? "Cancel this in-progress application"
-        : "Skip this job"}? It moves to closed.`)) return;
-      post(`/actions/skip/${encodeURIComponent(pk)}`);
-      toast(st === "submitting" ? "Cancelled — moved to closed." : "Skipped.");
+      if (kind === "cancel" && !confirm(`${st === "submitting"
+        ? "Cancel this in-progress application" : "Skip this job"}? It moves to closed.`)) return;
+      // The answer is READ. The server refuses to skip an application that is in
+      // the browser right now or has already gone, and this used to say
+      // "Cancelled — moved to closed." regardless, while the form went on to submit.
+      post(`/actions/skip/${encodeURIComponent(pk)}`).then((r) => {
+        toast(r && r.ok ? (st === "submitting" ? "Cancelled — moved to closed." : "Skipped.")
+                        : (r && r.note) || "Couldn't skip it.");
+        if (r && r.ok) closeDrawer();
+        scheduleReload();
+      });
+      return;
     } else if (kind === "reopen" || kind === "mark-applied") {
       paneAction(kind, pk, act);
-    } else if (kind === "skip") {
-      post(`/actions/skip/${encodeURIComponent(pk)}`);
-      toast("Skipped.");
     } else return; // An unfamiliar drawer action must never silently skip a job.
     closeDrawer();
     scheduleReload();

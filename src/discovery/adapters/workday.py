@@ -22,6 +22,15 @@ class WorkdayAdapter:
 
     def fetch(self, company: CompanyConfig, client: httpx.Client) -> list[JobRecord]:
         base = company.board.rstrip("/")
+        # board is https://<host>/wday/cxs/<tenant>/<site>/jobs; the page a person
+        # opens is https://<host>/<site><externalPath>. Storing the bare path left
+        # a posting nobody could read or apply to.
+        public = ""
+        if "/wday/cxs/" in base:
+            host, _, rest = base.partition("/wday/cxs/")
+            site = rest.split("/")[1] if rest.count("/") >= 1 else ""
+            public = f"{host}/{site}" if site else host
+        total = None
         jobs: list[JobRecord] = []
         offset, limit = 0, 20
         while True:
@@ -47,13 +56,17 @@ class WorkdayAdapter:
                         company=company.name,
                         job_id=path.rsplit("/", 1)[-1],
                         title=j.get("title", ""),
-                        jd_url=path,
+                        jd_url=f"{public}{path}" if public else path,
                         jd_text=j.get("title", ""),  # detail requires a per-job call
                         location=j.get("locationsText", ""),
                         ats=self.ats,
                     )
                 )
             offset += limit
-            if offset >= payload.get("total", len(postings)) or not postings:
+            # Only the first page reliably carries the total; later pages report
+            # 0, which read as "done" and capped every tenant at two pages.
+            if total is None:
+                total = payload.get("total") or 0
+            if not postings or (total and offset >= total) or (not total and len(postings) < limit):
                 break
         return jobs

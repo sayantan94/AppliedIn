@@ -542,7 +542,17 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
     # extension never produces a report: the first tool call fails and the
     # session ends with the tool's error in its output. Left to the generic path
     # it reads as "ended without a structured result" — true, and useless.
-    if is_disconnected(stdout) or is_disconnected(json.dumps(report)):
+    #
+    # A report that says "applied" outranks both marker checks below. The task
+    # tells the session to recover from a refused click and carry on, so a run
+    # that did exactly that, submitted, and then MENTIONED the error in its reply
+    # used to be thrown away as a conflict and re-queued as untouched — a second
+    # application to a job that had already been sent. Whether the claim holds is
+    # for `classify` to decide; it is not this function's to discard.
+    claims_submit = (str(report.get("outcome") or "").strip().lower() == "applied"
+                     or _pressed_submit(report))
+    if not claims_submit and (
+            is_disconnected(stdout) or is_disconnected(json.dumps(report))):
         log.warning("browser extension disconnected (report_key=%s)\n--- session output ---\n%s",
                     report_key, stdout[-2000:] or "(empty)")
         return {}, DISCONNECT_MESSAGE
@@ -582,7 +592,8 @@ async def _run_task_impl(task: str, *, report_key: str, model: str = "",
     # could read the page but every click failed". That is the browser being held
     # by something else, not the posting being unfillable, so say so plainly
     # instead of letting it be recorded against the job.
-    if _is_browser_conflict(json.dumps(report)) or _is_browser_conflict(stdout):
+    if not claims_submit and (
+            _is_browser_conflict(json.dumps(report)) or _is_browser_conflict(stdout)):
         # Log the session's OWN account, not just the verdict. "Browser conflict"
         # names a symptom; which tab and which extension it tripped on is the only
         # thing that identifies the cause, and without it this gets diagnosed by
@@ -622,7 +633,7 @@ def resume_dirs(resume_path: str) -> list[str]:
 # why. A rule that is only a sentence in a prompt is a rule nobody is checking.
 
 _SANCTIONS_RX = re.compile(
-    r"cuba|iran\b|north korea|syria|crimea|donetsk|luhansk|zaporizhzhia|kherson"
+    r"\bcuba\b|\biran\b|north korea|syria|crimea|donetsk|luhansk|zaporizhzhia|kherson"
     r"|\bbelarus\b|sanction|embargo|export control|restricted (?:country|party)",
     re.I)
 # Option wording that SAFELY answers such a question.
@@ -640,11 +651,13 @@ _PLACEHOLDER_RX = re.compile(
 
 _SELF_ID_RX = re.compile(
     r"disabilit|protected veteran|veteran status|hispanic|latino"
-    r"|race|ethnicit|gender identity|transgender|sexual orientation", re.I)
+    r"|\brac(?:e|ial)\b(?!\s+condition)|ethnicit|gender identity|transgender"
+    r"|sexual orientation", re.I)
 
 
 _SELF_ID_AFFIRM_RX = re.compile(
-    r"^\s*yes\b|^\s*i (identify|have|am)\b|i identify as one or more", re.I)
+    r"^\s*yes\b|^\s*i (identify|have|am)\b|i identify as one or more"
+    r"|^\s*(?:an? )?protected veteran\b", re.I)
 
 
 # "I am NOT a protected veteran" and "No, I do not have a disability" are the
@@ -653,7 +666,16 @@ _SELF_ID_AFFIRM_RX = re.compile(
 
 
 _SELF_ID_NEGATION_RX = re.compile(
-    r"\bnot?\b|\bdon'?t\b|\bdo not\b|\bnone\b|decline|wish to answer", re.I)
+    r"\bnot?\b|\bnever\b|\bdon'?t\b|\bdo not\b|\bnone\b|decline|wish to answer", re.I)
+
+
+# "I have read the Equal Opportunity statement covering race, disability and
+# veteran status" starts with "I have" and names three characteristics, and it
+# declares none of them. Reading it as an affirmation recorded a SUBMITTED
+# application as failed, and a failed row is one press from being sent again.
+_SELF_ID_ACK_RX = re.compile(
+    r"^\s*i (?:have read|acknowledge|understand|agree|certify|consent|confirm)\b",
+    re.I)
 
 
 def _is_placeholder(value: object) -> bool:
@@ -664,9 +686,35 @@ def _is_self_id_affirmation(label: str, value: object = "") -> bool:
     """True when ticking this would DECLARE a protected characteristic."""
     text = f"{label} {value}".strip()
     head = str(label).strip()
-    if _SELF_ID_NEGATION_RX.search(head):
+    if _SELF_ID_NEGATION_RX.search(head) or _SELF_ID_ACK_RX.search(head):
         return False
     return bool(_SELF_ID_RX.search(text) and _SELF_ID_AFFIRM_RX.search(head))
+
+
+def _declares_protected(label: str, value: object) -> bool:
+    """One answer, checked from both ends.
+
+    The declaration can sit in the label ("I have a disability": checked), in
+    the value ("Disability status": "Yes, I have a disability") or be split
+    across the two ("Are you Hispanic or Latino?": "Yes"). Checking the label
+    alone passed the second and third, which is most real EEO forms.
+    """
+    label, val = str(label), str(value or "")
+    if _is_self_id_affirmation(label, val) or _is_self_id_affirmation(val):
+        return True
+    return bool(_SELF_ID_RX.search(label)
+                and not _SELF_ID_ACK_RX.search(label)
+                and _SELF_ID_AFFIRM_RX.search(val)
+                # Judged on the opening clause. "Yes, I have a disability, but I
+                # do not need an accommodation" is an affirmation, and the "not"
+                # in its second half used to read as declining.
+                and not _SELF_ID_NEGATION_RX.search(re.split(r"[,;.]", val, maxsplit=1)[0]))
+
+
+def _unsafe_sanctions_answer(label: str, value: object) -> bool:
+    """True when a sanctions question was given anything but its negative."""
+    return bool(_SANCTIONS_RX.search(str(label) or "")
+                and not _SANCTIONS_SAFE_RX.match(str(value or "")))
 
 
 def _safe_sanctions_answer(question: str, values: list) -> list:
@@ -703,7 +751,7 @@ def guard_value(label: str, value: object) -> tuple[str | None, str | None]:
     """
     if _is_placeholder(value):
         return None, f"{label}: placeholder text"
-    if _is_self_id_affirmation(label, value) or _is_self_id_affirmation(str(value)):
+    if _declares_protected(label, value):
         return None, f"{label}: self-identification is the owner's to answer"
     safe = _safe_sanctions_answer(label, [str(value)])
     if safe and str(safe[0]) != str(value):
@@ -1153,6 +1201,7 @@ in this browser; leaving your tabs behind makes them clean up after you.
 Then end your reply with ONLY this JSON object and nothing after it:
 
 {{"outcome": "applied" | "needs_owner" | "blocked",
+  "submitted": true | false,
   "blocked_by": "application_limit" | "already_applied" | "captcha" | "login" | "other",
   "confirmation": "<the page's confirmation wording, if it submitted>",
   "question": "<what to ask the owner, if outcome is needs_owner>",
@@ -1160,7 +1209,9 @@ Then end your reply with ONLY this JSON object and nothing after it:
   "filled": {{"<field label>": "<value you entered>"}}}}
 
 Report what actually happened. "applied" means the page confirmed a submission you
-watched go through, not that you clicked Submit and hoped."""
+watched go through, not that you clicked Submit and hoped. "submitted" is true if
+you pressed the form's final Submit at all, whatever the page did next, and false
+if you never reached it."""
 
 
 def _verify(report: dict) -> tuple[bool, str]:
@@ -1171,12 +1222,15 @@ def _verify(report: dict) -> tuple[bool, str]:
     checked after the fact instead. A rule that is only ever a sentence in a
     prompt is a rule nobody is enforcing.
     """
-    
-    for label, value in (report.get("filled") or {}).items():
-        if _is_self_id_affirmation(str(label), value):
+    for label, value in _filled(report).items():
+        label = str(label)
+        if _declares_protected(label, value):
             return False, (f"It declared a protected characteristic ({label[:60]}). "
                            "That answer is the owner's alone, so this is not "
                            "recorded as applied.")
+        if _unsafe_sanctions_answer(label, value):
+            return False, (f"It did not give the negative answer to a sanctions "
+                           f"or restricted-country question ({label[:60]}).")
         if _is_placeholder(value):
             return False, f"It entered placeholder text into {label[:60]}."
     return True, ""
@@ -1209,6 +1263,19 @@ async def apply_chrome(url: str, company: str, facts: dict, model: str, *, pk: s
     # would have chosen.
     resume_path = _stage_resume(
         resume_path, str(facts.get("Full name") or facts.get("Name") or "Resume"))
+
+    # The session types whatever it is handed, and the check on what it typed runs
+    # after the form has gone. An answer that affirms a protected characteristic
+    # is therefore kept out of its hands here: the field is left for the page's
+    # "decline" option, instead of being submitted and then recorded as a breach.
+    kept = {}
+    for label, value in facts.items():
+        if _declares_protected(str(label), value) or _is_placeholder(value):
+            log.warning("withholding an approved answer from the session: %r "
+                        "(self-identification or placeholder)", str(label)[:70])
+            continue
+        kept[label] = value
+    facts = kept
 
     if (direct := direct_board_url(url)) and direct != url:
         log.info("using the board's own URL instead of the embed: %s", direct)
@@ -1279,6 +1346,41 @@ def problem_status(problem: str) -> str:
     return "uncertain" if (problem or "").startswith(TIMEOUT_OPENING) else "unknown"
 
 
+# A session asked for "the page's confirmation wording" sometimes fills the
+# field with its own account of there being none.
+_NO_CONFIRMATION_RX = re.compile(
+    r"^\s*(?:no\b(?! further)|none\b|n/?a\b|not\b|unable\b|unknown\b|unclear\b"
+    r"|did(?: not|n'?t)\b|could(?: not|n'?t)\b)"
+    r"|\bno confirmation\b"
+    r"|\b(?:did|does|was|were|is)(?: not|n'?t) (?:appear|show|display|confirm|submit|see|captur)"
+    # The page's own refusal, quoted back as if it were the confirmation.
+    r"|\bcould(?: not|n'?t) be (?:submitted|processed|completed)\b|\bfailed to submit\b"
+    r"|\b(?:fix|correct) the (?:following )?errors?\b",
+    re.I)
+
+
+def _pressed_submit(report: dict) -> bool:
+    """The session says it pressed the final Submit, whatever happened next."""
+    said = report.get("submitted")
+    return said is True or str(said).strip().lower() in ("true", "yes")
+
+
+def _filled(report: dict) -> dict:
+    """What the session says it entered, as label -> value.
+
+    The task asks for an object. A session that sent a list of {label, value}
+    rows instead raised inside classify, and the caller turned that crash into
+    "uncertain": a confirmed application lost its record over a shape.
+    """
+    filled = report.get("filled")
+    if isinstance(filled, dict):
+        return filled
+    if isinstance(filled, list):
+        return {str(row.get("label") or row.get("field") or i): row.get("value", "")
+                for i, row in enumerate(filled) if isinstance(row, dict)}
+    return {}
+
+
 def classify(report: dict) -> dict:
     """A Chrome session's report, turned into a result — or refused.
 
@@ -1290,10 +1392,14 @@ def classify(report: dict) -> dict:
     applied while entering it.
     """
     passed, why_not = _verify(report)
-    fields = [{"label": k, "value": v}
-              for k, v in (report.get("filled") or {}).items()][:40]
+    fields = [{"label": k, "value": v} for k, v in _filled(report).items()][:40]
     if not passed:
         log.warning("chrome result rejected: %s", why_not)
+        if str(report.get("outcome") or "").lower() == "applied":
+            # Refused as a record, but the form may well have gone. Saying only
+            # "failed" invites a Retry, and a retry here is a second application.
+            why_not += (" The session reports that it DID submit, so check the "
+                        "portal before retrying.")
         return {"status": "failed", "reason": "guardrail",
                 "detail": why_not, "fields": fields}
 
@@ -1307,6 +1413,14 @@ def classify(report: dict) -> dict:
             return {"status": "uncertain",
                     "detail": "It reported applying but captured no confirmation "
                               "from the page, so this is not recorded as applied. "
+                              "Check the portal before applying again.",
+                    "fields": fields}
+        if _NO_CONFIRMATION_RX.search(confirmation):
+            # "No confirmation message appeared; the page stayed on the form" is
+            # a non-empty string, and it was being recorded as the confirmation.
+            return {"status": "uncertain",
+                    "detail": "It reported applying, but what it captured says the "
+                              f"page did not confirm it: {confirmation[:160]!r}. "
                               "Check the portal before applying again.",
                     "fields": fields}
         return {"status": "applied", "confirmation": confirmation[:120],
@@ -1327,5 +1441,16 @@ def classify(report: dict) -> dict:
     detail = str(report.get("detail") or "The application could not be completed.")
     said = str(report.get("blocked_by") or "").strip().lower()
     reason = said if said in BLOCK_REASONS else "blocked"
+    # The task tells the session to report "blocked" when it submitted and then
+    # could not find a confirmation. That came back as an ordinary failure, and an
+    # ordinary failure is retried: up to three more submissions of a form that had
+    # already gone. A press of Submit the page did not answer is the definition of
+    # uncertain. The two refusals a page states outright are still what they say.
+    if _pressed_submit(report) and reason not in ("application_limit", "already_applied"):
+        return {"status": "uncertain",
+                "detail": ("It pressed Submit but found no confirmation, so this is "
+                           "not recorded as applied and will not be retried. Check "
+                           f"the portal before applying again. It said: {detail[:200]}"),
+                "fields": fields}
     return {"status": "failed", "reason": reason, "detail": detail[:300],
             "fields": fields}

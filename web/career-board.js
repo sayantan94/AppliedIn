@@ -2,6 +2,8 @@
 // close source settings, lose selections or interrupt a button press.
 import { auth } from './auth.js';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Posting links come from scraped pages: web URLs only, never a script scheme.
+const href = value => { const s = String(value ?? '').trim(); return esc(/^https?:\/\//i.test(s) ? s : '#'); };
 const date = value => {
   const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value + 'T12:00:00' : value);
   return value && Number.isFinite(+d) ? d.toLocaleDateString(undefined, {month:'short', day:'numeric'}) : 'Date unavailable';
@@ -377,7 +379,7 @@ class CareerBoard extends HTMLElement {
     this.querySelectorAll('.cb-job[data-id]').forEach(el => el.classList.toggle('is-active', el.dataset.id === id));
     const version = ++this.detailVersion;
     const drawer = this.$('.cb-job-drawer'), body = this.$('.cb-drawer-content');
-    body.innerHTML = `<div class="cb-detail-company"><span class="cb-company-mark" aria-hidden="true">${esc(row.company.slice(0,2).toUpperCase())}</span><span>${esc(row.company)}</span></div><h2 id="cb-detail-title">${esc(row.title)}</h2><p class="cb-detail-location">${esc(row.location || 'Location not listed')}</p><div class="cb-detail-tags"><span>${esc(labels[row.state] || row.state)}</span>${row.posted_at ? `<span>Posted ${esc(date(row.posted_at))}</span>` : ''}<span>${esc(SOURCES[row.provider] || row.provider || 'Career page')}</span></div><a class="cb-original-link" href="${esc(row.url)}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a>${row.why ? `<section class="cb-detail-section"><h3>Why it was found</h3><p>${esc(plainWhy(row.why))}</p></section>` : ''}<section class="cb-detail-section"><h3>Application & résumé</h3><div class="cb-detail-application">Loading saved information…</div></section><section class="cb-detail-section"><h3>Job description</h3><p class="cb-detail-description" aria-live="polite">Loading saved description…</p></section>`;
+    body.innerHTML = `<div class="cb-detail-company"><span class="cb-company-mark" aria-hidden="true">${esc(row.company.slice(0,2).toUpperCase())}</span><span>${esc(row.company)}</span></div><h2 id="cb-detail-title">${esc(row.title)}</h2><p class="cb-detail-location">${esc(row.location || 'Location not listed')}</p><div class="cb-detail-tags"><span>${esc(labels[row.state] || row.state)}</span>${row.posted_at ? `<span>Posted ${esc(date(row.posted_at))}</span>` : ''}<span>${esc(SOURCES[row.provider] || row.provider || 'Career page')}</span></div><a class="cb-original-link" href="${href(row.url)}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a>${row.why ? `<section class="cb-detail-section"><h3>Why it was found</h3><p>${esc(plainWhy(row.why))}</p></section>` : ''}<section class="cb-detail-section"><h3>Application & résumé</h3><div class="cb-detail-application">Loading saved information…</div></section><section class="cb-detail-section"><h3>Job description</h3><p class="cb-detail-description" aria-live="polite">Loading saved description…</p></section>`;
     this.paintSelection();
     const inline = this.wide();
     // show() moves focus into the panel; beside the list that would pull the

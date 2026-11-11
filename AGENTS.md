@@ -199,7 +199,7 @@ To add a field end to end:
 with the shared value, so "unchanged" must mean "still shares it" and store
 nothing. Writing an override that merely copies today's default silently detaches
 the company: a later change to the global value moves every other company and
-leaves that one behind, with nothing on screen explaining why. `commitCpref` in
+leaves that one behind, with nothing on screen explaining why. `saveCprefs` in
 `app.js` compares against the default and clears the override when they match.
 Keep that property.
 

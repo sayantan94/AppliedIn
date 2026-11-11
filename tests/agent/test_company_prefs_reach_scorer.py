@@ -6,8 +6,6 @@ posting against the global preferences, so a Bangalore role scored 8."""
 
 from __future__ import annotations
 
-import inspect
-
 import agent.run as R
 from core import flags
 from discovery.watchlist import Preferences

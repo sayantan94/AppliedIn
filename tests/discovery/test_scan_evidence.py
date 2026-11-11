@@ -27,7 +27,7 @@ def test_scan_receipt_keeps_read_matched_and_new_counts_distinct(monkeypatch):
         calls.append("resolve " + company.name)
         return company
 
-    def crawl(company, *a):
+    def crawl(company, *a, **kw):
         calls.append("read " + company.name)
         progress.record(found=196, relevant=12)
         return 0

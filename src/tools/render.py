@@ -44,8 +44,19 @@ def _sanitize(src: str) -> str:
     return out
 
 
+# A cold Tectonic run downloads its bundle first, which is the slow case.
+COMPILE_TIMEOUT_S = 180
+
+
 def _run(cmd: list[str], tmp: str, name: str) -> bytes:
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
+    # The source is model output built from a stranger's job posting. A runaway
+    # macro used to hang the worker thread (or a dashboard request) for good.
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False,  # noqa: S603
+                              timeout=COMPILE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"LaTeX compile did not finish in {COMPILE_TIMEOUT_S}s") from exc
     out = Path(tmp) / f"{name}.pdf"
     if not out.exists():
         tail = (proc.stdout or proc.stderr).strip()[-500:]
@@ -134,7 +145,7 @@ def render_pdf(latex_source: str) -> bytes:
     if (pdflatex := shutil.which("pdflatex")) is not None:
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "resume.tex").write_text(latex_source, encoding="utf-8")
-            return _run([pdflatex, "-interaction=nonstopmode", "-halt-on-error",
+            return _run([pdflatex, "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error",
                          "-output-directory", tmp, str(Path(tmp) / "resume.tex")], tmp, "resume")
     if (tectonic := shutil.which("tectonic")) is not None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,11 @@ def normalize_label(question: str) -> str:
     "Notice period?" and "notice  period" map to the same label.
     """
     s = question.lower()
+    # Before the punctuation goes: "experience with C++?", "…with C#?" and
+    # "…with C?" all normalised to the same key, so the answer approved for one
+    # was returned, confidently, for the others.
+    s = re.sub(r"(?<=[a-z0-9])\+\+", " plusplus ", s)
+    s = re.sub(r"(?<=[a-z0-9])#", " sharp ", s)
     s = _PUNCT_ALL.sub(" ", s)
     s = _WHITESPACE.sub(" ", s).strip()
     return s

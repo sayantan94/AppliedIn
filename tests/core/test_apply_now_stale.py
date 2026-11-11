@@ -17,7 +17,7 @@ def test_apply_now_retailors_a_stale_row_before_applying():
     import server
 
     src = open(server.__file__).read()
-    i = src.index('@app.post("/actions/apply-now/{pk}")')
+    i = src.index('@app.post("/actions/apply-now/{pk:path}")')
     body = src[i:i + 7000]
     assert "seed_fingerprint()" in body, "the press must check staleness itself"
     assert "pool.submit(run_job, pk, stores).result(timeout=RETAILOR_DEADLINE_S)" in body, \
@@ -31,7 +31,7 @@ def test_a_row_that_does_not_come_back_tailored_is_not_applied():
     import server
 
     src = open(server.__file__).read()
-    i = src.index('@app.post("/actions/apply-now/{pk}")')
+    i = src.index('@app.post("/actions/apply-now/{pk:path}")')
     body = src[i:i + 7000]
     assert 'not in ("tailored", "needs_human")' in body
     assert "q.done(item)" in body, "the company lease must be released either way"
@@ -43,7 +43,7 @@ def test_a_retailor_that_hits_the_deadline_releases_the_lease():
     import server
 
     src = open(server.__file__).read()
-    i = src.index('@app.post("/actions/apply-now/{pk}")')
+    i = src.index('@app.post("/actions/apply-now/{pk:path}")')
     body = src[i:i + 7000]
     j = body.index("except concurrent.futures.TimeoutError:")
     assert "q.done(item)" in body[j:j + 900]

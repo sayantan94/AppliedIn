@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI
@@ -18,9 +19,9 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.config import get_settings
+from core.ids import is_internal_pk
 from core.models import Status
 from core.stores import make_stores
-from core.ids import is_internal_pk
 from tools import workday_accounts as _workday
 
 _WEB = Path(__file__).resolve().parents[1] / "web"
@@ -84,13 +85,18 @@ def _rescreen_company(name: str) -> int:
 
     cands = [JobRecord(company=name, job_id=str(r["pk"]).split("#", 1)[-1],
                        title=r.get("title") or "", jd_url=r.get("jd_url") or "",
+                       # Without it every posting screened as "location unknown"
+                       # and a locations override never removed anything.
+                       location=r.get("location") or "",
                        jd_text=r.get("jd_text") or r.get("title") or "", ats="custom")
              for r in rows]
     keep = {j.jd_url or j.title for j in relevant(cands, prefs)}
     if kws:
         keep = {k for k in keep
                 if any(flags.title_matches_filter(t, kws)
-                       for t in [k] + [r.get("title", "") for r in rows
+                       # Titles only. The key is usually the URL, and "ml"
+                       # matches ".html" in every one of them.
+                       for t in [r.get("title", "") for r in rows
                                        if (r.get("jd_url") or r.get("title")) == k])}
 
     moved = 0
@@ -270,7 +276,6 @@ def _to_ui(row: dict, artifacts) -> dict:
         # against without leaving the board and losing their place.
         "jd_text": (row.get("jd_text") or "")[:20000],
         "location": row.get("location", ""),
-        "profile_id": row.get("profile_id", ""),
         "screenshot_url": link("screenshot_s3_key"),
         "confirmation_id": row.get("confirmation_id"),
         "discovered_at": row.get("discovered_at") or (events[0]["at"] if events else None),
@@ -339,7 +344,7 @@ def _render_preferences_yaml(prefs) -> str:  # noqa: ANN001
                                 allow_unicode=True, sort_keys=False)
         return "".join(f"  {ln}\n" for ln in dumped.splitlines())
 
-    notes = (prefs.notes or "").rstrip()
+    notes = (prefs.notes or "").strip("\n").rstrip()
     notes_block = "".join(f"  {ln}\n" if ln.strip() else "\n"
                           for ln in notes.splitlines()) if notes else ""
     return f"""\
@@ -371,7 +376,7 @@ remote_only: {str(prefs.remote_only).lower()}
 
 # Free-text HARD CONSTRAINTS — read by BOTH the title screen and the JD scorer.
 # Anything violating these is rejected (the scorer caps it at <= 2).
-notes: |
+notes: |2
 {notes_block}
 # Stage-2: minimum LLM relevance score (0-10) for a job to proceed to apply.
 min_match_score: {int(prefs.min_match_score)}
@@ -382,8 +387,39 @@ max_new_per_run: {int(prefs.max_new_per_run)}
 
 # Candidate's public GitHub — the tailor reads the repos (names, languages,
 # topics) as extra context to reword bullets toward each JD.
-github: {prefs.github or '""'}
+github: {json.dumps(prefs.github or "", ensure_ascii=False)}
 """
+
+
+# (local day, applied total) -> how many of those went out today.
+_APPLIED_TODAY: dict = {"key": None, "n": 0}
+
+
+def _applied_today(stores, total: int) -> int:  # noqa: ANN001
+    """Applications sent since local midnight.
+
+    The deck's "applied today" showed the all-time total: the endpoint returned
+    the status count under this name. Counting properly means reading the applied
+    rows, and /stats is polled every three seconds, so the count is kept until
+    the total or the day changes, which are the only things that can move it.
+    """
+    from datetime import datetime
+
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    key = (today, total)
+    if _APPLIED_TODAY["key"] == key:
+        return _APPLIED_TODAY["n"]
+    n = 0
+    for status in (Status.APPLIED, Status.APPLIED_MANUAL):
+        for row in stores.tracking.query_status(status):
+            try:
+                at = datetime.fromisoformat(str(row.get("applied_at")).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if (at.astimezone() if at.tzinfo else at).strftime("%Y-%m-%d") == today:
+                n += 1
+    _APPLIED_TODAY.update(key=key, n=n)
+    return n
 
 
 def create_app() -> FastAPI:
@@ -421,6 +457,45 @@ def create_app() -> FastAPI:
             response.headers["Cache-Control"] = "no-cache"
         return response
 
+    # A local server is still reachable from every page the owner has open: a
+    # plain <form method=post> on any site could hit /actions/reset or
+    # /actions/apply-now with no CORS preflight to stop it. Browsers attach
+    # Origin to those, so a write is refused unless it comes from this dashboard
+    # or the extension. Requests with no Origin (the CLI, curl) are not browsers
+    # acting for a third party and pass.
+    #
+    # The Host is checked first, for every request. Comparing Origin against
+    # whatever Host arrived is no check at all against DNS rebinding: a page on
+    # evil.example:8787 that re-points its name at 127.0.0.1 sends an Origin and
+    # a Host that agree with each other, and then reads /workday-accounts and
+    # presses Apply as the dashboard. A browser only sends a loopback Host when
+    # the address bar really says so.
+    import os as _os
+
+    allowed_hosts = {"127.0.0.1", "localhost", "::1"} | {
+        h.strip().lower()
+        for h in _os.environ.get("APPLIEDIN_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+    def _hostname(header: str) -> str:
+        header = (header or "").strip().lower()
+        if header.startswith("["):                      # [::1]:8787
+            return header[1:].split("]", 1)[0]
+        return header.rsplit(":", 1)[0] if ":" in header else header
+
+    @app.middleware("http")
+    async def same_origin_writes(request, call_next):
+        if _hostname(request.headers.get("host", "")) not in allowed_hosts:
+            return Response("unknown host refused", status_code=403)
+        origin = request.headers.get("origin")
+        if origin and request.method not in ("GET", "HEAD", "OPTIONS"):
+            from urllib.parse import urlsplit
+
+            own = urlsplit(origin).netloc == request.headers.get("host", "")
+            if not own and not origin.startswith(("chrome-extension://",
+                                                  "moz-extension://")):
+                return Response("cross-origin request refused", status_code=403)
+        return await call_next(request)
+
     # The browser extension is a DRIVER, not the app: it runs on the employer's
     # page and calls back here for every decision. That means cross-origin
     # requests from a chrome-extension:// origin, which the browser blocks by
@@ -450,7 +525,7 @@ def create_app() -> FastAPI:
     def application_tracker():
         return {"items": make_stores(settings).tracking.application_notes()}
 
-    @app.post("/application-tracker/{pk}")
+    @app.post("/application-tracker/{pk:path}")
     def save_application_tracker(pk: str, body: dict):
         from core.application_tracker import validate
         stores = make_stores(settings)
@@ -508,7 +583,7 @@ def create_app() -> FastAPI:
         applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
         from core import flags
         preparation_runs = preparation.snapshot()
-        return {"today_submitted": applied,
+        return {"today_submitted": _applied_today(stores, applied),
                 "llm_error": flags.llm_error(),
                 "queue_age_seconds": None, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
@@ -560,9 +635,17 @@ def create_app() -> FastAPI:
 
         stores = make_stores(settings)
         name = company or company_for_url(url) or ""
-        row = next((r for r in stores.tracking.all()
-                    if r.get("jd_url") and url and
-                    r["jd_url"].split("?")[0] in url), None)
+        # Equality, not containment: a stored ".../jobs/12" is a substring of
+        # ".../jobs/123", and an embed whose identity is in the query string
+        # reduced to a prefix of every posting on that board. The wrong row here
+        # is the wrong résumé offered, and then the wrong job marked applied.
+        def _bare(u: str) -> str:
+            return u.split("#")[0].split("?")[0].rstrip("/")
+
+        same_path = [r for r in stores.tracking.all()
+                     if url and r.get("jd_url") and _bare(r["jd_url"]) == _bare(url)]
+        exact = [r for r in same_path if r["jd_url"] == url]
+        row = exact[0] if exact else (same_path[0] if len(same_path) == 1 else None)
         if row and not name:
             name = row.get("company", "")
         skill = load_skill(url, name)
@@ -576,8 +659,8 @@ def create_app() -> FastAPI:
             "pk": (row or {}).get("pk", ""),
             "status": (row or {}).get("status", ""),
             "resume_url": resume,
-            "resume_name": f"{(stores.answer_bank.all_facts(name) or {}).get('Full name', 'Resume')}"
-                           " Resume.pdf",
+            "resume_name": (stores.answer_bank.all_facts(name) or {}).get("Full name", "Resume")
+                           + " Resume.pdf",
             "site_rules": skill.notes,
             "known_site": bool(skill.names),
         }
@@ -603,7 +686,6 @@ def create_app() -> FastAPI:
         )
         from tools.narrative import draft_answer
 
-        url = (body or {}).get("url", "")
         company = (body or {}).get("company", "")
         fields = (body or {}).get("fields") or []
         jd_text = (body or {}).get("jd_text", "")
@@ -712,8 +794,13 @@ def create_app() -> FastAPI:
         if not pk:
             return {"ok": False, "error": "pk required"}
         stores = make_stores(settings)
-        if not stores.tracking.get(pk):
+        row = stores.tracking.get(pk)
+        if not row or is_internal_pk(pk):
             return {"ok": False, "error": "unknown job"}
+        # Already recorded, with the page's own confirmation. Writing the
+        # extension's generic line over it loses the one thing worth keeping.
+        if row.get("status") in ("applied", "applied_manual"):
+            return {"ok": True}
         stores.tracking.set_status(
             pk, Status.APPLIED,
             confirmation_id=str((body or {}).get("confirmation") or
@@ -816,7 +903,8 @@ def create_app() -> FastAPI:
                      f"{out['repointed']} re-pointed · {out['queued']} queued"
                      + (f" · {len(untailored)} being tailored" if untailored else "")
                      + (f" · {out['revived']} revived" if out["revived"] else "")
-                     + (f" · {out['left_alone']} already sent, left alone" if out["left_alone"] else "")))
+                     + (f" · {out['left_alone']} already sent, left alone"
+                        if out["left_alone"] else "")))
         if untailored:
             background.add_task(_tailor_and_queue, company, untailored, stores, q)
         out["tailoring"] = len(untailored)
@@ -1035,6 +1123,12 @@ def create_app() -> FastAPI:
         if profile_id and not prof.get(profile_id):
             return {"ok": False, "error": f"no profile {profile_id!r}"}
 
+        # Same rule as apply_profile_to_all: once sent, the stored résumé is the
+        # record of what the employer received, and mid-apply the browser is
+        # about to upload that very PDF.
+        if row.get("status") in ("applied", "applied_manual", "submitting"):
+            return {"ok": False, "error": f"This one is {row['status']} — its "
+                                          "identity can no longer change."}
         stores.tracking.set_status(pk, row.get("status"), profile_id=profile_id)
         # Only the contact line changes, and the tailoring is already saved — so
         # re-render from the stored .tex rather than sending the job back through
@@ -1066,6 +1160,9 @@ def create_app() -> FastAPI:
             pk = row.get("pk", "")
             if is_internal_pk(pk) or not row.get("resume_tex_key"):
                 continue
+            # Re-read: this loop renders a PDF per row, so a snapshot row can be
+            # minutes old, and its status written back un-applies a sent job.
+            row = stores.tracking.get(pk) or row
             if row.get("status") in ("applied", "applied_manual", "submitting"):
                 skipped += 1          # already sent — its identity is history now
                 continue
@@ -1102,7 +1199,24 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": f"invalid preferences: {exc}"}
         path = Path(settings.config_dir) / "preferences.yaml"
         try:
-            path.write_text(_render_preferences_yaml(prefs))
+            text = _render_preferences_yaml(prefs)
+            # Read it back before it replaces the real file. Every stage loads
+            # this per job, so a file that renders but does not parse (a GitHub
+            # handle starting with "@", say) broke discovery, scoring and this
+            # very page while the save reported success.
+            import yaml
+
+            def _same(a, b) -> bool:  # noqa: ANN001 — block scalars re-wrap whitespace
+                da, db = a.model_dump(), b.model_dump()
+                da["notes"], db["notes"] = da["notes"].split(), db["notes"].split()
+                return da == db
+
+            if not _same(Preferences(**(yaml.safe_load(text) or {})), prefs):
+                return {"ok": False, "error": "preferences did not survive being "
+                                              "written as YAML — nothing was saved"}
+            tmp = path.with_suffix(".yaml.tmp")
+            tmp.write_text(text)
+            tmp.replace(path)       # atomic: a reader never sees half a file
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
         from core.events import emit
@@ -1314,7 +1428,7 @@ def create_app() -> FastAPI:
                 moved += 1
         return {"ok": True, "filters": flags.company_filters(), "reconciled": moved}
 
-    @app.post("/actions/run-job/{pk}")
+    @app.post("/actions/run-job/{pk:path}")
     def run_one_job(pk: str, background: BackgroundTasks):
         """Run ONE found/tailored job through score + tailor right now (the card's
         'Run now'). Gated apply mode stops it at ready-to-apply."""
@@ -1345,11 +1459,12 @@ def create_app() -> FastAPI:
         if (row.get("status") != "skipped" or row.get("skip_reason") != "low_score"
                 or row.get("confirmation_id") or pk in q.in_flight()
                 or any(item["pk"] == pk for item in q.pending())):
-            return {"ok": False, "error": "Force apply is only available for an unsent role skipped for a low match score."}
-        from datetime import datetime, timezone
+            return {"ok": False, "error": "Force apply is only available for an unsent role "
+                                          "skipped for a low match score."}
+        from datetime import datetime
 
         stores.tracking.set_status(pk, Status.FOUND, score_override=True,
-                                   score_override_at=datetime.now(timezone.utc).isoformat(),
+                                   score_override_at=datetime.now(UTC).isoformat(),
                                    skip_reason="", fail_reason="", fail_kind="", error="")
 
         def prepare() -> None:
@@ -1362,7 +1477,8 @@ def create_app() -> FastAPI:
                 import logging
 
                 logging.getLogger("server").exception("forced preparation failed for %s", pk)
-                stores.tracking.set_status(pk, Status.ERROR, error="Preparation failed — see Logs and retry.")
+                stores.tracking.set_status(
+                    pk, Status.ERROR, error="Preparation failed — see Logs and retry.")
 
         background.add_task(prepare)
         return {"ok": True, "pk": pk, "status": "preparing", "next": "review"}
@@ -1462,7 +1578,10 @@ def create_app() -> FastAPI:
             try:
                 emit("running", agent="workflow", company=company, pk=pk,
                      detail=f"▶ tailoring a résumé for {title} @ {company}…")
-                run_job(pk, stores)
+                # A pasted role has no posting to apply on. Without prepare_only a
+                # high score in auto mode sent it on to the apply queue, and the
+                # worker opened a browser session against an empty URL.
+                run_job(pk, stores, prepare_only=True)
                 emit("applied", agent="workflow", company=company, pk=pk,
                      detail=f"{company}: résumé tailored — download it from the card")
             except Exception:
@@ -1481,7 +1600,6 @@ def create_app() -> FastAPI:
         gated mode) stop at 'ready to apply' so you approve the submit. No
         discovery, no watchlist needed — one role, straight to a tailored résumé."""
         import hashlib
-        from urllib.parse import urlparse
 
         url = ((body or {}).get("url") or "").strip()
         if url and not url.lower().startswith(("http://", "https://")):
@@ -1494,6 +1612,20 @@ def create_app() -> FastAPI:
         company = ((body or {}).get("company") or "").strip() or company_for_url(url)
         if not company:
             company = _company_from_url(url)
+        # The name is a KEY: the queue, the per-company preferences and the board
+        # filter all match on it. A hand-typed "waymo" must land on the tracked
+        # "Waymo" rather than start a second company that inherits none of the
+        # first one's settings or its application cap.
+        try:
+            from discovery.handler import list_watchlist_companies
+
+            known = {n.casefold(): n for n in list_watchlist_companies()}
+            company = known.get(company.casefold(), company)
+        except Exception:  # noqa: BLE001 - an unreadable watchlist must not block this
+            import logging
+
+            logging.getLogger("server").debug(
+                "could not read the watchlist for %s", company, exc_info=True)
         title = ((body or {}).get("title") or "").strip() or "Role from URL"
 
         job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
@@ -1501,9 +1633,52 @@ def create_app() -> FastAPI:
         job = JobRecord(company=company, job_id=job_id, title=title,
                         jd_url=url, jd_text=title, ats="custom")
         pk = job.pk
-        is_new = stores.tracking.put_new(job)
-        if not is_new:  # already tracked — re-tailor it from scratch
-            stores.tracking.set_status(pk, Status.FOUND, skip_reason="", fail_kind="")
+
+        # This posting may already be on the board under another key: discovery
+        # files it by the board's own job id, this endpoint by a hash of the URL.
+        # Pasting the link of a role that had already been applied to therefore
+        # made a second row, and a second application. Find it by URL first.
+        def _same(u: str) -> str:
+            from discovery.career_ops import canonical
+
+            try:
+                return canonical(u)
+            except ValueError:
+                return u
+
+        existing = stores.tracking.get(pk)
+        if existing is None:
+            want = _same(url)
+            existing = next(
+                (r for r in stores.tracking.all()
+                 if r.get("jd_url") and not is_internal_pk(r.get("pk", ""))
+                 and _same(str(r["jd_url"])) == want), None)
+        if existing:
+            pk = existing["pk"]
+            company = existing.get("company") or company
+            state = str(existing.get("status") or "")
+            from core.apply_queue import ApplyQueue
+
+            # The old code reset ANY existing row to `found` "to re-tailor it
+            # from scratch", including one that had been applied to or was in
+            # the browser at that moment: the pipeline then sent it again.
+            if state in ("applied", "applied_manual") or existing.get("confirmation_id"):
+                return {"ok": False, "pk": pk,
+                        "error": f"You have already applied to this role at {company}. "
+                                 "It is in Applications; nothing was started."}
+            if existing.get("fail_kind") == "uncertain":
+                return {"ok": False, "pk": pk,
+                        "error": f"An application to this role at {company} was submitted "
+                                 "but never confirmed. Check the portal, then use Retry on "
+                                 "its card if it did not go."}
+            if state in ("submitting", "tailoring") or pk in ApplyQueue(
+                    stores.tracking.r).in_flight():
+                return {"ok": False, "pk": pk,
+                        "error": f"This role at {company} is being worked on right now."}
+            stores.tracking.set_status(pk, Status.FOUND, skip_reason="", fail_kind="",
+                                       fail_reason="")
+        else:
+            stores.tracking.put_new(job)
 
         def _run() -> None:
             import logging
@@ -1613,7 +1788,7 @@ def create_app() -> FastAPI:
         background.add_task(_run)
         return {"ok": True, "status": "processing", "companies": companies}
 
-    @app.post("/actions/resume/{pk}")
+    @app.post("/actions/resume/{pk:path}")
     def resume(pk: str, body: dict, background: BackgroundTasks):
         # Continue the gated run in the background so the click returns instantly;
         # the pipeline's next steps stream to the Logs view as they happen.
@@ -1621,13 +1796,22 @@ def create_app() -> FastAPI:
         background.add_task(resume_job, pk, body.get("answer", ""))
         return {"ok": True, "status": "resuming"}
 
-    @app.post("/actions/mark-applied/{pk}")
+    @app.post("/actions/mark-applied/{pk:path}")
     def mark_applied(pk: str, body: dict | None = None):
         """Human confirms an application went through out-of-band (got the email
         / saw the ACK). Marks it applied and clears any gate — the safe fix for a
         mis-detected submit, and it prevents a resubmit."""
-        note = ((body or {}).get("note") or "").strip() or "Confirmed by you (email / on-screen ACK)."
-        make_stores(settings).tracking.set_status(
+        note = (((body or {}).get("note") or "").strip()
+                or "Confirmed by you (email / on-screen ACK).")
+        stores = make_stores(settings)
+        row = stores.tracking.get(pk)
+        # set_status invents a row for a pk it has never seen. A stale tab after a
+        # Reset then left a ghost with no company or title, counted as applied.
+        if not row or is_internal_pk(pk):
+            return {"ok": False, "error": "No such job. Refresh the board."}
+        if row.get("status") in ("applied", "applied_manual"):
+            return {"ok": True, "note": "Already recorded as applied."}
+        stores.tracking.set_status(
             pk, Status.APPLIED, confirmation_id=note, gate_reason="", gate_pending=None)
         from core.events import emit
         emit("applied", pk=pk, agent="applier", detail="Marked applied by you — no resubmit.")
@@ -1672,11 +1856,21 @@ def create_app() -> FastAPI:
         # the next press.
         from core import flags as _flags
 
-        _flags.bump_stop_epoch()
+        # Scoped: only the kind of run that was named. One shared counter meant
+        # Stop next to Discover also ended a Process pass, and Stop applying
+        # ended both.
+        if what == "all":
+            _flags.bump_stop_epoch()
+        elif what in ("discover", "process"):
+            _flags.bump_stop_epoch(what)
         killed = 0
         if what in ("discover", "all"):
-            # The crawl and the posting reads it spawns. Never "apply".
-            killed += kill_live_sessions("crawl") + kill_live_sessions("jd")
+            # The crawl only. "jd" is the posting read an APPLICATION makes for
+            # itself; killing it here failed that application and spent one of
+            # its attempts, for a Stop that was about discovery.
+            killed += kill_live_sessions("crawl")
+            if what == "all":
+                killed += kill_live_sessions("jd") + kill_live_sessions("jd_sweep")
             _RUNNING["discover"] = False
             # Clear every company claim. The runs themselves release in a finally,
             # so this only matters when one died without unwinding — but a claim
@@ -1838,7 +2032,7 @@ def create_app() -> FastAPI:
         running right now. `running` is the answer to "why has mine not started":
         either the limit is reached, or that company already has one going."""
         from core import flags
-        from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
+        from core.apply_queue import MAX_ATTEMPTS, ApplyQueue
 
         q = ApplyQueue(make_stores(settings).tracking.r)
         return {**q.depth(), "pending": q.pending(), "in_flight": sorted(q.in_flight()),
@@ -1970,12 +2164,14 @@ def create_app() -> FastAPI:
             ):
                 return {
                     "ok": False,
-                    "error": "A selected role is no longer available for review. Refresh and select again.",
+                    "error": "A selected role is no longer available for review. "
+                             "Refresh and select again.",
                 }
         if company.lower() in q.depth()["running"] or not q.start_flush(company):
             return {
                 "ok": False,
-                "error": f"{company} already has an application run. Wait for it to finish, then apply this selection.",
+                "error": f"{company} already has an application run. "
+                         "Wait for it to finish, then apply this selection.",
             }
         try:
             for pk in pks:
@@ -2007,7 +2203,8 @@ def create_app() -> FastAPI:
                 row = stores.tracking.get(pk) or {}
                 if (row.get("company") or "").strip().lower() != company.lower():
                     raise ValueError("This role does not belong to the selected company.")
-                if pk in q.in_flight() or row.get("confirmation_id") or row.get("status") == "submitting":
+                if (pk in q.in_flight() or row.get("confirmation_id")
+                        or row.get("status") == "submitting"):
                     raise ValueError(
                         "This role is applying or submitted; refresh its current state."
                     )
@@ -2017,7 +2214,8 @@ def create_app() -> FastAPI:
                     # Removal competes atomically with dispatch. Losing means the
                     # browser may be running; never overwrite its tracking state.
                     if not q.remove(pk) or pk in q.in_flight():
-                        raise ValueError("This role has started or changed; refresh its current state.")
+                        raise ValueError(
+                            "This role has started or changed; refresh its current state.")
                 if action == "undo":
                     if (
                         row.get("status") != "skipped"
@@ -2076,7 +2274,6 @@ def create_app() -> FastAPI:
         """
         import logging
 
-        from agent.run import run_queued
         from core.apply_queue import ApplyQueue
 
         log = logging.getLogger("server")
@@ -2124,7 +2321,7 @@ def create_app() -> FastAPI:
         n = ApplyQueue(make_stores(settings).tracking.r).revive(pk)
         return {"ok": True, "revived": n}
 
-    @app.post("/actions/queue-apply/{pk}")
+    @app.post("/actions/queue-apply/{pk:path}")
     def queue_apply(pk: str):
         """Put a job on the APPLY QUEUE instead of applying it right now.
 
@@ -2142,10 +2339,21 @@ def create_app() -> FastAPI:
         # name is worse than a missed application.
         if row.get("status") in ("applied", "applied_manual"):
             return {"ok": False, "error": f"already {row.get('status')} — refusing to re-apply"}
+        from core.apply_queue import ApplyQueue
+        q = ApplyQueue(stores.tracking.r)
+        # A browser is on this form right now. Marking it tailored and queueing
+        # it again starts a second session for the same job behind the first.
+        if row.get("status") == "submitting" or pk in q.in_flight():
+            return {"ok": False, "error": "This one is being filled right now."}
+        # "Requeue" is offered on every failed row, including ones that failed
+        # before a résumé existed. Calling those tailored sent the browser to
+        # apply with nothing to attach.
+        if not row.get("resume_s3_key"):
+            return {"ok": False, "error": "No tailored résumé yet — run Process "
+                                          "on it first."}
         stores.tracking.set_status(pk, Status.TAILORED, fail_reason="", skip_reason="",
                                    gate_reason="approval")
-        from core.apply_queue import ApplyQueue
-        ApplyQueue(stores.tracking.r).put(pk, row.get("company", ""))
+        q.put(pk, row.get("company", ""))
         from core.events import emit
         emit("running", pk=pk, agent="applier", detail="queued for apply…",
              url=row.get("jd_url", ""))
@@ -2197,6 +2405,12 @@ def create_app() -> FastAPI:
         refresh = "" if code else '<meta http-equiv="refresh" content="5">'
         # Deliberately plain: the session reads this with a page read, so the words
         # it must match are the only thing on it.
+        # Both come from outside: the pk is the URL path and the code is typed
+        # into the dashboard. Unescaped, /verify/<svg onload=…> ran script on
+        # this origin, which can read saved logins and press Apply.
+        from html import escape
+
+        pk, code = escape(pk), escape(code)
         return HTMLResponse(
             f"<!doctype html><meta charset=utf-8>{refresh}"
             f"<title>Verification {state}</title>"
@@ -2227,7 +2441,7 @@ def create_app() -> FastAPI:
 
         return {"waiting": Verification(make_stores(settings).tracking.r).pending()}
 
-    @app.post("/actions/skip/{pk}")
+    @app.post("/actions/skip/{pk:path}")
     def skip(pk: str):
         """Decline a job: mark it skipped AND take it out of the apply queue.
 
@@ -2241,6 +2455,10 @@ def create_app() -> FastAPI:
         stores = make_stores(settings)
         row = stores.tracking.get(pk) or {}
         status = str(row.get("status") or "")
+        if not row or is_internal_pk(pk):
+            # set_status would invent the row: a ghost with no company or title.
+            return {"ok": False, "error": "missing",
+                    "note": "That job is no longer on the board. Refresh."}
 
         # An application that WENT OUT is a fact about the world, and skip is the
         # one action that would overwrite it with "you did not want this". Retry
@@ -2270,7 +2488,7 @@ def create_app() -> FastAPI:
 
     RETAILOR_DEADLINE_S = 15 * 60
 
-    @app.post("/actions/apply-now/{pk}")
+    @app.post("/actions/apply-now/{pk:path}")
     def apply_now(pk: str, background: BackgroundTasks):
         """Run ONE queued job immediately, ahead of its turn.
 
@@ -2300,12 +2518,20 @@ def create_app() -> FastAPI:
         if (company or "").strip().lower() in q.depth()["running"]:
             return {"ok": False,
                     "error": f"{company} already has an application running."}
-        if not q.remove(pk):
-            # Not waiting — queue it, so a job that never made it in still works.
-            q.put(pk, company)
+        # The lease is TAKEN by the add, not checked and then added: two quick
+        # presses, or a press racing the worker, both passed the check above and
+        # both opened a browser on the same company.
+        from core.apply_queue import _BUSY, _BUSY_PKS, _norm
+
+        if not q.r.sadd(_BUSY, _norm(company)):
+            return {"ok": False,
+                    "error": f"{company} already has an application running."}
+        q.r.sadd(_BUSY_PKS, pk)
+        # This press owns the job's turn, so any waiting copy goes. It used to be
+        # queued here when it was not waiting, and that copy outlived the run: an
+        # apply that ended uncertain was picked up again by the worker.
+        q.remove(pk)
         item = {"pk": pk, "company": company, "attempts": 0, "history": []}
-        q.r.sadd("applyq:inflight", (company or "").strip().lower() or "unknown")
-        q.r.sadd("applyq:inflight:pks", pk)
 
         # A press is an explicit instruction, so a stale résumé is re-tailored
         # HERE and the apply follows in the same task. The stale guard inside
@@ -2331,11 +2557,15 @@ def create_app() -> FastAPI:
                         try:
                             pool.submit(run_job, pk, stores).result(timeout=RETAILOR_DEADLINE_S)
                         except concurrent.futures.TimeoutError:
-                            stores.tracking.set_status(pk, Status.FOUND, gate_reason="", fail_reason="")
+                            stores.tracking.set_status(
+                                pk, Status.FOUND, gate_reason="", fail_reason="")
                             emit("error", pk=pk, agent="tailor", url=row.get("jd_url"),
-                                 detail=f"re-tailoring did not finish in {RETAILOR_DEADLINE_S // 60} min "
-                                        "(the model API may be rate limiting) — not applied, press Apply again later")
-                            log.warning("apply-now: re-tailor of %s hit the %ds deadline", pk, RETAILOR_DEADLINE_S)
+                                 detail=("re-tailoring did not finish in "
+                                         f"{RETAILOR_DEADLINE_S // 60} min (the model API may "
+                                         "be rate limiting) — not applied, press Apply again "
+                                         "later"))
+                            log.warning("apply-now: re-tailor of %s hit the %ds deadline",
+                                        pk, RETAILOR_DEADLINE_S)
                             q.done(item)
                             return
                     q.remove(pk)     # run_job queued it again; this press owns the turn
@@ -2354,7 +2584,7 @@ def create_app() -> FastAPI:
         log.info("apply-now: %s%s", pk, " (re-tailoring first)" if stale else "")
         return {"ok": True, "started": pk, "retailoring": stale}
 
-    @app.post("/actions/queue-remove/{pk}")
+    @app.post("/actions/queue-remove/{pk:path}")
     def queue_remove(pk: str):
         """Take a job OUT of the apply queue without judging it.
 
@@ -2434,7 +2664,7 @@ def create_app() -> FastAPI:
         background.add_task(_go)
         return {"ok": True, "status": "retailoring", "pk": pk, "note": note.strip()}
 
-    @app.post("/actions/retry/{pk}")
+    @app.post("/actions/retry/{pk:path}")
     def retry(pk: str, background: BackgroundTasks):
         """Re-run a failed/errored job from scratch (clean session, current KB)."""
         from agent.run import retry_job
@@ -2466,7 +2696,10 @@ def create_app() -> FastAPI:
         is polled every few seconds."""
         secrets = make_stores().secrets
         return {"enabled": _workday.enabled(), "password": _workday.password(secrets),
-                "custom_password": _workday.is_custom_password(secrets)}
+                "custom_password": _workday.is_custom_password(secrets),
+                "accounts": [{"tenant": t, **a} for t, a in
+                             sorted(_workday.accounts(secrets).items(),
+                                    key=lambda kv: kv[1].get("last_used", ""), reverse=True)]}
 
     @app.post("/actions/workday-accounts")
     def set_workday_accounts(body: dict):
@@ -2585,7 +2818,18 @@ def create_app() -> FastAPI:
         # longer exists.
         stopped = kill_live_sessions()
         flags.mark_reset()
-        redis.Redis.from_url(settings.redis_url).flushdb()  # tracking + queue + events
+        # The settings live in the same database as the pipeline, so emptying it
+        # also forgot them: a paused board came back unpaused with nothing marked
+        # seen (the next sweep re-discovered and re-tailored everything), and every
+        # per-company preference and standing profile was gone. Reset clears the
+        # work, not the owner's decisions about how to do it.
+        client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        transient = {"llm_error", "heartbeat", "fetch_refused", "reset_epoch"}
+        kept = {k: v for k, v in (client.hgetall(flags._KEY) or {}).items()
+                if k not in transient}
+        client.flushdb()  # tracking + queue + events
+        if kept:
+            client.hset(flags._KEY, mapping=kept)
         flags.mark_reset()  # flushdb cleared the marker — set it again
         art = Path(settings.local_dir) / "artifacts"
         if art.exists():
@@ -2593,7 +2837,7 @@ def create_app() -> FastAPI:
         seen.clear()  # so a fresh start re-discovers everything
         return {"ok": True, "status": "reset", "sessions_stopped": stopped}
 
-    @app.get("/actions/diff/{pk}")
+    @app.get("/actions/diff/{pk:path}")
     def diff(pk: str):
         """What the tailor changed on this résumé (base vs tailored bullets)."""
         from agent.run import _base_latex
@@ -2634,7 +2878,11 @@ def create_app() -> FastAPI:
             from fastapi.responses import FileResponse
             base = (Path(settings.local_dir) / "artifacts").resolve()
             p = (base / key).resolve()
-            if p.is_file() and str(p).startswith(str(base) + "/"):  # no path traversal
+            if not p.is_relative_to(base):
+                # Stop HERE. Falling through to the store read below served
+                # /artifact/..%2fsecrets.json, which is where saved logins live.
+                return Response(status_code=404)
+            if p.is_file():
                 return FileResponse(str(p), media_type=ctype, headers={
                     "Content-Disposition": f'{disp}; filename="{p.name}"', **no_cache})
         try:
@@ -2650,14 +2898,14 @@ def create_app() -> FastAPI:
         discoveries — pushed the instant they happen."""
         import redis.asyncio as aredis
 
-        from core.events import CHANNEL, recent
+        from core.events import channel, recent
 
         async def gen():
             for ev in reversed(recent(400)):  # deep history first — keep runs visible
                 yield f"data: {json.dumps(ev)}\n\n"
             r = aredis.from_url(settings.redis_url, decode_responses=True)
             ps = r.pubsub()
-            await ps.subscribe(CHANNEL)
+            await ps.subscribe(channel())
             try:
                 async for m in ps.listen():
                     if m and m.get("type") == "message":
@@ -2686,6 +2934,14 @@ def create_app() -> FastAPI:
     # The dashboard lives in dashboard.html because index.html is the public
     # landing page (Vercel serves whatever is called index.html at the root).
     # Locally, "/" should still open the dashboard.
+    # Revalidation alone still let a tab pair a new page with a stylesheet held
+    # in memory: four Find jobs cards laid out by the three-column CSS. Each
+    # stylesheet and script the page loads carries its file's modification time,
+    # so a changed file is a new URL and can never come from cache.
+    _ASSET_RX = re.compile(
+        r'(<(?:link rel="stylesheet"|script)[^>]*?(?:href|src)=")([\w./-]+\.(?:css|js))(")'
+    )
+
     @app.get("/", include_in_schema=False)
     def _dashboard():
         from fastapi.responses import HTMLResponse
@@ -2695,14 +2951,6 @@ def create_app() -> FastAPI:
             if not path.is_file():
                 return m.group(0)
             return f"{m.group(1)}{m.group(2)}?v={path.stat().st_mtime_ns}{m.group(3)}"
-    # Revalidation alone still let a tab pair a new page with a stylesheet held
-    # in memory: four Find jobs cards laid out by the three-column CSS. Each
-    # stylesheet and script the page loads carries its file's modification time,
-    # so a changed file is a new URL and can never come from cache.
-    _ASSET_RX = re.compile(
-        r'(<(?:link rel="stylesheet"|script)[^>]*?(?:href|src)=")([\w./-]+\.(?:css|js))(")'
-    )
-
 
         html = _ASSET_RX.sub(versioned, (_WEB / "dashboard.html").read_text(encoding="utf-8"))
         return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
@@ -2751,9 +2999,12 @@ def _recover_stuck(settings) -> None:  # noqa: ANN001
 def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
     import uvicorn
 
-    _recover_stuck(get_settings())
     uvicorn.run(create_app(), host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
+    # Only when run alone. Under the daemon the workers are already up by the
+    # time serve() is called, so recovering here reset a row that had just
+    # legitimately reached `submitting` and released its claim mid-session.
+    _recover_stuck(get_settings())
     serve()

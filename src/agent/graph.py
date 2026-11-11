@@ -18,6 +18,7 @@ Model follows the mode (Anthropic local / Bedrock cloud) via core.config.
 from __future__ import annotations
 
 import os
+from datetime import UTC
 from pathlib import Path
 
 from google.adk.agents import LlmAgent, LoopAgent, SequentialAgent
@@ -99,10 +100,13 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     _prof = _profiles.resolve_for(stores.tracking.get(pk) or {})
     tailored_latex = _profiles.apply_to_latex(tailored_latex, _prof)
     artifacts = stores.artifacts  # filesystem (local) or S3 (cloud) — same call
-    tex_key = artifacts.put("resumes", f"{pk}.tex", tailored_latex.encode(), "text/x-tex")
+    # Render FIRST, store after. The .tex used to be written before the compile,
+    # so a save that failed and "kept the previous PDF" had already replaced the
+    # source that PDF was built from. Everything that later re-renders from the
+    # .tex (a profile change at apply time) then failed against a broken file and
+    # left the old contact details on the résumé.
     try:
-        key = artifacts.put("resumes", f"{pk}.pdf", render_pdf(tailored_latex), "application/pdf")
-        fmt = "pdf"
+        pdf_bytes = render_pdf(tailored_latex)
     except RuntimeError as exc:
         # Most compile failures are bare specials ($500K, 30%, AT&T) — repair
         # deterministically and retry ONCE before considering any downgrade.
@@ -116,9 +120,6 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
                 pdf_bytes = None
         if pdf_bytes is not None:
             tailored_latex = fixed
-            tex_key = artifacts.put("resumes", f"{pk}.tex", fixed.encode(), "text/x-tex")
-            key = artifacts.put("resumes", f"{pk}.pdf", pdf_bytes, "application/pdf")
-            fmt = "pdf"
             log.info("PDF render repaired by escaping bare specials for %s", pk)
         else:
             # NEVER downgrade a good PDF to a .tex pointer: the apply step needs a PDF
@@ -132,8 +133,13 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
                                    "previous valid résumé is kept. Fix the error and re-save "
                                    "the FULL corrected .tex."}
             log.warning("PDF render failed (%s); storing .tex only", exc)
-            key = tex_key
-            fmt = "tex"
+
+    tex_key = artifacts.put("resumes", f"{pk}.tex", tailored_latex.encode(), "text/x-tex")
+    if pdf_bytes is not None:
+        key = artifacts.put("resumes", f"{pk}.pdf", pdf_bytes, "application/pdf")
+        fmt = "pdf"
+    else:
+        key, fmt = tex_key, "tex"
 
     tool_context.state["resume_s3_key"] = key
     tool_context.state["tailored"] = tailored_latex
@@ -143,15 +149,27 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
     # Stamp WHICH base résumé this was tailored from, so editing base.tex later
     # makes already-tailored rows detectably stale instead of silently shipping
     # the old content.
+    from datetime import datetime
+
     from agent.run import seed_fingerprint
 
-    from datetime import datetime, timezone
+    # The base this résumé was actually written from: the copy the session was
+    # seeded with. Hashing base.tex as it is at save time stamped a résumé built
+    # from the old base as current whenever the file was edited mid-run, and the
+    # stale-résumé guard then let it through.
+    seeded = tool_context.state.get("base_latex")
+    if isinstance(seeded, str) and seeded:
+        import hashlib
+
+        seed = hashlib.sha256(seeded.encode()).hexdigest()[:16]
+    else:
+        seed = seed_fingerprint()
     dates = {}
     if fmt == "pdf" and not row.get("tailored_at"):
-        dates["tailored_at"] = datetime.now(timezone.utc).isoformat()
+        dates["tailored_at"] = datetime.now(UTC).isoformat()
     stores.tracking.set_status(pk, row.get("status", "tailored"), **dates, resume_s3_key=key,
                                resume_tex_key=tex_key, resume_version="tailored",
-                               resume_seed=seed_fingerprint())
+                               resume_seed=seed)
     return {"ok": True, "resume_s3_key": key, "format": fmt}
 
 
@@ -417,13 +435,17 @@ applier = LlmAgent(
         "explicit approval.\n"
         "1. FIRST, call ask_human(\"Ready to apply to {company}? The tailored résumé is "
         "saved — approve to submit the application.\") and STOP. Do not apply yet.\n"
-        "2. Once the human approves, call apply_to_job() — it drives a real browser "
-        "to fill and submit using only approved answers + the saved login.\n"
-        "   - status 'applied' → report the confirmation. Done.\n"
-        "   - status 'gate' → call ask_human with the returned question and STOP.\n"
+        "2. That is all. Once the human approves, the system submits the "
+        "application itself — you have no tool that submits, and you never need one.\n"
         "Never fabricate an answer — the gate exists for approval and for unknowns."
     ),
-    tools=[_skill("application-filling"), apply_to_job, ask_human_tool],
+    # No apply_to_job here, on purpose. "Ask first" was only a sentence in the
+    # instruction above, and a model that skipped it would have submitted with no
+    # approval, past the pause flag, the company lease and the score gate — every
+    # one of which lives in the queue path, not in this tool. Approval resumes
+    # through run.resume_job -> _enqueue_apply -> _apply_direct, which is code, so
+    # this agent's whole job is to raise the gate.
+    tools=[ask_human_tool],
 )
 
 root_agent = SequentialAgent(

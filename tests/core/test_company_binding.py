@@ -172,7 +172,6 @@ def test_choosing_a_profile_on_the_company_page_keeps_its_other_rules():
     """A save carrying only `profile_id` must not become `set_company_pref(name, {})`,
     which means reset-to-global and would wipe titles and seniority as a side
     effect of choosing who applies."""
-    import inspect
 
     import server
 

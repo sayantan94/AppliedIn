@@ -53,6 +53,8 @@ def test_two_threads_cannot_both_claim_one_company():
         got.append(handler._claim({"waymo"}))
 
     ts = [threading.Thread(target=go) for _ in range(2)]
-    for t in ts: t.start()
-    for t in ts: t.join()
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
     assert sorted(len(g) for g in got) == [0, 1], "exactly one claim wins"

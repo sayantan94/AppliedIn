@@ -28,7 +28,6 @@ Nothing else changes — the task is entirely self-contained in the prompt, and
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest

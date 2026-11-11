@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import boto3
 import pytest
-from core.storage.tracking import JD_HASH_INDEX, STATUS_INDEX
 from moto import mock_aws
+
+from core.storage.tracking import JD_HASH_INDEX, STATUS_INDEX
 
 
 @pytest.fixture(autouse=True)

@@ -192,7 +192,6 @@
                 </svg>
               </button>
               <div id="menu" class="menu" hidden>
-                <div class="menu-t">Settings</div>
                 <div class="settings-menu-title">Settings</div><div class="settings-menu-group">Automation</div>
                 <button class="menu-item" id="m-pause"
                   title="Pause/resume the background automation loops">
@@ -233,6 +232,8 @@
                     <button type="button" class="btn" id="m-workday-pw-reset">Remove</button>
                     <button type="submit" class="btn">Save</button>
                   </div>
+                  <div class="menu-field-note mono" id="m-workday-accounts-t"></div>
+                  <ul class="wd-accounts" id="m-workday-accounts"></ul>
                 </form>
                 <div class="settings-menu-group">Preferences &amp; appearance</div><button class="menu-item" id="m-shared-prefs">Shared job preferences <span aria-hidden="true">›</span></button><button class="menu-item" id="m-company-prefs">Company preferences <span aria-hidden="true">›</span></button>
                 <button class="menu-item" id="m-theme">
@@ -492,17 +493,17 @@
               <span class="fj-opt-desc">Search ~70,000 open roles at once</span>
               <span class="fj-opt-src">Cosign network · postings on Ashby, Greenhouse, Workday</span>
             </button>
-          </nav>
-          <career-board id="career-ops-board" hidden></career-board>
             <button type="button" class="chip fj-opt" data-find-view="a16z" aria-pressed="false">
               <span class="fj-opt-name">a16z portfolio</span>
               <span class="fj-opt-desc">Roles at Andreessen Horowitz companies</span>
               <span class="fj-opt-src">jobs.a16z.com · postings on Ashby, Greenhouse, Lever</span>
             </button>
+          </nav>
+          <career-board id="career-ops-board" hidden></career-board>
           <cosign-board id="cosign-board" hidden></cosign-board>
+          <cosign-board id="a16z-board" network="a16z" hidden></cosign-board>
           <section id="steering-panel" class="steering-dialog" aria-labelledby="steering-title" hidden></section>
           <section id="pane" class="pane"></section>
-          <cosign-board id="a16z-board" network="a16z" hidden></cosign-board>
         </main>
 
         <aside class="feedpanel" aria-label="Live activity">

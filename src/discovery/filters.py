@@ -7,6 +7,8 @@ score runs later, in the tailoring worker.
 
 from __future__ import annotations
 
+import re
+
 from core.models import JobRecord
 
 from .watchlist import Preferences
@@ -17,10 +19,17 @@ def _contains_any(haystack: str, needles: list[str]) -> bool:
     return any(n.lower() in low for n in needles)
 
 
+def _names_any(haystack: str, needles: list[str]) -> bool:
+    """Whole-word match. As a substring "intern" rejects every "internal tools"
+    role and "ios" rejects anything that says "various"."""
+    return any(n.strip() and re.search(rf"(?<!\w){re.escape(n.strip())}(?!\w)", haystack, re.I)
+               for n in needles)
+
+
 def stage1_match(job: JobRecord, prefs: Preferences) -> bool:
     text = f"{job.title}\n{job.jd_text}"
 
-    if prefs.exclude_keywords and _contains_any(text, prefs.exclude_keywords):
+    if prefs.exclude_keywords and _names_any(text, prefs.exclude_keywords):
         return False
 
     # include_keywords RAISE fit; they are not a requirement. This filter only

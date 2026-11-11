@@ -320,7 +320,8 @@ def test_a_dead_lettered_job_can_be_forgotten_instead_of_revived(q, monkeypatch)
     q.put("acme#1", "Acme")
     item = q.next()
     while q.retry(item, "browser_conflict"):
-        q.done(item); item = q.next()
+        q.done(item)
+        item = q.next()
     q.done(item)
     assert len(q.dead_letters()) == 1
     assert q.drop_dead_letter("acme#1") == 1

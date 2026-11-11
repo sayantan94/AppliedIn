@@ -412,8 +412,18 @@ def assign_company(company: str, profile: Profile, stores, queue) -> dict:  # no
         pk = str(row.get("pk") or "")
         if (row.get("company") or "").strip().lower() != key or is_internal_pk(pk):
             continue
+        # Read again, now. `row` comes from a snapshot of the whole board and
+        # each row before this one cost a PDF render, so by the time the loop
+        # gets here an application may have gone out. Writing the snapshot's
+        # status back turned an `applied` row into `tailored` and queued it.
+        row = stores.tracking.get(pk) or row
         st = str(row.get("status") or "")
-        if st in _SENT or st in _IN_FLIGHT:
+        if st in _SENT or st in _IN_FLIGHT or pk in queue.in_flight():
+            left_alone += 1
+            continue
+        # A submit that was pressed and never confirmed may already be with the
+        # employer. Reviving it sends a second one under a different address.
+        if str(row.get("fail_kind") or "") == "uncertain":
             left_alone += 1
             continue
         has_resume = bool(row.get("resume_tex_key"))

@@ -8,6 +8,7 @@ found by host OR company, and a broken file never breaks an application.
 from __future__ import annotations
 
 import pytest
+
 from tools import company_skills
 
 

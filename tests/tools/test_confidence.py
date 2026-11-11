@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from core.models import AnswerScope
 from core.storage.answer_bank import AnswerBank
 from tools.confidence import FieldResolution, all_high_confidence, resolve_field

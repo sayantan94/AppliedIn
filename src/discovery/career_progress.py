@@ -36,7 +36,8 @@ def application_progress(row: dict, event: dict | None = None, *, in_flight=Fals
         # it. A failed row can still carry the "Ready to apply?" prompt from the
         # preparation it passed through, and showing it read as the board asking
         # for an approval it was never going to act on.
-        question = (row.get("gate_pending") or {}).get("question") if status == "needs_human" else ""
+        question = ((row.get("gate_pending") or {}).get("question")
+                    if status == "needs_human" else "")
         reason = question or next(
             (
                 row[k]

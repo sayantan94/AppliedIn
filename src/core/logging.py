@@ -40,7 +40,8 @@ class _ConsoleFormatter(logging.Formatter):
         line = f"{ts} {record.levelname:<7} {name:<10} {msg}"
         if self._color:
             c = _COLORS.get(record.levelname, "")
-            line = f"\033[2m{ts}{_RESET} {c}{record.levelname:<7}{_RESET} \033[2m{name:<10}{_RESET} {msg}"
+            line = (f"\033[2m{ts}{_RESET} {c}{record.levelname:<7}{_RESET} "
+                    f"\033[2m{name:<10}{_RESET} {msg}")
         if record.exc_info:
             line += "\n" + self.formatException(record.exc_info)
         return line
