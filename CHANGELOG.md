@@ -1,5 +1,18 @@
 # Release notes
 
+## v1.2.1 — 2026-11-10 — Safer applying and independent instances
+
+- Never apply twice: a submission the page did not confirm is marked uncertain
+  and is not retried. Adding a job you already applied to is refused.
+- An application is not sent without its résumé PDF.
+- Instances on different ports are fully separate, including live activity.
+- The dashboard only accepts requests addressed to this machine.
+- Reset clears the pipeline and keeps your settings. Stop ends only the run
+  you chose.
+- "Top N per run" now applies to every company, not only job-board feeds.
+- **Add a job**: "Add a new company" is at the top of the list.
+- "Applied today" shows today's count. New identity opens again.
+
 ## 2026-09-14 — Clearer application details and compact workflow
 
 - Add a compact Find → Prepare → Apply guide to Career Ops search, with aligned
