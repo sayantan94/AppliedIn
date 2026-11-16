@@ -442,11 +442,16 @@ def _promote_label(path: Path, key: str, validity: str, record_id: str,
                 return
 
 
+def _usable_prefix(text: str) -> bool:
+    # Replacement-only decode results are not readable evidence for model success.
+    return bool(text and text.replace("\ufffd", "").strip())
+
+
 def _classify(fields: dict, fragment: str, classifier) -> str:
     from core.reply_classifier import validated_label
     if _security_code_subject(fields["subject"]):
         return "other"
-    if not fragment.strip() or classifier is None:
+    if not _usable_prefix(fragment) or classifier is None:
         return "unclassified"
     try:
         return validated_label(classifier(fields, fragment))
@@ -520,7 +525,7 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                 except Exception:
                     prefix = b""
                 decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
-                if not decoded.strip() and not _valid_message_id(fields["message_id"]):
+                if not _usable_prefix(decoded) and not _valid_message_id(fields["message_id"]):
                     _mark_unresolved(path, key, validity, uid)
                     continue
                 label = _classify(fields, decoded, classifier)
@@ -541,7 +546,7 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                     continue
                 prefix = client.fetch_text_prefix(uid)
                 decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
-                if not decoded.strip():
+                if not _usable_prefix(decoded):
                     continue
                 label = _classify(fields, decoded, classifier)
                 _promote_label(path, key, validity, record_id, uid, expected_mid, label)
