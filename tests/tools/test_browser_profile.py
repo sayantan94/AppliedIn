@@ -307,6 +307,78 @@ def test_status_version_skew_reaches_stats_route_offline(sandbox, monkeypatch):
         'state': 'version_skew', 'detail': _SKEW_DETAIL}
 
 
+
+
+@pytest.fixture
+def stats_queue_world(sandbox, monkeypatch):
+    """Stats must use a synthetic queue and never contact owner Redis or Chrome."""
+    import fakeredis
+    import server
+    from core import flags, preparation
+    from core.apply_queue import ApplyQueue
+    from discovery import handler
+
+    client = fakeredis.FakeRedis(decode_responses=True)
+    stores = SimpleNamespace(tracking=SimpleNamespace(
+        r=client, status_counts=lambda: {},
+    ))
+    monkeypatch.setattr(server, 'make_stores', lambda _settings: stores)
+    monkeypatch.setattr(server, 'get_settings',
+                        lambda: SimpleNamespace(auto_min_score=7))
+    monkeypatch.setattr(server, '_discovery_running', lambda: False)
+    monkeypatch.setattr(server, '_applying_now', lambda: 0)
+    monkeypatch.setattr(server, '_throttle_state', lambda: {})
+    monkeypatch.setattr(server, '_RUNNING', {'discover': False, 'process': False})
+    monkeypatch.setattr(preparation, 'snapshot', lambda: [])
+    monkeypatch.setattr(handler, 'scanning', lambda: [])
+    monkeypatch.setattr(handler, 'active', lambda: False)
+    monkeypatch.setattr(runtime, 'browser_status',
+                        lambda _settings: {'state': 'unavailable'})
+    for name, value in (('llm_error', ''), ('paused', False),
+                        ('apply_mode', 'gated'), ('submit_review_enabled', False),
+                        ('browser_headless', False), ('workers_down', [])):
+        monkeypatch.setattr(flags, name, lambda result=value: result)
+    endpoint = next(route.endpoint for route in server.create_app().routes
+                    if getattr(route, 'path', '') == '/stats')
+    return endpoint, ApplyQueue(client), client
+
+
+def test_stats_uses_oldest_positive_pending_queue_stamp(stats_queue_world, monkeypatch):
+    """A legacy zero stamp must not make a busy queue look decades old."""
+    import json
+    import time
+
+    endpoint, queue, client = stats_queue_world
+    monkeypatch.setattr(time, 'time', lambda: 500_000.0)
+    assert queue.put('example-co#oldest', 'example-co', queued_at=499_870.0)
+    assert queue.put('other-co#newest', 'other-co', queued_at=499_950.0)
+    # Pre-stamp queue records are still waiting, but 0 is not January 1970.
+    client.sadd('applyq:companies', 'legacy-co')
+    client.rpush('applyq:co:legacy-co',
+                 json.dumps({'pk': 'legacy-co#old', 'company': 'legacy-co',
+                             'queued_at': 0}))
+    assert endpoint()['queue_age_seconds'] == 130
+
+
+def test_stats_empty_queue_has_no_age(stats_queue_world):
+    """No pending applications must be shown as no age, not a fabricated zero."""
+    endpoint, _, _ = stats_queue_world
+    assert endpoint()['queue_age_seconds'] is None
+
+
+def test_stats_queue_read_error_does_not_break_dashboard(stats_queue_world, monkeypatch):
+    """A temporary queue-store fault must not take the whole dashboard offline."""
+    from core.apply_queue import ApplyQueue
+
+    endpoint, _, _ = stats_queue_world
+
+    def broken_pending(_self):
+        raise RuntimeError('synthetic queue read failure')
+
+    monkeypatch.setattr(ApplyQueue, 'pending', broken_pending)
+    assert endpoint()['queue_age_seconds'] is None
+
+
 @pytest.mark.parametrize('answer', ['', 'n', 'y'])
 def test_setup_saves_only_after_y_and_keeps_optional_settings(sandbox, monkeypatch, answer):
     path, directory = sandbox
