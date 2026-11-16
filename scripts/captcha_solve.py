@@ -479,6 +479,7 @@ def build_task(challenge: dict, url: str) -> dict:
         return task
     if kind == "image":
         import base64
+        import hashlib
         body = challenge.get("body", "")
         try:
             data = base64.b64decode(body, validate=True)
@@ -487,6 +488,8 @@ def build_task(challenge: dict, url: str) -> dict:
         if not 0 < len(data) <= 262144 or not (
             data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(b"\xff\xd8\xff")
         ):
+            raise CaptchaError(EXIT_UNSUPPORTED, "image_unreadable")
+        if hashlib.sha256(body.encode("ascii")).hexdigest() != challenge.get("bodyHash"):
             raise CaptchaError(EXIT_UNSUPPORTED, "image_unreadable")
         return {"type": "ImageToTextTask", "body": body}
     raise CaptchaError(EXIT_UNSUPPORTED, "unsupported_widget")
@@ -647,11 +650,6 @@ def run(session: str, tab: str | None, dry_run: bool, base: Path) -> tuple[int, 
         for item in approved.get("found", []):
             if item.get("kind") == "image":
                 item.pop("body", None)
-        if challenge["kind"] == "image":
-            import hashlib
-            digest = hashlib.sha256(challenge["body"].encode("ascii")).hexdigest()
-            if challenge.get("bodyHash") != digest:
-                raise CaptchaError(EXIT_UNSUPPORTED, "image_unreadable")
         expression = (INJECT_JS + "(" + json.dumps(approved, ensure_ascii=True) +
                       "," + json.dumps(challenge["id"]) + "," +
                       json.dumps(token, ensure_ascii=True) + ")")
