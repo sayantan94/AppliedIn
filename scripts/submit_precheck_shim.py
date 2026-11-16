@@ -8,6 +8,7 @@ idle. This tracked template must never be installed by CI or this PR.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,15 @@ def _source_directory(script: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     script = Path(__file__).resolve()
+    # Running the tracked template must not default to writing lock/event files
+    # under scripts/. Only a copied legacy-path shim has that default.
+    installed = (
+        script.name == "precheck.py" and script.parent.name == "operator"
+        and script.parent.parent.name == ".local"
+    )
+    if not installed and "APPLIEDIN_PRECHECK_DATA_DIR" not in os.environ:
+        print("STOP: precheck unavailable", file=sys.stderr)
+        return 2
     try:
         source = _source_directory(script)
     except RuntimeError:
