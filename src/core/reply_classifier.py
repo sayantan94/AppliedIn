@@ -9,9 +9,9 @@ LABELS = frozenset({
 
 def validated_label(candidate) -> str:
     if not isinstance(candidate, str):
-        return "other"
+        return "unclassified"
     label = candidate.strip().lower()
-    return label if label in LABELS else "other"
+    return label if label in LABELS or label == "unclassified" else "unclassified"
 
 
 def classify(text: str) -> str:
@@ -24,7 +24,7 @@ def classify(text: str) -> str:
         settings = get_settings()
         model = settings.agent_model("relevance")
         if not model or missing_access(settings):
-            return "other"
+            return "unclassified"
         response = completion(
             model=model,
             messages=[
@@ -40,7 +40,9 @@ def classify(text: str) -> str:
             max_tokens=16,
         )
         candidate = response.choices[0].message.content
-        return validated_label(candidate)
+        # unclassified is an internal failure marker, never an LLM success label.
+        label = validated_label(candidate)
+        return label if label in LABELS else "unclassified"
     except Exception:
         # Provider details can contain the mail fragment or private configuration.
-        return "other"
+        return "unclassified"

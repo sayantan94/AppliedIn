@@ -19,7 +19,7 @@ def test_classifier_accepts_only_the_closed_vocabulary(label):
 
 @pytest.mark.parametrize("candidate", [None, 3, "unknown", "other, rejection", "<label>assessment</label>"])
 def test_classifier_rejects_missing_malformed_and_injected_labels(candidate):
-    assert reply_classifier.validated_label(candidate) == "other"
+    assert reply_classifier.validated_label(candidate) == "unclassified"
 
 
 def test_model_call_is_tool_free_and_invalid_response_falls_back(monkeypatch):
@@ -33,7 +33,7 @@ def test_model_call_is_tool_free_and_invalid_response_falls_back(monkeypatch):
     class Response:
         choices = [type("Choice", (), {"message": Message()})()]
     monkeypatch.setattr(litellm, "completion", lambda **kwargs: (calls.append(kwargs), Response())[1])
-    assert reply_classifier.classify("synthetic body") == "other"
+    assert reply_classifier.classify("synthetic body") == "unclassified"
     assert len(calls) == 1 and set(calls[0]) == {"model", "messages", "timeout", "max_tokens"}
     assert calls[0]["timeout"] == 10 and calls[0]["max_tokens"] == 16
 
@@ -43,7 +43,7 @@ def test_missing_model_access_skips_completion_without_disclosing_mail(monkeypat
         "agent_model": lambda self, _: "openai/synthetic-model"})())
     monkeypatch.setattr("core.llm_access.missing_access", lambda _: ["unavailable"])
     monkeypatch.setattr(litellm, "completion", lambda **_: pytest.fail("provider must not be called"))
-    assert reply_classifier.classify("private synthetic content") == "other"
+    assert reply_classifier.classify("private synthetic content") == "unclassified"
 
 
 
@@ -95,7 +95,7 @@ class FakeClient:
 
 def matched_headers(message_id=b""):
     return (b"From: example-co Recruiting <jobs@example-co.test>\r\n"
-            b"Subject: Engineer\r\nX-Header-Sentinel: HEADER_SECRET\r\n"
+            b"To: reply@example-co.test\r\nSubject: Engineer\r\nX-Header-Sentinel: HEADER_SECRET\r\n"
             + message_id + b"Content-Type: multipart/mixed; boundary=reply-boundary\r\n\r\n")
 
 
@@ -104,7 +104,9 @@ def test_real_ingest_prefix_classifies_once_and_persists_only_safe_record(tmp_pa
            "status": "applied", "profile_id": ""}
     tracking = FakeTracking([row])
     settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
-    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    monkeypatch.setattr("core.rotation.aliases", lambda: [{
+        "id": "rot-reply", "email": "reply@example-co.test",
+        "company": "example-co", "used_pks": [row["pk"]] }])
     captured = []
     monkeypatch.setattr(reply_classifier, "classify", lambda text: (captured.append(text), "interview_or_scheduling")[1])
     inline = "Visible inline body " + ("x" * 4100)
@@ -136,7 +138,9 @@ def test_real_ingest_prefix_classifies_once_and_persists_only_safe_record(tmp_pa
 def test_uid_replay_skips_body_and_model(tmp_path, monkeypatch):
     settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
     credentials = {"host": "imap.example-co.test", "username": "test", "mailbox": "INBOX", "password": "synthetic"}
-    headers = matched_headers(b"Message-ID: <stable@example-co.test>\r\n")
+    headers = (b"From: recruiter@example-co.test\r\n"
+               b"Message-ID: <stable@example-co.test>\r\n"
+               b"Content-Type: text/plain\r\n\r\n")
     monkeypatch.setattr("core.rotation.aliases", lambda: [])
     calls = []
     monkeypatch.setattr(reply_classifier, "classify", lambda text: (calls.append(text), "other")[1])
@@ -159,10 +163,10 @@ def test_classifier_none_keeps_ingest_offline(tmp_path, monkeypatch):
     credentials = {"host": "imap.example-co.test", "username": "test", "mailbox": "INBOX", "password": "synthetic"}
     tracking = FakeTracking([{"pk": "example-co#role-1", "company": "example-co",
                             "title": "Engineer", "status": "applied"}])
-    client = FakeClient([1], matched_headers(), b"synthetic body")
+    client = FakeClient([1], b"From: recruiter@example-co.test\r\nContent-Type: text/plain\r\n\r\n", b"synthetic body")
     stores = type("Stores", (), {"tracking": tracking})()
     assert reply_ingest.ingest_pass(settings, credentials, stores, client) == 1
-    assert reply_ingest.read_records(settings)[0]["label"] is None
+    assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
 
 
 def test_unassigned_without_message_id_ingest_assigns_and_projects_once(tmp_path, monkeypatch):
@@ -229,10 +233,12 @@ def test_applications_projects_authoritative_reply_records_after_status_update(t
         "artifacts": type("Artifacts", (), {"exists": lambda *_: False})()})()
     settings = Settings(mode="local", config_dir=str(tmp_path), local_dir=str(tmp_path))
     credentials = {"host": "imap.example-co.test", "username": "test", "mailbox": "INBOX", "password": "synthetic"}
-    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    monkeypatch.setattr("core.rotation.aliases", lambda: [{
+        "id": "rot-reply", "email": "reply@example-co.test",
+        "company": "example-co", "used_pks": [row["pk"]] }])
     labels = iter(["assessment", "recruiter_question"])
     monkeypatch.setattr(reply_classifier, "classify", lambda _: next(labels))
-    client = FakeClient([1, 2], matched_headers(), b"synthetic reply body")
+    client = FakeClient([1, 2], b"To: reply@example-co.test\r\nFrom: recruiter@example-co.test\r\nContent-Type: text/plain\r\n\r\n", b"synthetic reply body")
     assert reply_ingest.ingest_pass(settings, credentials, stores, client,
                                     classifier=reply_ingest._production_classifier) == 2
     tracking.set_status(row["pk"], Status.APPLIED, outcome="offer", events=[{"kind": "applied", "at": "2026-09-30"}])
@@ -294,7 +300,7 @@ def test_legacy_label_falls_back_and_api_sorts_mixed_offsets(tmp_path, monkeypat
     ]}}})
     item = TestClient(server.create_app()).get("/applications").json()["items"][0]
     assert [reply["record_id"] for reply in item["replies"]] == ["newer", "legacy"]
-    assert [reply["label"] for reply in item["replies"]] == ["assessment", "other"]
+    assert [reply["label"] for reply in item["replies"]] == ["assessment", "unclassified"]
 
 
 def test_hostile_ingested_body_stays_out_of_storage_api_logs_and_actions(tmp_path, monkeypatch, caplog):
@@ -360,7 +366,7 @@ def test_hostile_ingested_body_stays_out_of_storage_api_logs_and_actions(tmp_pat
     records = json.dumps(reply_ingest.read_records(settings))
     assert len(model_calls) == 1 and model_calls[0]["timeout"] == 10
     assert sentinel in model_calls[0]["messages"][1]["content"]
-    assert reply_ingest.read_records(settings)[0]["label"] == "other"
+    assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
     assert sentinel not in stored + records + public + caplog.text
     assert all(sentinel not in error for error in escaped_errors) and not escaped_errors
     assert action_calls == [] and fake_imap.closed
@@ -415,3 +421,119 @@ def test_assignment_api_validates_application_and_uses_stored_record(tmp_path, m
         "example-co#tailored": "tailored",
         "meta#run#example-co": "applied",
     }
+
+
+
+@pytest.mark.parametrize("subject", [
+    "Application security code: 123456",
+    "=?UTF-8?Q?APPLICATION_VERIFICATION_CODE:_123456?=",
+    "Your application one-time passcode",
+    "Your application authentication code",
+])
+def test_application_security_subject_bypasses_model_even_when_body_mimics_assessment(
+        subject, tmp_path, monkeypatch):
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    credentials = {"host": "imap.example-co.test", "username": "test",
+                   "mailbox": "INBOX", "password": "synthetic"}
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    headers = ("Message-ID: <security@example-co.test>\r\nSubject: " + subject
+               + "\r\nContent-Type: text/plain\r\n\r\n").encode()
+    client = FakeClient([1], headers, b"Interview instructions and coding assessment details")
+    calls = []
+    inserted = reply_ingest.ingest_pass(settings, credentials,
+        type("Stores", (), {"tracking": FakeTracking([])})(), client,
+        classifier=lambda *_: calls.append("model") or "assessment")
+    assert inserted == 1 and calls == []
+    assert client.body_fetches == []
+    assert reply_ingest.read_records(settings)[0]["label"] == "other"
+
+
+@pytest.mark.parametrize("subject", ["Coding assessment details", "Interview scheduling",
+                                     "Please verify assessment details"])
+def test_ordinary_assessment_subject_reaches_classifier(subject, tmp_path, monkeypatch):
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    credentials = {"host": "imap.example-co.test", "username": "test",
+                   "mailbox": "INBOX", "password": "synthetic"}
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    headers = ("Subject: " + subject + "\r\nContent-Type: text/plain\r\n\r\n").encode()
+    calls = []
+    client = FakeClient([1], headers, b"Assessments are scheduled tomorrow.")
+    assert reply_ingest.ingest_pass(settings, credentials,
+        type("Stores", (), {"tracking": FakeTracking([])})(), client,
+        classifier=lambda *_: calls.append("model") or "assessment") == 1
+    assert calls == ["model"] and reply_ingest.read_records(settings)[0]["label"] == "assessment"
+
+
+@pytest.mark.parametrize("response,expected", [
+    ("other", "other"), ("rejection", "rejection"),
+    ("interview_or_scheduling", "interview_or_scheduling"),
+    ("assessment", "assessment"), ("recruiter_question", "recruiter_question"),
+    ("auto_ack", "auto_ack"), ("other, rejection", "unclassified"),
+    ("unclassified", "unclassified"), (None, "unclassified"), (123, "unclassified"),
+])
+def test_provider_outcomes_keep_genuine_other_distinct_from_failure(response, expected, monkeypatch):
+    import litellm
+    class Message:
+        content = response
+    class Result:
+        choices = [type("Choice", (), {"message": Message()})()]
+    monkeypatch.setattr("core.config.get_settings", lambda: type("Settings", (), {
+        "agent_model": lambda self, _: "provider/synthetic-model"})())
+    monkeypatch.setattr("core.llm_access.missing_access", lambda _: [])
+    monkeypatch.setattr(litellm, "completion", lambda **_: Result())
+    assert reply_classifier.classify("synthetic inline reply") == expected
+
+
+@pytest.mark.parametrize("error", [RuntimeError("synthetic provider failure"),
+                                    RuntimeError("429 rate limit")])
+def test_provider_failures_never_look_like_other_or_leak(error, monkeypatch):
+    import litellm
+    monkeypatch.setattr("core.config.get_settings", lambda: type("Settings", (), {
+        "agent_model": lambda self, _: "provider/synthetic-model"})())
+    monkeypatch.setattr("core.llm_access.missing_access", lambda _: [])
+    monkeypatch.setattr(litellm, "completion", lambda **_: (_ for _ in ()).throw(error))
+    assert reply_classifier.classify("synthetic body") == "unclassified"
+
+
+def test_unclassified_projections_remain_visible_and_hide_private_uid_bookkeeping(tmp_path, monkeypatch):
+    import server
+    from core.config import Settings
+    settings = Settings(mode="local", config_dir=str(tmp_path), local_dir=str(tmp_path))
+    row = {"pk": "example-co#one", "company": "example-co", "status": "applied",
+           "title": "Engineer", "events": [], "applied_at": "2026-09-30"}
+    stores = type("Stores", (), {"tracking": FakeTracking([row]),
+        "artifacts": type("Artifacts", (), {"exists": lambda *_: False})()})()
+    credentials = {"host": "imap.example-co.test", "username": "test", "mailbox": "INBOX"}
+    account = reply_ingest._account_key(credentials)
+    reply_ingest._write_state(tmp_path / reply_ingest.STATE_NAME, {"accounts": {
+        account: {"uidvalidity": "77", "uid_floor": 800, "unresolved_uids": [801],
+                  "record_uids": {"matched": {"uid": 802, "uidvalidity": "77"}},
+                  "records": [
+                      {"record_id": "matched", "date": "", "sender": "recruiter@test",
+                       "subject": "update", "message_id": "<matched@test>",
+                       "pk": row["pk"], "label": "unclassified"},
+                      {"record_id": "unassigned", "date": "", "sender": "recruiter@test",
+                       "subject": "update", "message_id": "",
+                       "pk": "UNASSIGNED", "label": "unclassified"},
+                      {"record_id": "legacy", "date": "", "sender": "recruiter@test",
+                       "subject": "update", "message_id": "",
+                       "pk": row["pk"], "label": "nonexistent-label"},
+                      {"record_id": "real-other", "date": "", "sender": "recruiter@test",
+                       "subject": "update", "message_id": "",
+                       "pk": row["pk"], "label": "other"},
+                  ]}}})
+    monkeypatch.setattr(server, "get_settings", lambda: settings)
+    monkeypatch.setattr(server, "make_stores", lambda _: stores)
+    monkeypatch.setattr(reply_ingest, "enabled", lambda: True)
+    monkeypatch.setattr(reply_ingest, "local_credentials", lambda *_: credentials)
+    api = TestClient(server.create_app())
+    apps = api.get("/applications").json()
+    found = {r["record_id"]: r["label"] for r in apps["items"][0]["replies"]}
+    assert found == {"matched": "unclassified", "legacy": "unclassified", "real-other": "other"}
+    unassigned = api.get("/replies/unassigned").json()["replies"]
+    assert {r["record_id"]: r["label"] for r in unassigned} == {"unassigned": "unclassified"}
+    stored_public = reply_ingest.read_records(settings)
+    assert len(stored_public) == 4
+    for doc in (apps, unassigned, stored_public):
+        text = json.dumps(doc)
+        assert "record_uids" not in text and "uid_floor" not in text and "unresolved_uids" not in text

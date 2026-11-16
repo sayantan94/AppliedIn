@@ -50,84 +50,106 @@ def _normalized(value: str) -> str:
     return " ".join((value or "").casefold().split())
 
 
-def _phrase(title: str, text: str) -> bool:
-    t, hay = _normalized(title), _normalized(text)
-    return bool(t and re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", hay))
+def _security_code_subject(subject: str) -> bool:
+    """An application-specific one-time authentication code, not a coding test."""
+    value = _normalized(subject)
+    code_phrase = re.search(
+        r"\b(?:security|authentication|verification|one[\s-]?time)\b[\s:._-]+"
+        r"(?:\w+[\s:._-]+){0,2}(?:code|passcode|password)\b", value
+    ) or re.search(r"\b(?:otp|one[\s-]?time[\s-]+password)\b", value)
+    return bool(re.search(r"\b(?:application|applying)\b", value) and code_phrase)
 
 
 def match_message(headers, candidates: list[dict], aliases: list[dict]) -> str:
-    """Return one eligible pk or UNASSIGNED using only explicit recorded evidence."""
+    """Fail closed unless one eligible pk has one recorded, uncollided submitted use."""
     msg = email.message_from_bytes(headers, policy=email.policy.default)
-    subject = str(msg.get("subject", ""))
-    sender = str(msg.get("from", ""))
     recipient_values = []
     for key in ("to", "cc", "delivered-to"):
         recipient_values.extend(email.utils.getaddresses(msg.get_all(key, [])))
-    recipient_set = {address.casefold() for _, address in recipient_values if address}
-    matched = [a for a in aliases if str(a.get("email", "")).casefold() in recipient_set]
-    if matched:
-        companies = {str(a.get("company", "")).casefold() for a in matched}
-        signatures = {(str(a.get("email", "")).casefold(), str(a.get("id", "")),
-                       str(a.get("company", "")).casefold(), tuple(sorted(map(str, a.get("used_pks") or []))))
-                      for a in matched}
-        matched_addresses = {str(a.get("email", "")).casefold() for a in matched}
-        if len(companies) != 1 or len(signatures) != 1 or len(matched_addresses) != 1:
-            return "UNASSIGNED"
-        alias = matched[0]
-        rows = [r for r in candidates if str(r.get("company", "")).casefold() == next(iter(companies))]
-        alias_id = str(alias.get("id", ""))
-        used_pks = set(map(str, alias.get("used_pks") or []))
-        has_evidence = bool(used_pks) or any(
-            str(row.get("profile_id", "")) == alias_id for row in rows)
-        positives, contradictions = [], []
-        other_aliases = [a for a in aliases if str(a.get("id", "")) != alias_id]
-        other_used_pks = {str(pk) for other in other_aliases
-                          for pk in (other.get("used_pks") or [])}
-        for row in rows:
-            profile = str(row.get("profile_id", ""))
-            pk = str(row.get("pk", ""))
-            other_alias = next((a for a in aliases if str(a.get("id", "")) == profile), None)
-            positive = pk in used_pks or (alias_id and profile == alias_id)
-            contradicted = bool(profile and other_alias is not None and profile != alias_id)
-            contradicted = contradicted or bool(pk in used_pks and profile and profile != alias_id)
-            contradicted = contradicted or pk in other_used_pks
-            if positive and not contradicted:
-                positives.append(row)
-            elif contradicted or (profile and (other_alias is not None or profile.startswith("rot-"))):
-                contradictions.append(row)
-        if has_evidence and not positives:
-            return "UNASSIGNED"
-        if positives:
-            rows = positives
-        elif contradictions:
-            return "UNASSIGNED"
-        if len(rows) == 1:
-            return str(rows[0].get("pk") or "UNASSIGNED")
-        title_matches = [r for r in rows if _phrase(str(r.get("title", "")), subject)]
-        return str(title_matches[0].get("pk")) if len(title_matches) == 1 else "UNASSIGNED"
-
-    display_name = email.utils.parseaddr(sender)[0]
-    names = {str(r.get("company", "")).casefold(): str(r.get("company", "")) for r in candidates}
-    identity = f"{display_name} {subject}"
-    companies = [name for name in names.values() if _phrase(name, identity)]
-    if len(set(companies)) != 1:
+    addressed = {address.strip().casefold() for _, address in recipient_values if address.strip()}
+    if not addressed:
         return "UNASSIGNED"
-    company = companies[0]
-    rows = [r for r in candidates if str(r.get("company", "")).casefold() == company.casefold()
-            and _phrase(str(r.get("title", "")), subject)]
-    return str(rows[0].get("pk")) if len(rows) == 1 else "UNASSIGNED"
 
+    def email_of(alias):
+        return str(alias.get("email") or "").strip().casefold()
+
+    matched = [alias for alias in aliases if email_of(alias) in addressed]
+    if not matched:
+        return "UNASSIGNED"
+    # All addressed recorded aliases must agree, including conflicting ledger rows
+    # for the same email; no title/sender/company fallback can repair ambiguity.
+    signatures = {
+        (email_of(a), str(a.get("id") or ""),
+         str(a.get("company") or "").strip().casefold(),
+         tuple(sorted(str(pk) for pk in (a.get("used_pks") or []))))
+        for a in matched
+    }
+    if len(signatures) != 1:
+        return "UNASSIGNED"
+    address, alias_id, company, raw_uses = next(iter(signatures))
+    if not address or not alias_id or not company:
+        return "UNASSIGNED"
+    # rotation's IDs derive from local parts only, and record_submission writes
+    # to the first matching ID. Even a singleton ledger use is unsafe on collision.
+    if len({email_of(a) for a in aliases if str(a.get("id") or "") == alias_id}) != 1:
+        return "UNASSIGNED"
+    uses = set(raw_uses)
+    if len(uses) != 1 or not next(iter(uses)):
+        return "UNASSIGNED"
+    pk = next(iter(uses))
+    # Another alias recording this pk contradicts its provenance; checking after
+    # eligible filtering would hide historical contradictions.
+    if any(pk in {str(p) for p in (a.get("used_pks") or [])}
+           for a in aliases if str(a.get("id") or "") != alias_id):
+        return "UNASSIGNED"
+    eligible = []
+    for row in candidates:
+        status = row.get("status")
+        if getattr(status, "value", status) not in (Status.APPLIED.value, Status.APPLIED_MANUAL.value):
+            continue
+        if str(row.get("pk") or "") == pk:
+            eligible.append(row)
+    if len(eligible) != 1:
+        return "UNASSIGNED"
+    row = eligible[0]
+    if str(row.get("company") or "").strip().casefold() != company:
+        return "UNASSIGNED"
+    profile = str(row.get("profile_id") or "")
+    if profile and profile != alias_id:
+        return "UNASSIGNED"
+    return pk
 
 def _parse_headers(raw: bytes) -> tuple[dict, bool]:
+    empty = {"date": "", "sender": "", "subject": "", "message_id": ""}
+    if not isinstance(raw, bytes) or not raw.strip() or b"\x00" in raw:
+        return empty, True
+    # The standard parser tolerates arbitrary garbage as body text. Demand a
+    # syntactically recognizable header block before admitting an IMAP UID.
+    lines = raw.replace(b"\r\n", b"\n").split(b"\n")
+    seen = False
+    for line in lines:
+        if not line:
+            break
+        if line[:1] in (b" ", b"\t"):
+            if not seen:
+                return empty, True
+        elif not re.match(rb"^[\x21-\x39\x3b-\x7e]+:", line):
+            return empty, True
+        else:
+            seen = True
+    if not seen:
+        return empty, True
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.default)
     except Exception:
-        return {"date": "", "sender": "", "subject": "", "message_id": ""}, True
+        return empty, True
+
     def safe(name):
         try:
             return str(msg.get(name, ""))
         except Exception:
             return ""
+
     date, sender = safe("date"), safe("from")
     try:
         parsed = email.utils.parsedate_to_datetime(date) if date else None
@@ -140,6 +162,12 @@ def _parse_headers(raw: bytes) -> tuple[dict, bool]:
         sender = ""
     return ({"date": date, "sender": sender, "subject": safe("subject"),
              "message_id": safe("message-id")}, parse_failed)
+
+def _valid_message_id(value: str) -> bool:
+    # A bare or malformed ID cannot authenticate a later exact-UID retry.
+    return bool(isinstance(value, str) and re.fullmatch(
+        r"<[^<>\s@]+@[^<>\s@]+>", value.strip()))
+
 
 def _decode_text_prefix(headers: bytes, fragment: bytes) -> str:
     """Return inline text only; MIME headers and attachment parts stay out of the model input."""
@@ -229,17 +257,30 @@ def _account_key(creds: dict) -> str:
     return json.dumps([str(creds["host"]).casefold(), str(creds["username"]), str(creds["mailbox"])], separators=(",", ":"))
 
 
+def _generation(validity) -> int | None:
+    raw = str(validity or "").strip()
+    if not raw.isascii() or not raw.isdecimal():
+        return None
+    number = int(raw)
+    return number if number > 0 else None
+
+
 def _account_state(path: Path, key: str, validity: str) -> tuple[dict, bool]:
+    """Only a verified strictly newer generation may reset scan state."""
+    incoming = _generation(validity)
     with WRITE_LOCK:
         state = _read_state(path)
         accounts = state.setdefault("accounts", {})
         account = accounts.get(key, {})
-        changed = account.get("uidvalidity") != validity
-        if changed:
+        established = _generation(account.get("uidvalidity"))
+        if incoming is None or (established is not None and incoming < established):
+            return account, False
+        if established is None or incoming > established:
             account.setdefault("processed", [])
             account.setdefault("message_ids", [])
             account.setdefault("records", [])
-            account.update(uidvalidity=validity, last_uid=0, scan_pending=True)
+            account.update(uidvalidity=str(incoming), last_uid=0, scan_pending=True,
+                           uid_floor=None, unresolved_uids=[])
             accounts[key] = account
             _write_state(path, state)
         elif "scan_pending" not in account:
@@ -252,20 +293,59 @@ def _account_state(path: Path, key: str, validity: str) -> tuple[dict, bool]:
 def _processed(path: Path, key: str, validity: str, uid: int) -> bool:
     with WRITE_LOCK:
         account = _read_state(path).get("accounts", {}).get(key, {})
-        return f"{validity}:{uid}" in account.get("processed", [])
+        return (_generation(validity) is not None
+                and _generation(account.get("uidvalidity")) == _generation(validity)
+                and f"{validity}:{uid}" in account.get("processed", []))
 
+
+def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -> int | None:
+    with WRITE_LOCK:
+        state = _read_state(path)
+        account = state.get("accounts", {}).get(key)
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
+            return None
+        if account.get("uid_floor") is None:
+            floor = min(selected) - 1 if selected else 0
+            account["uid_floor"] = floor
+            account["last_uid"] = max(int(account.get("last_uid", 0)), floor)
+            # Mark the entire admitted first window before attempting any UID:
+            # a partial scan must not lose an unvisited UID if SEARCH later omits it.
+            account["unresolved_uids"] = sorted(set(account.get("unresolved_uids", [])) | set(selected))
+            _write_state(path, state)
+        # Overlapping first scans must use the floor that actually won the write.
+        return int(account["uid_floor"])
+
+
+def _mark_unresolved(path: Path, key: str, validity: str, uid: int) -> None:
+    with WRITE_LOCK:
+        state = _read_state(path)
+        account = state.get("accounts", {}).get(key)
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
+            return
+        if f"{validity}:{uid}" in account.get("processed", []):
+            return
+        holes = set(account.get("unresolved_uids", []))
+        if uid not in holes:
+            account["unresolved_uids"] = sorted(holes | {uid})
+            _write_state(path, state)
 
 
 def _commit_uid(path: Path, key: str, validity: str, uid: int,
                 record: dict, message_id: str) -> bool:
+    """Commit dedup, record, and exact private retry link in one locked write."""
+    if _generation(validity) is None or type(uid) is not int or uid <= 0:
+        return False
     with WRITE_LOCK:
         state = _read_state(path)
-        accounts = state.setdefault("accounts", {})
-        account = accounts.setdefault(key, {"uidvalidity": validity, "last_uid": 0,
-                                             "scan_pending": True, "processed": [],
-                                             "message_ids": [], "records": []})
-        if account.get("uidvalidity") != validity:
-            account.update(uidvalidity=validity, last_uid=0, scan_pending=True)
+        account = state.get("accounts", {}).get(key)
+        if not account or _generation(account.get("uidvalidity")) != _generation(validity):
+            return False
+        # Selection may predate another first scan's floor; fence at commit too.
+        floor = account.get("uid_floor")
+        if floor is not None and uid <= int(floor):
+            return False
         identity = f"{validity}:{uid}"
         processed = set(account.get("processed", []))
         if identity in processed:
@@ -274,12 +354,15 @@ def _commit_uid(path: Path, key: str, validity: str, uid: int,
         duplicate = bool(message_id and message_id in message_ids)
         if not duplicate:
             account.setdefault("records", []).append(record)
-        processed.add(identity)
-        account["processed"] = sorted(processed)
+            account.setdefault("record_uids", {})[record["record_id"]] = {
+                "uid": uid, "uidvalidity": validity,
+            }
+        account["processed"] = sorted(processed | {identity})
         if message_id:
             message_ids.add(message_id)
         account["message_ids"] = sorted(message_ids)
-        accounts[key] = account
+        account["unresolved_uids"] = sorted(
+            hole for hole in set(account.get("unresolved_uids", [])) if hole != uid)
         _write_state(path, state)
         return not duplicate
 
@@ -288,10 +371,31 @@ def _advance_cursor(path: Path, key: str, validity: str, uid: int) -> None:
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
-        if not account or account.get("uidvalidity") != validity:
-            raise OSError("reply ingest account state changed")
-        if uid > int(account.get("last_uid", 0)):
-            account["last_uid"] = uid
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
+            return
+        prefix = f"{validity}:"
+        processed_uids = [
+            int(item[len(prefix):]) for item in account.get("processed", [])
+            if isinstance(item, str) and item.startswith(prefix)
+            and item[len(prefix):].isdecimal()
+        ]
+        target = max([int(account.get("last_uid", 0)), uid, *processed_uids])
+        witness_removed = False
+        if f"{validity}:{uid}" in account.get("processed", []):
+            before = account.get("unresolved_uids", [])
+            after = [h for h in before if h != uid]
+            if len(after) != len(before):
+                account["unresolved_uids"] = after
+                witness_removed = True
+        floor = int(account.get("uid_floor") or 0)
+        holes = [h for h in account.get("unresolved_uids", [])
+                 if isinstance(h, int) and h > floor]
+        if holes:
+            target = min(target, min(holes) - 1)
+        target = max(floor, target)
+        if target > int(account.get("last_uid", 0)) or witness_removed:
+            account["last_uid"] = max(int(account.get("last_uid", 0)), target)
             _write_state(path, state)
 
 
@@ -299,9 +403,70 @@ def _finish_scan(path: Path, key: str, validity: str) -> None:
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
-        if account and account.get("uidvalidity") == validity and account.get("scan_pending"):
+        if (account and _generation(validity) is not None
+                and _generation(account.get("uidvalidity")) == _generation(validity)
+                and account.get("uid_floor") is not None and account.get("scan_pending")):
             account["scan_pending"] = False
             _write_state(path, state)
+
+
+def _retry_candidates(path: Path, key: str, validity: str) -> list[tuple[str, int, str]]:
+    """Snapshot old unclassified records before new admissions in this poll."""
+    with WRITE_LOCK:
+        account = _read_state(path).get("accounts", {}).get(key, {})
+        if _generation(validity) is None or _generation(account.get("uidvalidity")) != _generation(validity):
+            return []
+        links = account.get("record_uids", {})
+        result = []
+        for row in account.get("records", []):
+            if row.get("label") != "unclassified" or not _valid_message_id(row.get("message_id")):
+                continue
+            link = links.get(row.get("record_id")) if isinstance(links, dict) else None
+            if not isinstance(link, dict):
+                continue
+            uid = link.get("uid")
+            if (type(uid) is int and uid > 0 and
+                    _generation(link.get("uidvalidity")) == _generation(validity)):
+                result.append((row["record_id"], uid, row["message_id"]))
+        return result
+
+
+def _promote_label(path: Path, key: str, validity: str, record_id: str,
+                   uid: int, message_id: str, label: str) -> None:
+    if label == "unclassified":
+        return
+    with WRITE_LOCK:
+        state = _read_state(path)
+        account = state.get("accounts", {}).get(key)
+        if not account or _generation(validity) is None or _generation(account.get("uidvalidity")) != _generation(validity):
+            return
+        link = account.get("record_uids", {}).get(record_id)
+        if link != {"uid": uid, "uidvalidity": validity}:
+            return
+        for row in account.get("records", []):
+            if (row.get("record_id") == record_id and row.get("label") == "unclassified"
+                    and row.get("message_id") == message_id):
+                # Preserve manually assigned pk and every other public field.
+                row["label"] = label
+                _write_state(path, state)
+                return
+
+
+def _usable_prefix(text: str) -> bool:
+    # Replacement-only decode results are not readable evidence for model success.
+    return bool(text and text.replace("\ufffd", "").strip())
+
+
+def _classify(fields: dict, fragment: str, classifier) -> str:
+    from core.reply_classifier import validated_label
+    if _security_code_subject(fields["subject"]):
+        return "other"
+    if not _usable_prefix(fragment) or classifier is None:
+        return "unclassified"
+    try:
+        return validated_label(classifier(fields, fragment))
+    except Exception:
+        return "unclassified"
 
 
 def ingest_pass(settings, credentials: dict | None = None, stores=None, transport=None,
@@ -319,50 +484,95 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                   *stores.tracking.query_status(Status.APPLIED_MANUAL)]
     alias_snapshot = aliases()
     client = transport or ReadOnlyIMAP(creds["host"], creds["username"], creds["password"], creds["mailbox"])
-    state_path = _state_path(settings)
+    path = _state_path(settings)
     key = _account_key(creds)
-    processed_count = 0
+    inserted_count = 0
     try:
-        validity = str(getattr(client, "uidvalidity", "unknown"))
-        account, first_scan = _account_state(state_path, key, validity)
+        incoming = _generation(getattr(client, "uidvalidity", None))
+        if incoming is None:
+            return 0
+        validity = str(incoming)
+        account, first_scan = _account_state(path, key, validity)
+        if _generation(account.get("uidvalidity")) != incoming:
+            return 0
+        retries = _retry_candidates(path, key, validity)
+        floor = account.get("uid_floor")
         if first_scan:
-            uids = sorted(client.search_uids("ALL"))[-200:]
+            found = sorted({uid for uid in client.search_uids("ALL")
+                            if type(uid) is int and uid > 0})
+            # A persisted floor survives a partial/crashed initial scan.
+            uids = found[-200:] if floor is None else [uid for uid in found if uid > floor]
+            committed_floor = _set_first_floor(path, key, validity, uids)
+            # The winning scan may have established a higher floor during SEARCH.
+            uids = [uid for uid in uids if committed_floor is not None and uid > committed_floor]
         else:
             cursor = int(account.get("last_uid", 0))
-            uids = [uid for uid in client.search_uids(f"UID {cursor + 1}:*")
-                    if uid > cursor]
-        for uid in sorted(uids):
-            if _processed(state_path, key, validity, uid):
-                _advance_cursor(state_path, key, validity, uid)
+            floor = int(floor or 0)
+            holes = [uid for uid in account.get("unresolved_uids", [])
+                     if type(uid) is int and uid > floor]
+            start = max(floor + 1, min(cursor + 1, min(holes)) if holes else cursor + 1)
+            uids = [uid for uid in client.search_uids(f"UID {start}:*")
+                    if type(uid) is int and uid >= start]
+        for uid in sorted(set(uids)):
+            if _processed(path, key, validity, uid):
+                _advance_cursor(path, key, validity, uid)
                 continue
-            raw = client.fetch_headers(uid)
-            fields, parse_failed = _parse_headers(raw)
             try:
-                pk = "UNASSIGNED" if parse_failed else match_message(raw, candidates, alias_snapshot)
+                raw = client.fetch_headers(uid)
+                fields, invalid = _parse_headers(raw)
+            except Exception:
+                raw, fields, invalid = b"", {}, True
+            if invalid:
+                _mark_unresolved(path, key, validity, uid)
+                continue
+            try:
+                pk = match_message(raw, candidates, alias_snapshot)
             except Exception:
                 pk = "UNASSIGNED"
-            text = client.fetch_text_prefix(uid)
-            label = None
-            if classifier is not None:
+            if _security_code_subject(fields["subject"]):
+                label = "other"
+            else:
                 try:
-                    from core.reply_classifier import validated_label
-                    fragment = _decode_text_prefix(raw, text) if isinstance(text, bytes) else str(text or "")
-                    label = validated_label(classifier(fields, fragment))
+                    prefix = client.fetch_text_prefix(uid)
                 except Exception:
-                    label = None
+                    prefix = b""
+                decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
+                if not _usable_prefix(decoded) and not _valid_message_id(fields["message_id"]):
+                    _mark_unresolved(path, key, validity, uid)
+                    continue
+                label = _classify(fields, decoded, classifier)
             record = {"record_id": str(uuid.uuid4()), **fields, "label": label, "pk": pk}
-            inserted = _commit_uid(state_path, key, validity, uid, record, fields["message_id"])
-            _advance_cursor(state_path, key, validity, uid)
-            processed_count += int(inserted)
-        _finish_scan(state_path, key, validity)
+            admitted = _commit_uid(path, key, validity, uid, record, fields["message_id"])
+            if admitted:
+                inserted_count += 1
+            _advance_cursor(path, key, validity, uid)
+        _finish_scan(path, key, validity)
+
+        # Only records present before this poll may retry. The exact UID and
+        # generation are private; duplicate Message-IDs never create links.
+        for record_id, uid, expected_mid in retries:
+            try:
+                raw = client.fetch_headers(uid)
+                fields, invalid = _parse_headers(raw)
+                if invalid or not _valid_message_id(fields["message_id"]) or fields["message_id"] != expected_mid:
+                    continue
+                prefix = client.fetch_text_prefix(uid)
+                decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
+                if not _usable_prefix(decoded):
+                    continue
+                label = _classify(fields, decoded, classifier)
+                _promote_label(path, key, validity, record_id, uid, expected_mid, label)
+            except Exception:
+                # Mail/provider errors are never logged or persisted as metadata.
+                continue
     finally:
         client.logout()
-    return processed_count
+    return inserted_count
+
 
 def _production_classifier(_fields: dict, text: str) -> str:
     from core.reply_classifier import classify
     return classify(text)
-
 
 def run_poller(stop_event=None) -> None:
     import logging
