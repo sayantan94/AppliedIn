@@ -550,3 +550,133 @@ def test_workable_short_complete_html_is_not_rejected_by_length(monkeypatch):
     assert result["text"] == "Build APIs."
     assert result["posting_guard"]["source_verified"] is True
     assert len(starts) == 1
+
+
+@pytest.mark.parametrize(("url", "payload"), [
+    (WORKDAY_URL,
+     {"truncated": True,
+      "jobPostingInfo": {"externalPath": "/External/job/US/example-role",
+                         "title": "Platform Engineer", "jobDescription": HTML}}),
+    (WORKABLE_URL,
+     {"jobs": [{"shortcode": "ABC123", "title": "Platform Engineer",
+                 "description": HTML}],
+      "pagination": {"nextPage": 2}}),
+    (EIGHTFOLD_URL,
+     {"id": "123", "title": "Platform Engineer", "job_description": HTML,
+      "isComplete": False}),
+    (SMARTRECRUITERS_URL,
+     {"id": "123", "name": "Platform Engineer", "postingUrl": SMARTRECRUITERS_URL,
+      "jobAd": {"requiredSections": ["jobDescription", "qualifications"],
+                "sections": {"jobDescription": {"text": HTML}}}}),
+    (SMARTRECRUITERS_URL,
+     {"id": "123", "name": "Platform Engineer", "postingUrl": SMARTRECRUITERS_URL,
+      "jobAd": {"sections": {"jobDescription": {"text": HTML},
+                             "qualifications": {"text": HTML, "partial": True}}}}),
+])
+def test_explicitly_incomplete_api_detail_never_verifies_source(monkeypatch, url, payload):
+    """Even matching IDs and HTML cannot override response-native missing-content proof."""
+    api_calls, page_calls = [], []
+    monkeypatch.setattr(jd.httpx, "Client", lambda **_: Client(payload, api_calls))
+    monkeypatch.setattr(jd, "_api_meta",
+                        lambda *_: pytest.fail("incomplete detail reached source_complete"))
+    monkeypatch.setattr(jd, "_get",
+                        lambda posting, *_: (page_calls.append(posting), None)[1])
+    monkeypatch.setattr(jd, "_from_chrome", lambda *_: None)
+
+    result = jd.fetch_jd_meta(url)
+
+    assert len(api_calls) == 1
+    assert page_calls == [url, url]
+    assert result.get("source_kind") != "ats_html"
+    assert result.get("posting_guard", {}).get("source_verified") is not True
+
+
+@pytest.mark.parametrize("wrapper", [
+    "<other>{}</other>",
+    "<workzag-jobs><group>{}</group></workzag-jobs>",
+])
+def test_personio_requires_workzag_root_and_direct_position(monkeypatch, wrapper):
+    """Matching descendant IDs are not feed records unless directly under workzag-jobs."""
+    position = (
+        "<position><id>123</id><name>Platform Engineer</name>"
+        f"<jobDescriptions><jobDescription><![CDATA[{HTML}]]></jobDescription>"
+        "</jobDescriptions></position>")
+    api_calls, page_calls = [], []
+    monkeypatch.setattr(jd.httpx, "Client",
+                        lambda **_: Client(wrapper.format(position), api_calls))
+    monkeypatch.setattr(jd, "_api_meta",
+                        lambda *_: pytest.fail("unsupported XML reached source_complete"))
+    monkeypatch.setattr(jd, "_get",
+                        lambda posting, *_: (page_calls.append(posting), None)[1])
+    monkeypatch.setattr(jd, "_from_chrome", lambda *_: None)
+
+    result = jd.fetch_jd_meta(PERSONIO_URL)
+
+    assert len(api_calls) == 1
+    assert page_calls == [PERSONIO_URL, PERSONIO_URL]
+    assert result.get("source_kind") != "ats_html"
+    assert result.get("posting_guard", {}).get("source_verified") is not True
+
+
+def test_workable_http_date_retry_uses_wall_clock_not_pacer_clock(monkeypatch):
+    """A valid UTC HTTP-date must permit a bounded retry even at low monotonic uptime."""
+    monotonic, starts = Clock(500.0), []
+    wall = datetime(2026, 11, 16, tzinfo=UTC).timestamp()
+    monkeypatch.setattr(jd, "_WORKABLE_WALL_CLOCK", lambda: wall)
+    state = _limited(monkeypatch, monotonic, starts,
+                     "Mon, 16 Nov 2026 00:00:03 GMT")
+
+    assert jd._workable_request(WORKABLE_ENDPOINT) == {"jobs": []}
+    assert state["calls"] == 2
+    assert starts == [500.0, 503.0]
+
+
+def test_workable_queued_burst_expires_during_bounded_lock_acquisition(monkeypatch):
+    """24 queued callers must time out within their own budgets, not issue HTTP."""
+    clock = Clock()
+    arrivals = threading.Barrier(25)
+
+    class SaturatedLock:
+        def __init__(self):
+            self.waits = []
+            self._mutex = threading.Lock()
+
+        def acquire(self, *, timeout):
+            # A fake occupied pacer lock: expire the provided budget virtually,
+            # not via a 15-second real sleep for every concurrent worker.
+            with self._mutex:
+                self.waits.append(timeout)
+            clock.sleep(timeout)
+            return False
+
+        def release(self):
+            raise AssertionError("a timed-out caller must not release another holder's lock")
+
+    lock = SaturatedLock()
+    monkeypatch.setattr(jd, "_WORKABLE_CLOCK", clock)
+    monkeypatch.setattr(jd, "_WORKABLE_LOCK", lock)
+    monkeypatch.setattr(jd.httpx, "Client",
+                        lambda **_: pytest.fail("expired queue sent an HTTP request"))
+    results, errors = [], []
+
+    def worker(index):
+        try:
+            arrivals.wait()
+            endpoint = (f"https://apply.workable.com/api/v1/widget/accounts/"
+                        f"example-co{index}?details=true")
+            results.append(jd._workable_request(endpoint))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(24)]
+    for thread in threads:
+        thread.start()
+    arrivals.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    assert results == [None] * 24
+    assert len(lock.waits) == 24
+    assert all(0 < budget <= 15.0 for budget in lock.waits)
