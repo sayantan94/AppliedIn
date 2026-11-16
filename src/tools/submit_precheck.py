@@ -87,7 +87,7 @@ def _root(legacy_dir: Path | None) -> Path:
         if not override or not Path(override).is_absolute():
             raise PrecheckUnavailable("invalid precheck data directory")
         root = Path(override)
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir() or any(p.is_symlink() for p in (root, *root.parents)):
         raise PrecheckUnavailable("unusable precheck data directory")
     # A valid root must not hide file or lock effects through symlink children.
     for name in ("precheck.lock", "precheck-events.log", "precheck-data.json",
@@ -243,7 +243,7 @@ def evaluate(
         return Decision(False, "blocked_row")
     if any(pk == token or pk.startswith(token) for token in policy.PARKED):
         return Decision(False, "parked")
-    if company in policy.CAPS and at <= policy.CAPS[company]:
+    if company in policy.CAPS and at.date() <= policy.CAPS[company].date():
         return Decision(False, "company_date_cap")
     others = []
     for row in rows:
@@ -304,7 +304,8 @@ def _append_event(
         "pk": pk, "operation": operation, "argv": argv,
         "return_code": return_code, "output": output,
         "prior_claim_state": prior_claim_state, "agent_pid": agent_pid,
-        "allow": return_code == 0, "reason": reason,
+        "allow": return_code == 0 and operation in _OPERATIONS,
+        "reason": reason,
     }
     target = root / "precheck-events.log"
     if target.is_symlink():
