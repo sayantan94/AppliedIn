@@ -495,6 +495,10 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 except Exception as exc:
                     receipt["prepare_error"] = str(exc)
                     co.log.exception("Career Ops network handoff failed")
+            # STOP may arrive during timeout cleanup, after the scanner's last
+            # check. Honor it before deciding whether this receipt is final.
+            if STOP.is_set():
+                receipt["stopped"] = True
             if receipt["stopped"]:
                 # A STOP while preparing is not a completed handoff.
                 receipt["batch_success"] = False
