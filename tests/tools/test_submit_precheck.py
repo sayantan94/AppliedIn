@@ -73,7 +73,7 @@ def test_eligible_and_event_stability(world, capsys):
 def test_duplicate_id_cannot_be_hidden_by_a_different_title_or_company(world, capsys):
     root, _, _, seed, _, invoke = world
     seed({
-        "pk": "another-co#earlier", "company": "another-co",
+        "pk": "another-co#candidate", "company": "another-co",
         "job_id": "candidate", "title": "Different synthetic title",
         "status": "applied", "applied_at": NOW.isoformat(),
     })
@@ -190,6 +190,17 @@ def test_submit_clicked_prior_counts_without_confirmed_status(world):
     assert invoke() == 2
 
 
+def test_unconfirmed_click_counts_for_another_job_without_applied_status(world):
+    _, _, tracking, seed, _, invoke = world
+    assert invoke("record-click") == 0
+    assert tracking.get(JOB["pk"])["status"] == "tailored"
+    seed({
+        "pk": "example-co#next", "company": "example-co",
+        "job_id": "next", "title": JOB["title"], "status": "tailored",
+    })
+    assert invoke("check", pk="example-co#next") == 2
+
+
 def test_board_pin_exact_match(world, monkeypatch):
     _, _, tracking, _, _, invoke = world
     tracking.r.set("app:" + JOB["pk"], json.dumps({
@@ -215,6 +226,17 @@ def test_bad_override_refuses_before_any_guard_file_or_lock(world, monkeypatch, 
     assert not (root / "precheck-events.log").exists()
     assert not (root / "precheck.lock").exists()
     assert not (root / "claims").exists()
+
+
+def test_symlinked_lock_cannot_escape_valid_data_root(world, tmp_path, capsys):
+    root, _, _, _, _, invoke = world
+    outside = tmp_path / "outside"
+    outside.write_text("sentinel", encoding="utf-8")
+    (root / "precheck.lock").symlink_to(outside)
+    assert invoke() == 2
+    assert capsys.readouterr().out == ""
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+    assert not (root / "precheck-events.log").exists()
 
 
 def test_missing_or_invalid_json_fails_closed_with_no_lock(world, capsys):
@@ -261,7 +283,7 @@ def test_shim_can_bootstrap_from_foreign_cwd_without_checkout_pythonpath(tmp_pat
     shim = root / "scripts" / "submit_precheck_shim.py"
     foreign = tmp_path / "foreign"
     foreign.mkdir()
-    child = String = r"""
+    child = r"""
 import runpy
 import sys
 from pathlib import Path
