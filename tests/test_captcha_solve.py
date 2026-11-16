@@ -35,6 +35,10 @@ function matches(e,selector){
     const s=raw.trim();
     if(s==='*')return true;
     if(s[0]==='.')return e.className.split(/\s+/).includes(s.slice(1));
+    if(/^[a-z]+\.[\w-]+$/.test(s)){
+      const [tag,cls]=s.split('.');
+      return e.tagName.toLowerCase()===tag&&e.className.split(/\s+/).includes(cls);
+    }
     const m=s.match(/^([\w-]+)?\[([\w-]+)(?:(\^=|\*=|=)"([^"]*)")?(?: i)?\]$/);
     if(m){
       if(m[1]&&e.tagName.toLowerCase()!==m[1])return false;
@@ -134,7 +138,8 @@ function makeWindow(spec){
         if(widget.behavior==='submit')doc.emit('submit');
         if(widget.behavior==='fetch')w.fetch('/synthetic');
         if(widget.behavior==='remove'){
-          const el=owner.querySelectorAll('input,textarea')[0];if(el)el.isConnected=false;
+          const el=owner.querySelectorAll('input,textarea')[0];
+          if(el){el.isConnected=false;owner.children=owner.children.filter(child=>child!==el);}
         }
       };
     }
@@ -145,6 +150,11 @@ function makeWindow(spec){
   for(const frame of spec.frames||[])addFrame(frame,doc.documentElement);
   for(const provider of spec.providers||[])addFrame({src:provider.src,title:provider.title||'',
     crossOrigin:true},doc.documentElement);
+  for(const item of spec.unreadable||[]){
+    const e=doc.documentElement.appendChild(new Element(item.tag||'canvas',{
+      class:item.class||'captcha'},doc));
+    if(item.hidden)e.attrs.hidden=true;
+  }
   for(const im of spec.images||[]){
     const form=doc.documentElement.appendChild(new Element('form',{},doc));
     const img=form.appendChild(new Element('img',{
@@ -311,6 +321,7 @@ def test_actual_js_duplicate_receiver_refuses():
     ({"callback": ""}, "callback_missing"),
     ({"callback": "complete", "behavior": "throw"}, "possible_commit"),
     ({"callback": "complete", "behavior": "submit"}, "possible_commit"),
+    ({"callback": "complete", "behavior": "fetch"}, "possible_commit"),
     ({"callback": "complete", "behavior": "navigate"}, "possible_commit"),
     ({"callback": "complete", "behavior": "remove"}, "possible_commit"),
     ({"callback": "complete", "behavior": "clear"}, "response_unverified"),
@@ -362,6 +373,17 @@ def test_actual_js_image_isolated_canvas_reencode_and_refusals():
         with pytest.raises(cs.CaptchaError) as exc:
             cs.pick_challenge(bad["detection"]["found"])
         assert exc.value.code == cs.EXIT_UNSUPPORTED
+
+
+@pytest.mark.parametrize("unreadable", [
+    [{"tag": "canvas", "class": "captcha"}],
+    [{"tag": "div", "class": "captcha-image"}],
+])
+def test_actual_js_source_canvas_and_css_only_handoff(unreadable):
+    page = _node({"url": "https://example.test/apply", "unreadable": unreadable})
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert exc.value.reason == "image_unreadable"
 
 
 def test_image_body_oversize_rejected_before_payment():
