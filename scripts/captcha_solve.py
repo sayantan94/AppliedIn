@@ -177,6 +177,30 @@ SCAN_JS = r"""(()=>{
      return id;
    }catch(_){return ''}
  };
+ // Document-order indices (key()) cannot detect a same-shape replacement.
+ // This page-realm WeakMap gives every DOM node a stable identity, so a
+ // replaced owner/receiver/image/frame fails the pre-write snapshot compare
+ // even when its position and attributes still match.
+ const nodeWitness=(w,e)=>{
+   if(!e||(typeof e!=='object'&&typeof e!=='function'))return '';
+   const marker=Symbol.for('appliedin.captcha.node-witness.v1');
+   try{
+     let state=w[marker];
+     if(!state){
+       state={ids:new WeakMap(),next:0,
+         nonce:Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)};
+       w[marker]=state;
+       if(w[marker]!==state)return '';
+     }
+     if(!state.ids||typeof state.ids.get!=='function'||!state.nonce)return '';
+     let id=state.ids.get(e);
+     if(!id){
+       id=state.nonce+':'+(++state.next);
+       state.ids.set(e,id);
+     }
+     return id;
+   }catch(_){return ''}
+ };
  const markCallbacks=(c,cb,w)=>{
    c.callbacks=cb.refs.map(x=>x.label);
    c.callbackHints=cb.hints;
@@ -184,17 +208,19 @@ SCAN_JS = r"""(()=>{
    if(c.callbackWitnesses.some(x=>!x))c.invalid=true;
  };
  const add=(c,h)=>{out.found.push(c);handles[c.id]=h};
- const visit=(w,d,path)=>{
+ const visit=(w,d,path,visible)=>{
    const frame={path,url:String(w.location.href),password:!!d.querySelector('input[type=password]')};
    out.frames.push(frame);docs.push(d);wins.push(w);
    if(path==='top')out.password=frame.password;
    const owners=[];
    d.querySelectorAll('[data-sitekey],.g-recaptcha,.cf-turnstile,.h-captcha').forEach(e=>{
      const kind=kindOf(e);if(!kind)return;
-     const id=path+'|owner:'+key(e),c={id,kind,sitekey:attr(e,'data-sitekey'),visible:shown(w,e),
+     const id=path+'|owner:'+key(e),c={id,kind,sitekey:attr(e,'data-sitekey'),visible:visible&&shown(w,e),
        size:attr(e,'data-size'),enterprise:!!(w.grecaptcha&&w.grecaptcha.enterprise),
        frame:'',action:attr(e,'data-action'),cdata:attr(e,'data-cdata'),s:attr(e,'data-s'),
+       ownerWitness:nodeWitness(w,e),receiverWitness:'',
        invalid:false,providerFrames:[],receiver:'',receiverCount:0,callbacks:[],callbackHints:[]};
+     if(!c.ownerWitness)c.invalid=true;
      owners.push({c,e,w,d});add(c,{owner:e,w,d});
    });
    const iframes=Array.from(d.querySelectorAll('iframe'));
@@ -204,12 +230,12 @@ SCAN_JS = r"""(()=>{
      const p=u?provider(u):null;
      if(p){
        const compatible=o=>o.c.kind===p.kind&&(!p.sitekey||!o.c.sitekey||o.c.sitekey===p.sitekey);
-       const matches=owners.filter(compatible);
        const near=typeof f.closest==='function'?f.closest('.g-recaptcha,.cf-turnstile,.h-captcha'):null;
-       // A challenge nested under a different provider (or key) is a separate
-       // visible candidate, never evidence for the surrounding widget.
+       // Only an observed owner association or a previously seen virtual
+       // anchor proves this provider frame belongs to a widget. A detached
+       // frame with the same kind/sitekey is a distinct, ambiguous challenge,
+       // never evidence for the sole matching owner.
        let target=near?owners.find(o=>o.e===near&&compatible(o)):null;
-       if(!target&&!near&&matches.length===1)target=matches[0];
        if(!target){
          // Attach a popup to one unowned anchor, but never merge separate anchors.
          const virtual=owners.filter(o=>o.c.kind===p.kind&&o.c.virtual&&o.c.sitekey===p.sitekey);
@@ -218,16 +244,19 @@ SCAN_JS = r"""(()=>{
        if(!target){
          const c={id:path+'|provider:'+i,kind:p.kind,sitekey:p.sitekey,visible:false,
            size:p.size||'',enterprise:!!p.enterprise,frame:p.frame||'',action:p.action||'',
-           cdata:p.cdata||'',s:p.s||'',invalid:false,providerFrames:[],receiver:'',
+           cdata:p.cdata||'',s:p.s||'',ownerWitness:'',receiverWitness:'',
+           invalid:false,providerFrames:[],receiver:'',
            receiverCount:0,callbacks:[],callbackHints:[]};
          target={c,e:null,w,d,virtual:true};owners.push(target);add(c,{owner:null,w,d});
        }
-       const c=target.c,vis=shown(w,f);
+       const c=target.c,vis=visible&&shown(w,f);
+       const frameWitness=nodeWitness(w,f);
+       if(!frameWitness)c.invalid=true;
        // A bframe can accompany its anchor, but two distinct anchors are
        // distinct instances even when their provider and sitekey agree.
        if(p.frame==='anchor'&&c.providerFrames.some(frame=>frame.frame==='anchor'&&frame.path!==fpath))
          c.invalid=true;
-       c.providerFrames.push({path:fpath,src:String(u.href),visible:vis,frame:p.frame||''});
+       c.providerFrames.push({path:fpath,src:String(u.href),visible:vis,frame:p.frame||'',witness:frameWitness});
        c.visible=c.visible||vis && (p.frame!=='anchor'||c.size!=='invisible');
        c.enterprise=!!(c.enterprise||p.enterprise);
        if(!c.sitekey)c.sitekey=p.sitekey;
@@ -243,10 +272,13 @@ SCAN_JS = r"""(()=>{
      let cw=null,cd=null;
      try{cw=f.contentWindow;cd=cw&&cw.document}catch(_){}
      if(!cw||!cd){
-       if(shown(w,f)&&/captcha|challenge|verification/i.test(src+' '+attr(f,'title')+' '+attr(f,'id')))
+       if(visible&&shown(w,f)&&/captcha|challenge|verification/i.test(src+' '+attr(f,'title')+' '+attr(f,'id')))
          out.opaque.push(fpath);
      }else{
-       try{visit(cw,cd,fpath)}catch(_){out.opaque.push('scan_error:'+fpath)}
+       // Visibility of the embedding iframe applies to everything inside it;
+       // a checker cannot see a challenge behind an opacity:0/offscreen frame.
+       const fvisible=visible&&shown(w,f);
+       try{visit(cw,cd,fpath,fvisible)}catch(_){out.opaque.push('scan_error:'+fpath)}
      }
    });
    // Bind receivers only within this document and only to an unambiguous owner.
@@ -255,11 +287,18 @@ SCAN_JS = r"""(()=>{
        c.kind==='recaptcha'?'textarea[name="g-recaptcha-response"],textarea[id^="g-recaptcha-response"]':'';
      if(!sel)continue;
      let receivers=o.e?Array.from(o.e.querySelectorAll(sel)):[];
-     if(!receivers.length&&owners.filter(v=>v.c.kind===c.kind).length===1)
-       receivers=Array.from(d.querySelectorAll(sel));
+     if(!receivers.length&&o.e){
+       // A response field outside the owner is only attributable when it
+       // shares the owner's form/container. A document-wide sole field is
+       // often a stale field from an unrelated form.
+       const container=typeof o.e.closest==='function'?o.e.closest('form,[data-captcha-container]'):null;
+       if(container)receivers=Array.from(container.querySelectorAll(sel));
+     }
      c.receiverCount=receivers.length;
      if(receivers.length===1){
        c.receiver=path+'|field:'+key(receivers[0]);
+       c.receiverWitness=nodeWitness(w,receivers[0]);
+       if(!c.receiverWitness)c.invalid=true;
        const cb=callbacks(w,o.e,receivers[0]);
        markCallbacks(c,cb,w);
        Object.assign(handles[c.id],{receiver:receivers[0],callbacks:cb.refs});
@@ -273,17 +312,23 @@ SCAN_JS = r"""(()=>{
        if(!images.includes(img))images.push(img);
    });
    images.forEach(img=>{
-     if(!shown(w,img))return;
+     if(!visible||!shown(w,img))return;
      const owner=typeof img.closest==='function'?img.closest('form,[data-captcha-container]'):null;
      const inputSel='input[data-captcha-answer],input[name="captcha"],input[name="captcha_answer"],input[id*="captcha" i]';
+     // A CSS-hidden or read-only decoy is not the answer receiver the operator
+     // sees; binding it would pay for and write a field the challenge excludes.
      const answers=Array.from((owner||img.parentElement||d).querySelectorAll(inputSel))
-       .filter(e=>e!==img&&e.type!=='hidden'&&e.type!=='password');
+       .filter(e=>e!==img&&e.type!=='hidden'&&e.type!=='password'&&!e.disabled&&!e.readOnly&&shown(w,e));
      const id=path+'|image:'+key(img),c={id,kind:'image',sitekey:'',visible:true,frame:'',
        receiver:'',receiverCount:answers.length,callbacks:[],callbackHints:[],body:'',
+       ownerWitness:nodeWitness(w,img),receiverWitness:'',
        imageStatus:'image_unreadable',src:attr(img,'src'),bodyHash:'',invalid:false};
+     if(!c.ownerWitness)c.invalid=true;
      const h={owner:owner||img.parentElement,w,d};
      if(answers.length===1){
        c.receiver=path+'|field:'+key(answers[0]);h.receiver=answers[0];
+       c.receiverWitness=nodeWitness(w,answers[0]);
+       if(!c.receiverWitness)c.invalid=true;
        const cb=callbacks(w,owner||img.parentElement,answers[0]);
        markCallbacks(c,cb,w);h.callbacks=cb.refs;
      }
@@ -315,16 +360,17 @@ SCAN_JS = r"""(()=>{
    });
    // Canvas-source and CSS-only image challenges must not be "no challenge".
    d.querySelectorAll('canvas[data-captcha],canvas.captcha,canvas[id*="captcha" i],.captcha-image,[data-captcha-background]').forEach(e=>{
-     if(!shown(w,e)||e.tagName==='IMG')return;
+     if(!visible||!shown(w,e)||e.tagName==='IMG')return;
      // A visible marked child was already scanned above. An unshown child
      // still leaves visible wrapper evidence that cannot be treated as absent.
      if(Array.from(e.querySelectorAll('img')).some(img=>shown(w,img)))return;
      const id=path+'|unsupported-image:'+key(e);
      add({id,kind:'image',sitekey:'',visible:true,receiver:'',receiverCount:0,
-       callbacks:[],callbackHints:[],body:'',imageStatus:'image_unreadable'}, {});
+       callbacks:[],callbackHints:[],body:'',imageStatus:'image_unreadable',
+       ownerWitness:nodeWitness(w,e),receiverWitness:'',invalid:false}, {});
    });
  };
- try{visit(window,document,'top')}catch(_){out.opaque.push('scan_error')}
+ try{visit(window,document,'top',true)}catch(_){out.opaque.push('scan_error')}
  return {snapshot:out,handles,docs,wins};
 })"""
 DETECT_JS = "(()=>JSON.stringify((" + SCAN_JS + ")().snapshot))()"

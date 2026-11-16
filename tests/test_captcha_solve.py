@@ -109,13 +109,15 @@ class Document{
 function makeWindow(spec){
   const doc=new Document(),w={document:doc,location:{href:spec.url||'https://example.test/apply'},
     innerHeight:900,getComputedStyle:e=>({display:e.attrs.hidden?'none':'block',
-      visibility:'visible',opacity:'1'})};
+      visibility:'visible',opacity:e.attrs.hidden?'0':String(e.attrs.opacity??'1')})};
   windows.push(w);doc.hostWindow=w;
   if(spec.password)doc.documentElement.appendChild(new Element('input',{type:'password'},doc));
   if(spec.enterprise)w.grecaptcha={enterprise:{}};
   const addFrame=(desc,parent)=>{
     const el=parent.appendChild(new Element('iframe',{src:desc.src||'',title:desc.title||'',
       id:desc.id||''},doc));
+    if(desc.hidden)el.attrs.hidden=true;
+    if(desc.opacity!==undefined)el.attrs.opacity=desc.opacity;
     if(desc.crossOrigin)el.contentWindow=null;
     else el.contentWindow=makeWindow(desc);
     return el;
@@ -128,7 +130,8 @@ function makeWindow(spec){
       'data-cdata':widget.cdata||'','data-s':widget.s||''};
     if(widget.callback)attrs['data-callback']=widget.callback;
     if(widget.client)attrs['data-client-id']=widget.client;
-    const owner=doc.documentElement.appendChild(new Element('div',attrs,doc));
+    const base=widget.form?doc.documentElement.appendChild(new Element('form',{},doc)):doc.documentElement;
+    const owner=base.appendChild(new Element('div',attrs,doc));
     if(widget.hidden)owner.attrs.hidden=true;
     if(widget.enterprise)w.grecaptcha={enterprise:{}};
     const receiver=widget.kind==='turnstile'?'cf-turnstile-response':'g-recaptcha-response';
@@ -139,6 +142,10 @@ function makeWindow(spec){
       if(widget.eventBehavior==='clear')attrs['data-event-clear']=true;
       if(widget.eventBehavior==='replace_callback')attrs['data-event-replace-callback']=true;
       owner.appendChild(new Element(widget.kind==='turnstile'?'input':'textarea',attrs,doc));
+    }
+    if(widget.staleReceiverForm){
+      const stale=doc.documentElement.appendChild(new Element('form',{},doc));
+      stale.appendChild(new Element('textarea',{name:receiver},doc));
     }
     if(widget.receiverCallback)w[widget.receiverCallback]=()=>{counts.callbacks++};
     if(widget.duplicateReceiver)owner.appendChild(new Element('textarea',{name:receiver},doc));
@@ -183,6 +190,12 @@ function makeWindow(spec){
     if(im.hidden)img.attrs.hidden=true;
     if(im.inputs!==0)for(let i=0;i<(im.inputs||1);i++)
       form.appendChild(new Element('input',{name:'captcha'},doc));
+    if(im.hiddenDecoy)for(let i=0;i<im.hiddenDecoy;i++){
+      const decoy=new Element('input',{name:'captcha'},doc);
+      decoy.attrs.hidden=true;
+      form.appendChild(decoy);
+    }
+    if(im.visibleOther)form.appendChild(new Element('input',{name:im.visibleOther},doc));
     if(im.callback)form.attrs['data-callback']=im.callback;
   }
   w.fetch=(..._args)=>{counts.fetches++;return {ok:true}};
@@ -211,6 +224,21 @@ if(request.inject){
     const d=top.document;
     const el=d.documentElement.appendChild(new Element('iframe',{src:'https://example.test/protected/login'},d));
     el.contentWindow=makeWindow({url:'https://example.test/protected/login'});
+  }
+  if(request.drift==='replace_widget'){
+    // Reactive re-render: same position, attributes and window callback, but a
+    // new owner/receiver node pair. Only node identity can tell them apart.
+    const doc=windows[windows.length-1].document;
+    const owner=doc.querySelector('.g-recaptcha,.cf-turnstile,.h-captcha');
+    if(owner&&owner.parentElement){
+      const parent=owner.parentElement,idx=parent.children.indexOf(owner);
+      const clone=new Element(owner.tagName.toLowerCase(),{...owner.attrs},doc);
+      for(const child of owner.children){
+        const c2=new Element(child.tagName.toLowerCase(),{...child.attrs},doc);
+        c2.value=child.value;clone.appendChild(c2);
+      }
+      clone.parentElement=parent;parent.children[idx]=clone;
+    }
   }
   const chosen=request.selected||detection.found.find(c=>c.visible)?.id||'none';
   const approved=JSON.parse(JSON.stringify(detection));
@@ -460,7 +488,10 @@ def test_image_near_limit_keeps_injection_argument_compact(tmp_path, monkeypatch
         if expression == cs.DETECT_JS:
             return detected
         exprs.append(expression)
-        return _node(fixture, inject=True, direct=expression, answer="AB12")["injection"]
+        # Evaluate in its own realm: node-identity witnesses cannot cross a
+        # process boundary, and run's approved snapshot comes from the first
+        # realm. The injection result shape is what this test consumes.
+        return _node(fixture, inject=True, answer="AB12")["injection"]
 
     def fake_solve(task, key):
         assert task["type"] == "ImageToTextTask"
@@ -702,3 +733,81 @@ def test_actual_js_large_intrinsic_image_refused_before_canvas(width, height):
     with pytest.raises(cs.CaptchaError) as exc:
         cs.pick_challenge(page["detection"]["found"])
     assert (exc.value.code, exc.value.reason) == (4, "image_unreadable")
+
+
+def test_actual_js_detached_same_key_provider_frame_is_not_coalesced():
+    # A document-level provider iframe with the same key but different metadata
+    # is unrelated to the visible owner; folding it in would pay for the wrong
+    # challenge and call the owner's callback.
+    fixture = {
+        "url": "https://example.test/apply",
+        "widgets": [{"kind": "recaptcha", "sitekey": "K", "callback": "complete"}],
+        "providers": [{"src": "https://www.google.com/recaptcha/enterprise/anchor?k=K&s=S&sa=apply"}],
+    }
+    page = _node(fixture)
+    visible = [c for c in page["detection"]["found"] if c["visible"]]
+    assert len(visible) == 2
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert (exc.value.code, exc.value.reason) == (4, "unsupported_widget")
+
+
+@pytest.mark.parametrize("invisible", [{"hidden": True}, {"opacity": 0}])
+def test_actual_js_hidden_embedding_frame_is_not_selected(invisible):
+    fixture = {"url": "https://example.test/apply", "frames": [{
+        "url": "https://example.test/one", **invisible,
+        "widgets": [{"kind": "recaptcha", "sitekey": "K", "callback": "complete"}]}]}
+    page = _node(fixture, inject=True, answer="AB12")
+    assert page["detection"]["found"]
+    assert all(not c["visible"] for c in page["detection"]["found"])
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert exc.value.code == cs.EXIT_NONE
+    assert page["injection"]["reason"] == "binding_changed"
+    assert page["counts"]["callbacks"] == 0
+    assert "AB12" not in page["values"]
+
+
+@pytest.mark.parametrize("visible_input", [True, False])
+def test_actual_js_css_hidden_image_answer_decoy_not_bound(visible_input):
+    fixture = {"url": "https://example.test/apply", "images": [{
+        "src": _URI, "inputs": 1 if visible_input else 0,
+        "hiddenDecoy": 1, "visibleOther": "answer"}]}
+    page = _node(fixture, inject=True, answer="AB12")
+    challenge = page["detection"]["found"][0]
+    if visible_input:
+        assert challenge["receiverCount"] == 1
+        picked = cs.pick_challenge(page["detection"]["found"])
+        assert cs.build_task(picked, fixture["url"])["type"] == "ImageToTextTask"
+        assert page["injection"]["reason"] == "callback_missing"
+        assert "AB12" in page["values"]
+    else:
+        assert challenge["receiverCount"] == 0
+        with pytest.raises(cs.CaptchaError) as exc:
+            cs.pick_challenge(page["detection"]["found"])
+        assert exc.value.reason == "image_unreadable"
+        assert page["injection"]["reason"] == "binding_changed"
+        assert "AB12" not in page["values"]
+    assert page["counts"]["callbacks"] == 0
+
+
+def test_actual_js_same_position_replacement_is_binding_changed():
+    page = _node(_widget(), inject=True, drift="replace_widget")
+    assert page["injection"]["reason"] == "binding_changed"
+    assert page["counts"]["callbacks"] == 0
+    assert "SYNTHETIC_TOKEN" not in page["values"]
+
+
+def test_actual_js_cross_form_stale_receiver_is_not_bound():
+    # The owner's form has no response field; a stale field in an unrelated
+    # form must not be treated as the selected widget's receiver.
+    fixture = {"url": "https://example.test/apply", "widgets": [{
+        "kind": "recaptcha", "sitekey": "K", "callback": "complete",
+        "form": True, "receiver": False, "staleReceiverForm": True,
+        "provider": "https://www.google.com/recaptcha/api2/anchor?k=K"}]}
+    page = _node(fixture)
+    assert len(page["detection"]["found"]) == 1
+    assert page["detection"]["found"][0]["receiverCount"] == 0
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert (exc.value.code, exc.value.reason) == (4, "unsupported_widget")
