@@ -298,13 +298,13 @@ def _processed(path: Path, key: str, validity: str, uid: int) -> bool:
                 and f"{validity}:{uid}" in account.get("processed", []))
 
 
-def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -> None:
+def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -> int | None:
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
         if (not account or _generation(validity) is None
                 or _generation(account.get("uidvalidity")) != _generation(validity)):
-            return
+            return None
         if account.get("uid_floor") is None:
             floor = min(selected) - 1 if selected else 0
             account["uid_floor"] = floor
@@ -313,6 +313,8 @@ def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -
             # a partial scan must not lose an unvisited UID if SEARCH later omits it.
             account["unresolved_uids"] = sorted(set(account.get("unresolved_uids", [])) | set(selected))
             _write_state(path, state)
+        # Overlapping first scans must use the floor that actually won the write.
+        return int(account["uid_floor"])
 
 
 def _mark_unresolved(path: Path, key: str, validity: str, uid: int) -> None:
@@ -339,6 +341,10 @@ def _commit_uid(path: Path, key: str, validity: str, uid: int,
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
         if not account or _generation(account.get("uidvalidity")) != _generation(validity):
+            return False
+        # Selection may predate another first scan's floor; fence at commit too.
+        floor = account.get("uid_floor")
+        if floor is not None and uid <= int(floor):
             return False
         identity = f"{validity}:{uid}"
         processed = set(account.get("processed", []))
@@ -496,7 +502,9 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                             if type(uid) is int and uid > 0})
             # A persisted floor survives a partial/crashed initial scan.
             uids = found[-200:] if floor is None else [uid for uid in found if uid > floor]
-            _set_first_floor(path, key, validity, uids)
+            committed_floor = _set_first_floor(path, key, validity, uids)
+            # The winning scan may have established a higher floor during SEARCH.
+            uids = [uid for uid in uids if committed_floor is not None and uid > committed_floor]
         else:
             cursor = int(account.get("last_uid", 0))
             floor = int(floor or 0)
