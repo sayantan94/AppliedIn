@@ -172,6 +172,19 @@ def save_tailored_resume(tailored_latex: str, tool_context: ToolContext) -> dict
                     "message": "PDF compilation failed. Fix the LaTeX syntax and "
                                "re-save the full document; prior artifacts are retained."}
 
+    # The final candidate (after profile application and any render repair) must
+    # not carry an agent tell. Checked before the first write, so a rejected
+    # candidate leaves the previous artifacts and tracking state untouched.
+    from tools.freetext_check import tells
+    hits = tells(tailored_latex)
+    if hits:
+        log.warning("tailored résumé for %s carries agent tells %s; not saved", pk, hits)
+        return {"ok": False, "reason": "agent_tells", "tells": hits,
+                "message": "The résumé contains phrases that read as written by an AI "
+                           f"agent: {', '.join(hits)}. Reword those passages in plain "
+                           "prose (keep every fact and bullet) and re-save the full "
+                           "document; prior artifacts are retained."}
+
     # No write precedes this point. The initial, profile-adjusted and repaired
     # candidates all pass the same active anchor/bullet checks.
     # Generation-specific keys preserve prior evidence even if a concurrent
@@ -323,8 +336,17 @@ async def apply_to_job(tool_context: ToolContext) -> dict:
     from tools.browser_runtime import configuration
     drafted = result.pop('drafted', None) or {}
     if configuration()['engine'] != 'browser_skill':
+        # Storage boundary only: this runs after apply(...) above, so it cannot
+        # know what that call already typed. It keeps a tell-bearing draft out of
+        # the answer bank, where it would be reused for future applications.
+        from tools.freetext_check import tells
         for q, a in drafted.items():
             from core.models import AnswerScope
+            hits = tells(str(a))
+            if hits:
+                log.warning("writer answer for %s not saved to the answer bank: tells %s",
+                            pk, hits)
+                continue
             stores.answer_bank.put(q, a, AnswerScope.COMPANY, company=company, source='writer')
     return result
 
