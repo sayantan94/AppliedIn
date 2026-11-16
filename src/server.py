@@ -293,7 +293,7 @@ def _to_ui(row: dict, artifacts) -> dict:
     events = row.get("events") or []
     return {
         "pk": row.get("pk"),
-        "company": row.get("company", ""),
+        "company": row.get("display_company") or row.get("company", ""),
         "title": row.get("title", ""),
         "status": row.get("status", ""),
         "match_score": row.get("match_score"),
@@ -451,6 +451,207 @@ max_new_per_run: {int(prefs.max_new_per_run)}
 # topics) as extra context to reword bullets toward each JD.
 github: {prefs.github or '""'}
 """
+
+
+def _manual_role_identity(url: str) -> dict | None:
+    """Closed URL/tenant/posting grammar for manual row identity, not a reader."""
+    import hashlib
+    import re
+    from urllib.parse import parse_qsl, urlsplit
+
+    token = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+    try:
+        u = urlsplit(url)
+        host = (u.hostname or "").lower().rstrip(".")
+        if (u.scheme not in {"http", "https"} or not host or not
+                re.fullmatch(r"[a-z0-9.-]+", host) or ".." in host
+                or u.username is not None or u.password is not None
+                or u.port not in (None, 80 if u.scheme == "http" else 443)
+                or "\\" in u.path or "%" in u.path or "//" in u.path):
+            return None
+        parts = [part for part in u.path.split("/") if part]
+        query = parse_qsl(u.query, keep_blank_values=True)
+    except ValueError:
+        return None
+
+    # Only explicit LinkedIn *job* identifiers are aliases. trackingId, generic
+    # numbers and arbitrary jobId query parameters do not prove an alias.
+    aliases = [v for k, v in query if k.lower().replace("-", "_")
+               in {"linkedin_job_id", "linkedinjobid", "li_job_id"}]
+    if any(not re.fullmatch(r"[0-9]{6,20}", value) for value in aliases):
+        return None
+    linkedin_id = aliases[0] if aliases else ""
+    if any(value != linkedin_id for value in aliases):
+        return None
+
+    ats, tenant, posting, context = "custom", "", "", ""
+    if host in {"linkedin.com", "www.linkedin.com"}:
+        if len(parts) != 3 or parts[:2] != ["jobs", "view"] or not re.fullmatch(
+                r"[0-9]{6,20}", parts[2]):
+            return None
+        if linkedin_id and linkedin_id != parts[2]:
+            return None
+        return {"ats": "linkedin", "company": "", "job_id": "",
+                "linkedin_id": parts[2]}
+
+    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io",
+                "job-boards.eu.greenhouse.io"}:
+        ats = "greenhouse"
+        if len(parts) != 3 or parts[1] != "jobs":
+            return None
+        tenant, posting = parts[0], parts[2]
+    elif host in {"jobs.ashbyhq.com", "jobs.lever.co", "jobs.eu.lever.co"}:
+        ats = "ashby" if host == "jobs.ashbyhq.com" else "lever"
+        if len(parts) != 2:
+            return None
+        tenant, posting = parts
+    elif host == "apply.workable.com":
+        ats = "workable"
+        if len(parts) != 3 or parts[1] != "j":
+            return None
+        tenant, posting = parts[0], parts[2]
+    elif host == "jobs.smartrecruiters.com":
+        ats = "smartrecruiters"
+        if len(parts) != 2:
+            return None
+        tenant, posting = parts[0], parts[1].split("-", 1)[0]
+    else:
+        workday = re.fullmatch(r"([a-z0-9_-]+)\.(wd[0-9]+)\.myworkdayjobs\.com", host)
+        eightfold = re.fullmatch(r"([a-z0-9_-]+)\.eightfold\.ai", host)
+        personio = re.fullmatch(r"([a-z0-9_-]+)\.jobs\.personio\.(?:de|com)", host)
+        if workday:
+            ats, tenant = "workday", workday[1]
+            if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+                parts = parts[1:]
+            if len(parts) != 4 or parts[1] != "job":
+                return None
+            context = parts[0]
+            posting = "/".join(parts[2:])
+        elif eightfold:
+            ats, tenant = "eightfold", eightfold[1]
+            if len(parts) != 3 or parts[:2] != ["careers", "job"]:
+                return None
+            posting = parts[2]
+        elif personio:
+            ats, tenant = "personio", personio[1]
+            if len(parts) != 2 or parts[0] != "job" or not parts[1].isdigit():
+                return None
+            posting = parts[1]
+
+    if ats != "custom":
+        if (not token.fullmatch(tenant)
+                or any(not token.fullmatch(p) for p in posting.split("/"))
+                or (context and not token.fullmatch(context))):
+            return None
+        # The tenant (not the vendor hostname or body-supplied company) owns
+        # the readable employer. Freeze this component in the storage pk.
+        label = tenant
+        # A Workday posting can contain path segments. The separator is
+        # outside the accepted token alphabet, so replacing '/' is bijective.
+        identity_id = f"{ats}:{tenant.lower()}:{context.lower()}:{posting.replace('/', '.')}"
+    else:
+        # Unknown sites are *not* promoted to a vendor. Use only the owning
+        # registered hostname and exact path/query for a conservative identity.
+        labels = host.split(".")
+        if len(labels) < 2 or not parts:
+            return None
+        label = labels[-3] if len(labels) >= 3 and labels[-2:] in (
+            ["co", "uk"], ["com", "au"]) else labels[-2]
+        if not token.fullmatch(label):
+            return None
+        meaningful = sorted((k, v) for k, v in query
+                            if not k.lower().startswith("utm_")
+                            and k.lower() not in {"trackingid", "fbclid", "gclid"}
+                            and k.lower().replace("-", "_") not in {
+                                "linkedin_job_id", "linkedinjobid", "li_job_id"})
+        signature = repr((host, u.path.rstrip("/"), meaningful))
+        identity_id = "custom:" + hashlib.sha256(signature.encode()).hexdigest()[:24]
+
+    if label.lower() in {"company", "unknown", "jobs", "job", "careers",
+                         "apply", "greenhouse", "ashby", "lever", "linkedin",
+                         "workday", "workable", "personio", "smartrecruiters"}:
+        return None
+    company = " ".join(p for p in re.split(r"[-_]+", label) if p).title()
+    if not company or company.endswith("#"):
+        return None
+    return {"ats": ats, "company": company, "job_id": identity_id,
+            "linkedin_id": linkedin_id}
+
+
+def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tuple[dict | None, bool]:
+    """Prefer canonical pks; recover historic rows using stored URL/hash proof.
+
+    A LinkedIn query parameter is not proof that two distinct ATS postings
+    are the same. Cross-ATS merges must not be driven by that parameter.
+    """
+    import hashlib
+    from core.ids import make_pk
+
+    pk = (make_pk(identity["company"], identity["job_id"])
+          if identity["company"] and identity["job_id"] else "")
+    direct = tracking.get(pk) if pk else None
+    matches = {pk: direct} if direct else {}
+
+    if identity["ats"] == "linkedin":
+        # Preserve the already-supported single linked-row lookup, while
+        # requiring its ATS identity and source verification to be intact.
+        # This is not independent LinkedIn-to-ATS equivalence evidence.
+        linkedin_id = identity["linkedin_id"]
+        for row in tracking.all():
+            if not isinstance(row, dict) or not row.get("jd_url"):
+                continue
+            previous = _manual_role_identity(row["jd_url"])
+            if (not previous or previous["linkedin_id"] != linkedin_id
+                    or not previous["company"] or not previous["job_id"]
+                    or row.get("ats") != previous["ats"]
+                    or row.get("job_id") != previous["job_id"]
+                    or (row.get("posting_guard") or {}).get("source_verified") is not True
+                    or row.get("pk") != make_pk(row.get("company") or "",
+                                               row.get("job_id") or "")):
+                continue
+            matches[row["pk"]] = row
+    elif source_url:
+        # Pre-#372 apply-role hashed the entire *stored* source URL. Prove
+        # that historic URL/hash pair before comparing parsed ATS posting IDs:
+        # decorative query/slash differences must not evade a protected row.
+        for row in tracking.all():
+            if (not isinstance(row, dict) or row.get("ats") != "custom"
+                    or not isinstance(row.get("jd_url"), str) or not row["jd_url"]
+                    or not isinstance(row.get("job_id"), str)
+                    or not isinstance(row.get("company"), str) or not row["company"]
+                    or row["job_id"] != hashlib.sha1(
+                        row["jd_url"].encode()).hexdigest()[:12]
+                    or row.get("pk") != make_pk(row["company"], row["job_id"])):
+                continue
+            previous = _manual_role_identity(row["jd_url"])
+            # The canonical job_id includes vendor, tenant, context and posting.
+            # No rewrite of the old pk, job_id, company or source is warranted.
+            if (not previous or previous["ats"] != identity["ats"]
+                    or previous["job_id"] != identity["job_id"]):
+                continue
+            matches[row["pk"]] = row
+
+    if len(matches) > 1:
+        return None, True
+    return next(iter(matches.values()), None), False
+
+
+def _manual_update_display(stores, pk: str, updates: dict) -> bool:
+    """Patch presentation fields without resetting status or submission state."""
+    from core.storage.base import REPAIR_READER_FIELDS
+
+    current = stores.tracking.get_current(pk)
+    if not current or current.get("status") not in {
+        "found", "skipped", "error", "failed", "tailored",
+    }:
+        return False
+    patch = {k: v for k, v in updates.items()
+             if v is not None and current.get(k) != v}
+    if not patch:
+        return True
+    reader = {k: current[k] for k in REPAIR_READER_FIELDS if k in current}
+    return bool(stores.tracking.update_if_status(
+        pk, current["status"], patch, expected_reader=reader))
 
 
 def _commit_manual_posting(pk: str, stores, inspected: dict) -> bool:
@@ -1777,53 +1978,23 @@ def create_app() -> FastAPI:
 
     @app.post("/actions/tailor-text")
     def tailor_text(body: dict, background: BackgroundTasks):
-        """Tailor a résumé to text you PASTE, with no URL and no application.
-
-        The case this exists for: a recruiter messages you on LinkedIn with the
-        role described in the message itself. There is nothing to fetch, often no
-        posting to link to, and you want a résumé to send back rather than an
-        application to submit. `/actions/apply-role` cannot serve that — it starts
-        from a URL and ends at an approval gate.
-
-        Same scorer, writer and truthfulness guard as every other tailor, so the
-        résumé it produces is grounded in the same approved facts. It stops at
-        TAILORED and never queues an apply: there is nothing to apply to.
-        """
+        """Tailor a pasted JD only; its text identity never becomes an ATS job."""
         import hashlib
-
-        from core.models import JobRecord
+        from core.models import JobRecord, Status
+        from core.storage.base import REPAIR_READER_FIELDS
+        from tools import posting_guard as pg
 
         text = ((body or {}).get("text") or "").strip()
         if len(text) < 80:
-            return {"ok": False,
-                    "error": "paste the role description — a line or two is not "
-                             "enough to tailor against"}
-        company = ((body or {}).get("company") or "").strip() or "Reach out"
+            return {"ok": False, "error": "paste the role description — a line or two is not enough to tailor against"}
+        company = ((body or {}).get("company") or "").strip().rstrip("#").strip() or "Reach out"
         title = ((body or {}).get("title") or "").strip() or "Role from a message"
-        # Hash the TEXT, so pasting the same message twice re-tailors one row
-        # instead of littering the board with near-duplicates.
-        job_id = "text-" + hashlib.sha1(text.encode()).hexdigest()[:12]
-
+        digest = hashlib.sha1(text.encode()).hexdigest()
+        job_id = "text-" + digest
         stores = make_stores(settings)
-        job = JobRecord(company=company, job_id=job_id, title=title,
-                        jd_url="", jd_text=text, ats="custom")
-        pk = job.pk
-        if not stores.tracking.put_new(job):
-            if _review_row_conflict(stores.tracking.get(pk) or {}):
-                return {"ok": False, "error": "Submit review is held or closed; start a separate fresh application run."}
-            if submit_hold.blocked(pk, stores.tracking.get(pk) or {}, tracking=stores.tracking):
-                return {"ok": False, "error": "possible submission; check the employer portal before retrying"}
-            from tools import posting_guard as pg
-
-            if not _commit_manual_posting(pk, stores, pg.analyze(text)):
-                return {"ok": False, "error": "posting_guard_conflict",
-                        "note": "The posting changed or is protected; refresh before tailoring."}
-            stores.tracking.set_status(pk, Status.FOUND, title=title,
-                                       skip_reason="", fail_kind="", fail_reason="")
 
         def _run() -> None:
             import logging
-
             from agent.run import run_job
             from core.events import emit
 
@@ -1839,68 +2010,162 @@ def create_app() -> FastAPI:
             finally:
                 _RUNNING["process"] = False
 
+        # Do not use the generic JD hash index: ATS postings may share this
+        # text and must never become text-only rows.
+        existing = [row for row in stores.tracking.all()
+                    if row.get("ats") == "custom" and not row.get("jd_url")
+                    and row.get("job_id") in {job_id, "text-" + digest[:12]}]
+        if len(existing) > 1:
+            return {"ok": False, "error": "ambiguous_text_identity"}
+        row = existing[0] if existing else None
+        if row:
+            pk = row["pk"]
+            if _review_row_conflict(row):
+                return {"ok": False, "error": "Submit review is held or closed; start a separate fresh application run."}
+            if submit_hold.blocked(pk, row, tracking=stores.tracking):
+                return {"ok": False, "error": "possible submission; check the employer portal before retrying"}
+            if row.get("status") not in {"found", "skipped", "error", "failed", "tailored"}:
+                return {"ok": False, "error": "protected_tracking_state"}
+            if not _commit_manual_posting(pk, stores, pg.analyze(text)):
+                return {"ok": False, "error": "posting_guard_conflict"}
+            if not _manual_update_display(stores, pk, {
+                    "title": title, "display_company": company}):
+                return {"ok": False, "error": "tracking_conflict"}
+            # Only a status-conditional patch can restage a prior tailored or
+            # skipped text card; set_status could overwrite in-flight work.
+            current = stores.tracking.get_current(pk)
+            if (not current or _review_row_conflict(current)
+                    or submit_hold.blocked(pk, current, tracking=stores.tracking)
+                    or current.get("status") not in {
+                        "found", "skipped", "error", "failed", "tailored"
+                    }):
+                return {"ok": False, "error": "tracking_conflict"}
+            # Repeating a safe text-only role requests actual re-tailoring:
+            # restore FOUND only alongside a new background dispatch.
+            reader = {key: current[key] for key in REPAIR_READER_FIELDS
+                      if key in current}
+            if not stores.tracking.update_if_status(
+                    pk, current["status"],
+                    {"status": Status.FOUND, "skip_reason": "",
+                     "fail_kind": "", "fail_reason": ""},
+                    expected_reader=reader):
+                return {"ok": False, "error": "tracking_conflict"}
+            background.add_task(_run)
+            return {"ok": True, "status": "tailoring", "pk": pk,
+                    "company": company, "title": title}
+
+        inspected = pg.analyze(text)
+        job = JobRecord(company=company, job_id=job_id, title=title,
+                        jd_url="", jd_text=inspected["text"],
+                        posting_guard=inspected["posting_guard"], ats="custom")
+        pk = job.pk
+        if not stores.tracking.put_new(job):
+            # A competing request created this identity; never reset it by
+            # unconditional set_status or schedule another background action.
+            return {"ok": False, "error": "tracking_conflict"}
+        if not _commit_manual_posting(pk, stores, inspected):
+            return {"ok": False, "error": "posting_guard_conflict"}
+
         background.add_task(_run)
         return {"ok": True, "status": "tailoring", "pk": pk,
                 "company": company, "title": title}
 
     @app.post("/actions/apply-role")
     def apply_role(body: dict, background: BackgroundTasks):
-        """Single-role workflow: paste a job URL (Greenhouse/Lever/Ashby/…) — we
-        create the row, fetch the JD, score + tailor a résumé to it, and (in
-        gated mode) stop at 'ready to apply' so you approve the submit. No
-        discovery, no watchlist needed — one role, straight to a tailored résumé."""
-        import hashlib
-        from urllib.parse import urlparse
+        """Resolve a posting's employer and durable identity before any row."""
+        from core.models import JobRecord
+        from tools import jd, posting_guard as pg
 
         url = ((body or {}).get("url") or "").strip()
         if url and not url.lower().startswith(("http://", "https://")):
             url = "https://" + url
         if not url:
             return {"ok": False, "error": "a job URL is required"}
-        from core.models import JobRecord
-        from discovery.handler import company_for_url
-        # Proper company: a watchlist match by ATS host beats the ugly URL slug.
-        company = ((body or {}).get("company") or "").strip() or company_for_url(url)
-        if not company:
-            company = _company_from_url(url)
-        title = ((body or {}).get("title") or "").strip() or "Role from URL"
-
-        job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
+        identity = _manual_role_identity(url)
+        if not identity:
+            return {"ok": False, "error": "posting_identity_unresolved"}
         stores = make_stores(settings)
-        job = JobRecord(company=company, job_id=job_id, title=title,
-                        jd_url=url, jd_text=title, ats="custom")
-        pk = job.pk
-        is_new = stores.tracking.put_new(job)
-        if not is_new:  # already tracked — re-tailor it from scratch
-            if _review_row_conflict(stores.tracking.get(pk) or {}):
+        row, ambiguous = _manual_existing_role(stores.tracking, identity, url)
+        if ambiguous:
+            return {"ok": False, "error": "ambiguous_posting_identity"}
+        if not row and not identity["company"]:
+            # A standalone LinkedIn ID proves a role, not its employer.
+            return {"ok": False, "error": "employer_identity_unverified"}
+        if row:
+            pk = row["pk"]
+            if _review_row_conflict(row):
                 return {"ok": False, "error": "Submit review is held or closed; start a separate fresh application run."}
-            if submit_hold.blocked(pk, stores.tracking.get(pk) or {}, tracking=stores.tracking):
+            if submit_hold.blocked(pk, row, tracking=stores.tracking):
                 return {"ok": False, "error": "possible submission; check the employer portal before retrying"}
-            # Do not reset a live/terminal row before its guarded compare.
-            # The background reader commits the bound JD first.
+            if row.get("status") not in {"found", "skipped", "error", "failed", "tailored"}:
+                return {"ok": False, "error": "protected_tracking_state"}
+            # Keep the original source for the exact matched_source_witness:
+            # an otherwise equivalent URL with a new query is not a witness.
+            read_url = row.get("jd_url") or ""
+            company = row["company"]
+        else:
+            read_url = url
+            company = identity["company"]
+        if not read_url:
+            return {"ok": False, "error": "posting_source_unresolved"}
+
+        # Exactly one existing reader call, before insert or success. A failed
+        # read must not leave a placeholder pk or a source-unverified JD.
+        try:
+            meta = jd.fetch_jd_meta(read_url)
+        except Exception:
+            return {"ok": False, "error": "posting_reader_unavailable"}
+        if (not isinstance(meta, dict)
+                or not pg.valid(meta.get("text"), meta.get("posting_guard"))
+                or not jd.matched_source_witness({"jd_url": read_url}, meta)):
+            return {"ok": False, "error": "posting_source_unverified"}
+        title = (meta.get("title") or ((body or {}).get("title") or "").strip()
+                 or (row or {}).get("title") or "Role from URL")
+        if not isinstance(title, str):
+            return {"ok": False, "error": "posting_title_invalid"}
+
+        if row:
+            if not _commit_manual_posting(pk, stores, meta):
+                return {"ok": False, "error": "posting_guard_conflict"}
+            patch = {"title": title}
+            # #369 does not promise posted_at; never invent a timestamp.
+            if isinstance(meta.get("posted_at"), str) and meta["posted_at"]:
+                patch["posted_at"] = meta["posted_at"]
+            if not _manual_update_display(stores, pk, patch):
+                return {"ok": False, "error": "tracking_conflict"}
+            return {"ok": True, "status": "existing", "pk": pk,
+                    "company": company, "title": title}
+
+        # A new row is not source-verified until the guarded compare commits.
+        # On a failed compare it must retain the untrusted placeholder JD.
+        pending = pg.analyze("", source_required=True)
+        job = JobRecord(company=company, job_id=identity["job_id"], title=title,
+                        jd_url=read_url, jd_text=pending["text"],
+                        posting_guard=pending["posting_guard"], ats=identity["ats"],
+                        posted_at=meta.get("posted_at") or "")
+        pk = job.pk
+        if not stores.tracking.put_new(job):
+            return {"ok": False, "error": "tracking_conflict"}
+        if not _commit_manual_posting(pk, stores, meta):
+            # Historical apply-role callers expect a persisted new card and a
+            # background task. Never score it after a failed guarded write.
+            def _guard_conflict() -> None:
+                import logging
+                logging.getLogger("server").warning(
+                    "apply-role: posting guard conflict for %s; scorer not started", pk)
+
+            background.add_task(_guard_conflict)
+            return {"ok": True, "status": "found", "pk": pk,
+                    "company": company, "title": title,
+                    "warning": "posting_guard_conflict"}
 
         def _run() -> None:
             import logging
-
             from agent.run import run_job
             from core.events import emit
-            from tools.jd import fetch_jd_meta
-            nonlocal company, title
+
             _RUNNING["process"] = True
             try:
-                # Fetch the page to get the REAL title (and company if still unknown)
-                # so the card reads "Rivian / Staff SWE - AI Platform", not
-                # "Rivianvw.Tech / Role from URL".
-                meta = fetch_jd_meta(url)
-                if meta.get("title"):
-                    title = meta["title"]
-                if not _commit_manual_posting(pk, stores, meta):
-                    logging.getLogger("server").warning(
-                        "apply-role posting guard changed or could not be committed for %s", pk)
-                    return
-                stores.tracking.set_status(
-                    pk, Status.FOUND, title=title, skip_reason="",
-                    fail_kind="", fail_reason="")
                 emit("running", agent="workflow", company=company, pk=pk,
                      detail=f"▶ single-role: scoring + tailoring {title} @ {company}…")
                 run_job(pk, stores)
@@ -1912,7 +2177,8 @@ def create_app() -> FastAPI:
                 _RUNNING["process"] = False
 
         background.add_task(_run)
-        return {"ok": True, "status": "running", "pk": pk, "company": company, "title": title}
+        return {"ok": True, "status": "running", "pk": pk,
+                "company": company, "title": title}
 
     @app.post("/actions/watchlist")
     def watchlist_add(body: dict):
@@ -2815,6 +3081,7 @@ def create_app() -> FastAPI:
 
         return {"waiting": Verification(make_stores(settings).tracking.r).pending()}
 
+    @app.post("/actions/skip/{pk:path}")
     @app.post("/actions/skip/{pk}")
     def skip(pk: str):
         """Decline a job: mark it skipped AND take it out of the apply queue.
@@ -2827,7 +3094,9 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue
 
         stores = make_stores(settings)
-        row = stores.tracking.get(pk) or {}
+        row = stores.tracking.get(pk)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job")
         status = str(row.get("status") or "")
 
         # An application that WENT OUT is a fact about the world, and skip is the
