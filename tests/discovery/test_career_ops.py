@@ -1089,11 +1089,12 @@ def test_scheduled_priority_flags_busy_and_failed_thread_start(board, monkeypatc
 
 
 @pytest.mark.parametrize("outcome", [
-    "missing_done", "unavailable", "stopped", "exception", "interrupted"
+    "missing_done", "unavailable", "stopped", "exception"
 ])
 def test_network_failure_never_prepares_and_finalized_error_waits(
     board, monkeypatch, outcome,
 ):
+    """Ordinary finalized failures must not hammer directories every tick."""
     network, stores, clock, _ = _network_fixture(board, monkeypatch)
     payloads = []
 
@@ -1115,9 +1116,7 @@ def test_network_failure_never_prepares_and_finalized_error_waits(
         }
         if outcome == "exception":
             raise ValueError("synthetic scanner exception")
-        if outcome == "interrupted":
-            yield {"kind": "interrupted", "message": "synthetic timeout"}
-        elif outcome != "missing_done":
+        if outcome != "missing_done":
             yield {"kind": "done", "stopped": outcome == "stopped"}
 
     monkeypatch.setattr(network, "events", events)
@@ -1137,6 +1136,69 @@ def test_network_failure_never_prepares_and_finalized_error_waits(
     assert len(payloads) == 2
     assert co._read()["network_search"]["id"] == data["network_search"]["id"]
     assert co._read()["last_network"]["started_at"] == data["last_network"]["started_at"]
+
+
+
+
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+def test_network_timeout_resumes_saved_cursor_at_next_scheduled_tick(
+    board, monkeypatch, timeout_style,
+):
+    """A scanner deadline must not impose the six-hour wait on an unfinished batch."""
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=1)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    payloads = []
+
+    def timed_events(payload):
+        payloads.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if len(payloads) == 1:
+            yield {
+                "kind": "company", "source": "ashby",
+                "provider": "ashby", "company": "example-co",
+                "error": "", "read": 1, "old": 0, "undated": 0,
+                "filtered": 0, "capped": False,
+                "cursor": {"hash": "original-hash", "next": 2},
+                "jobs": [],
+            }
+            if timeout_style == "exception":
+                raise TimeoutError("synthetic scanner deadline")
+            yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+        else:
+            yield {"kind": "done", "stopped": False}
+
+    monkeypatch.setattr(network, "events", timed_events)
+    co.scheduled_tick()
+    first = co._read()
+    assert first["last_network"]["finished_at"] is None
+    assert first["last_network"]["scan_error"]
+    assert not first["last_network"]["batch_success"]
+    assert first["last_network"]["progress"]["running"] is False
+    assert first["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 2,
+    }
+    assert first["network_search"]["id"] == state["id"]
+    assert not co._RUNNING and not co._SCAN.locked()
+    stores.queue.enqueue.assert_not_called()
+
+    co.scheduled_tick()  # Same clock, so a finalized receipt would still be cooling down.
+    second = co._read()
+    assert len(payloads) == 2
+    assert payloads[0]["cursor"]["ashby"]["next"] == 1
+    assert payloads[1]["cursor"]["ashby"]["next"] == 2
+    assert payloads[1]["cutoff"] == state["cutoff"]
+    assert second["network_search"]["id"] == state["id"]
+    assert second["last_network"]["started_at"] == receipt["started_at"]
+    assert second["last_network"]["finished_at"] is not None
+    co.scheduled_tick()
+    assert len(payloads) == 2  # A finalized batch waits six hours.
 
 
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):
