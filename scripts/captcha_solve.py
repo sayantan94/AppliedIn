@@ -274,8 +274,17 @@ INJECT_JS = r"""((approved,selected,answer)=>{
    if(submitted||networkObserved)return JSON.stringify({__cs:1,reason:'possible_commit',called});
    if(!field.isConnected||field.value!==answer)
      return JSON.stringify({__cs:1,reason:'response_unverified',called});
+   // Input/change handlers may drift the binding; do not call back into it.
+   let afterEvents;
+   try{afterEvents=(""" + SCAN_JS + r""")().snapshot}
+   catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
+   if(JSON.stringify(afterEvents)!==JSON.stringify(approved))
+     return JSON.stringify({__cs:1,reason:'possible_commit',called});
    if(refs.length===1){
-     try{refs[0].fn(answer);called=1}catch(_){failed=true}
+     try{
+       const returned=refs[0].fn(answer);called=1;
+       if(returned&&typeof returned.then==='function')failed=true;
+     }catch(_){failed=true}
    }
    if(submitted||failed||networkObserved)return JSON.stringify({__cs:1,reason:'possible_commit',called});
    let after;
@@ -589,11 +598,14 @@ def run(session: str, tab: str | None, dry_run: bool, base: Path) -> tuple[int, 
         except Exception:
             # The evaluation may have already called a committing callback.
             raise CaptchaError(EXIT_UNSUPPORTED, "possible_commit") from None
+        if not isinstance(injected, dict):
+            raise CaptchaError(EXIT_UNSUPPORTED, "possible_commit")
         reason = injected.get("reason")
-        if reason:
+        if reason is not None:
             allowed = {"binding_changed", "callback_missing", "callback_ambiguous",
                        "callback_unconfirmed", "response_unverified", "possible_commit"}
-            raise CaptchaError(EXIT_UNSUPPORTED, reason if reason in allowed else "possible_commit")
+            safe = reason if isinstance(reason, str) and reason in allowed else "possible_commit"
+            raise CaptchaError(EXIT_UNSUPPORTED, safe)
         if (injected.get("result") != "injected" or injected.get("fields") != 1 or
                 injected.get("callbacks") != 1 or injected.get("called") != 1):
             raise CaptchaError(EXIT_UNSUPPORTED, "callback_unconfirmed")
@@ -620,7 +632,7 @@ def save_api_key(base: Path, key: str) -> Path:
     except FileNotFoundError:
         data = {}
     except ValueError:
-        raise CaptchaError(EXIT_ERROR, f"{path} is not a JSON object; fix it by hand first") from None
+        raise CaptchaError(EXIT_ERROR, "key_file_invalid") from None
     data["capsolver"] = {"api_key": key}
     tmp = path.with_suffix(".json.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
