@@ -812,3 +812,31 @@ def test_unverified_first_scan_prefix_never_trusts_model_or_advances(tmp_path, m
     assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
     rid = account["records"][0]["record_id"]
     assert account["record_uids"][rid] == {"uid": 12, "uidvalidity": "61"}
+
+
+
+def test_legacy_unknown_uidvalidity_has_no_commit_or_cursor_authority(tmp_path, monkeypatch):
+    credentials = fake_credentials()
+    path = tmp_path / reply_ingest.STATE_NAME
+    key = reply_ingest._account_key(credentials)
+    original = {"accounts": {key: {
+        "uidvalidity": "unknown", "last_uid": 41, "scan_pending": True,
+        "uid_floor": None, "unresolved_uids": [7], "processed": ["unknown:9"],
+        "message_ids": [], "records": [],
+    }}}
+    reply_ingest._write_state(path, original)
+    assert reply_ingest._account_state(path, key, "unknown")[1] is False
+    assert not reply_ingest._processed(path, key, "unknown", 9)
+    reply_ingest._set_first_floor(path, key, "unknown", [10, 11])
+    reply_ingest._mark_unresolved(path, key, "unknown", 8)
+    reply_ingest._advance_cursor(path, key, "unknown", 500)
+    reply_ingest._finish_scan(path, key, "unknown")
+    assert not reply_ingest._commit_uid(path, key, "unknown", 10, {
+        "record_id": "invalid", "label": "other", "pk": "UNASSIGNED"}, "")
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    unknown = FakeClient("unknown", [10])
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), unknown,
+                                    classifier=lambda *_: "other") == 0
+    assert unknown.queries == [] and unknown.fetched == []
+    assert json.loads(path.read_text()) == original
