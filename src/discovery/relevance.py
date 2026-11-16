@@ -100,7 +100,18 @@ def classify_location_fit(jd_text: str) -> str:
     if not isinstance(jd_text, str) or not jd_text.strip():
         return "unknown"
     text = jd_text[:100000]
-    segments = [part.strip() for part in re.split(r"[;\n]", text) if part.strip()]
+    segments = []
+    for clause in re.split(r"[;\n]", text):
+        clause = clause.strip()
+        if not clause:
+            continue
+        # Split sentences only after an explicit arrangement prefix. Splitting
+        # Ashby JSON metadata could turn an office label into hiring evidence.
+        if re.match(r"^(?:remote|on[- ]?site|hybrid)(?:\s|[-—–:,]|$)", clause, re.I):
+            segments.extend(p.strip() for p in re.split(r"\.\s+(?=[A-Za-z])", clause)
+                            if p.strip())
+        else:
+            segments.append(clause)
     metadata = {}
     for part in segments:
         match = re.fullmatch(
