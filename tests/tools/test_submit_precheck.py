@@ -303,6 +303,39 @@ def test_company_date_cap(world):
     assert w.invoke() == 0
 
 
+def test_normalized_policy_key_collisions_keep_stricter_caps(tmp_path, capsys):
+    # Both source spellings must be considered, not just the last JSON entry.
+    data = {
+        "CAPS": {
+            "Synthetic Studio": "2026-12-31",
+            "synthetic-studio": "2025-01-01",
+        },
+        "COUNT_CAPS": {
+            "Synthetic Studio": 2,
+            "synthetic-studio": 7,
+        },
+        "NEVER": [],
+        "PARKED": [],
+        "DISTINCT_PAIRS": [],
+    }
+    (tmp_path / "precheck-data.json").write_text(
+        json.dumps(data), encoding="utf-8",
+    )
+
+    policy = guard.load_policy(tmp_path)
+
+    assert policy.CAPS == {
+        "synthetic studio": datetime(2026, 12, 31, tzinfo=UTC),
+    }
+    assert policy.COUNT_CAPS == {"synthetic studio": 2}
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "WARNING: CAPS normalized key collision: synthetic studio",
+        "WARNING: COUNT_CAPS normalized key collision: synthetic studio",
+    ]
+
+
 def test_count_cap_fifth_sixth_and_180_day_expiry(world):
     w = world
     priors = [
