@@ -293,7 +293,8 @@ def _account_state(path: Path, key: str, validity: str) -> tuple[dict, bool]:
 def _processed(path: Path, key: str, validity: str, uid: int) -> bool:
     with WRITE_LOCK:
         account = _read_state(path).get("accounts", {}).get(key, {})
-        return (_generation(account.get("uidvalidity")) == _generation(validity)
+        return (_generation(validity) is not None
+                and _generation(account.get("uidvalidity")) == _generation(validity)
                 and f"{validity}:{uid}" in account.get("processed", []))
 
 
@@ -301,7 +302,8 @@ def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
-        if not account or _generation(account.get("uidvalidity")) != _generation(validity):
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
             return
         if account.get("uid_floor") is None:
             floor = min(selected) - 1 if selected else 0
@@ -317,7 +319,8 @@ def _mark_unresolved(path: Path, key: str, validity: str, uid: int) -> None:
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
-        if not account or _generation(account.get("uidvalidity")) != _generation(validity):
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
             return
         if f"{validity}:{uid}" in account.get("processed", []):
             return
@@ -330,7 +333,7 @@ def _mark_unresolved(path: Path, key: str, validity: str, uid: int) -> None:
 def _commit_uid(path: Path, key: str, validity: str, uid: int,
                 record: dict, message_id: str) -> bool:
     """Commit dedup, record, and exact private retry link in one locked write."""
-    if _generation(validity) is None or not isinstance(uid, int) or uid <= 0:
+    if _generation(validity) is None or type(uid) is not int or uid <= 0:
         return False
     with WRITE_LOCK:
         state = _read_state(path)
@@ -362,7 +365,8 @@ def _advance_cursor(path: Path, key: str, validity: str, uid: int) -> None:
     with WRITE_LOCK:
         state = _read_state(path)
         account = state.get("accounts", {}).get(key)
-        if not account or _generation(account.get("uidvalidity")) != _generation(validity):
+        if (not account or _generation(validity) is None
+                or _generation(account.get("uidvalidity")) != _generation(validity)):
             return
         prefix = f"{validity}:"
         processed_uids = [
