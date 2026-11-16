@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
@@ -41,6 +45,314 @@ _TAG_RX = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.S | re.I)
 _TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
 _H1_RX = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S | re.I)
 _SPLIT_RX = re.compile(r"\s[|\-–—]\s|\s+at\s+")
+_ATS_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
+_WORKABLE_LOCK = threading.Lock()
+_WORKABLE_NEXT_START = 0.0
+_WORKABLE_CLOCK = time.monotonic
+_WORKABLE_SLEEP = time.sleep
+_WORKABLE_WALL_CLOCK = time.time
+
+
+def _api_url(url: str):
+    """Return only a fixed, vendor-derived API destination for known posting shapes."""
+    try:
+        p = urlsplit(url)
+        host = (p.hostname or "").lower()
+        if (p.scheme != "https" or p.username is not None or p.password is not None
+                or p.port not in (None, 443) or p.query or p.fragment
+                or "%" in p.path or "\\" in p.path or "//" in p.path):
+            return None
+        parts = p.path.strip("/").split("/")
+        if any(not token or token in {".", ".."} for token in parts):
+            return None
+        if host.endswith(".myworkdayjobs.com"):
+            tenant, dot, region = host.partition(".")
+            if not dot or not re.fullmatch(r"wd\d+", region.removesuffix(".myworkdayjobs.com")):
+                return None
+            region = host[len(tenant) + 1:].removesuffix(".myworkdayjobs.com")
+            locale = None
+            if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+                locale, parts = parts[0], parts[1:]
+            if (len(parts) != 4 or parts[1] != "job" or
+                    not all(_ATS_TOKEN.fullmatch(x) for x in [tenant, *parts])):
+                return None
+            site, _, location, leaf = parts
+            external = f"/{site}/job/{location}/{leaf}"
+            return ("workday", url, external,
+                    (f"https://{tenant}.{region}.myworkdayjobs.com/"
+                     f"wday/cxs/{tenant}/{site}/job/{location}/{leaf}"),
+                    {"tenant": tenant, "site": site, "external": external, "locale": locale})
+        if host == "apply.workable.com":
+            if (len(parts) != 3 or parts[1] != "j"
+                    or not all(_ATS_TOKEN.fullmatch(x) for x in parts)):
+                return None
+            account, _, code = parts
+            return ("workable", url, "", "https://apply.workable.com/api/v1/widget/accounts/"
+                    f"{account}?details=true", {"account": account, "code": code})
+        if host.endswith(".eightfold.ai"):
+            tenant = host.removesuffix(".eightfold.ai")
+            if (not _ATS_TOKEN.fullmatch(tenant) or len(parts) != 3
+                    or parts[:2] != ["careers", "job"] or not _ATS_TOKEN.fullmatch(parts[2])):
+                return None
+            return ("eightfold", url, "", f"https://{host}/api/apply/v2/jobs/{parts[2]}",
+                    {"tenant": tenant, "id": parts[2]})
+        for suffix in (".jobs.personio.de", ".jobs.personio.com"):
+            if host.endswith(suffix):
+                org = host[:-len(suffix)]
+                if (not _ATS_TOKEN.fullmatch(org) or len(parts) != 2 or parts[0] != "job"
+                        or not parts[1].isdigit()):
+                    return None
+                return ("personio", url, "", f"https://{host}/xml",
+                        {"org": org, "id": parts[1]})
+        if host == "jobs.smartrecruiters.com":
+            if len(parts) != 2 or not _ATS_TOKEN.fullmatch(parts[0]):
+                return None
+            posting_id = parts[1].split("-", 1)[0]
+            if not _ATS_TOKEN.fullmatch(posting_id):
+                return None
+            company = parts[0]
+            return ("smartrecruiters", url, "",
+                    f"https://api.smartrecruiters.com/v1/companies/{company}/postings/{posting_id}",
+                    {"company": company, "id": posting_id})
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _workable_start(deadline: float) -> bool:
+    """Serialize only Workable start reservations; queued calls share the caller budget."""
+    global _WORKABLE_NEXT_START
+    remaining = deadline - _WORKABLE_CLOCK()
+    if remaining <= 0 or not _WORKABLE_LOCK.acquire(timeout=remaining):
+        return False
+    try:
+        now = _WORKABLE_CLOCK()
+        start = max(now, _WORKABLE_NEXT_START)
+        delay = start - now
+        if start >= deadline:
+            return False
+        if delay:
+            _WORKABLE_SLEEP(delay)
+        now = _WORKABLE_CLOCK()
+        if now >= deadline:
+            return False
+        _WORKABLE_NEXT_START = now + 1.5
+        return True
+    finally:
+        _WORKABLE_LOCK.release()
+
+
+def _retry_after(value: str | None, now: float) -> float:
+    if value is None:
+        return 2.0
+    if re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
+        return float(value)
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            return 2.0
+        return max(0.0, (date - datetime.fromtimestamp(now, UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return 2.0
+
+
+def _workable_request(endpoint: str):
+    deadline = _WORKABLE_CLOCK() + 15.0
+    for attempt in range(2):
+        if not _workable_start(deadline):
+            return None
+        remaining = deadline - _WORKABLE_CLOCK()
+        if remaining <= 0:
+            return None
+        try:
+            with httpx.Client(timeout=min(8.0, remaining), follow_redirects=False) as client:
+                response = client.get(endpoint)
+        except (httpx.HTTPError, TimeoutError):
+            return None
+        if response.status_code == 429 and attempt == 0:
+            delay = _retry_after(response.headers.get("Retry-After"), _WORKABLE_WALL_CLOCK())
+            if delay > 4 or _WORKABLE_CLOCK() + delay >= deadline:
+                return None
+            _WORKABLE_SLEEP(delay)
+            continue
+        if response.status_code != 200:
+            return None
+        try:
+            return response.json()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _html_piece(value: object) -> bool:
+    return isinstance(value, str) and bool(re.search(r"<[a-z][^>]*>", value, re.I))
+
+
+def _api_incomplete(value: object) -> bool:
+    """An API's own partial-content evidence cannot become a complete HTML witness."""
+    if isinstance(value, list):
+        return any(_api_incomplete(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for raw_key, field in value.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.replace("_", "").replace("-", "").lower()
+        if key in {"truncated", "istruncated", "partial", "ispartial",
+                   "incomplete", "isincomplete", "hasmore", "hasnext",
+                   "hasnextpage", "hasmorepages", "hasmoresections"} and field:
+            return True
+        if key in {"complete", "iscomplete", "responsecomplete", "sectionscomplete",
+                   "descriptioncomplete", "contentcomplete"} and field is False:
+            return True
+        if key in {"pagination", "paging", "pageinfo", "nextpage", "nextcursor",
+                   "nextpagetoken", "continuationtoken", "missingsections",
+                   "missingrequiredsections", "omittedsections"} and field:
+            return True
+    required = value.get("requiredSections", value.get("required_sections"))
+    if isinstance(required, list) and required:
+        sections = value.get("sections")
+        if not isinstance(sections, dict):
+            return True
+        for name in required:
+            section = sections.get(name) if isinstance(name, str) else None
+            content = section.get("text") if isinstance(section, dict) else section
+            if not _html_piece(content):
+                return True
+    return any(_api_incomplete(item) for item in value.values())
+
+
+def _api_meta(url: str, title: str, fragments: list[str]) -> dict | None:
+    """Accept only complete native HTML; the normal guard owns all safety decisions."""
+    if not title or not fragments or not all(_html_piece(x) for x in fragments):
+        return None
+    text = "\n".join(_text(fragment) for fragment in fragments if fragment.strip())
+    if not text.strip():
+        return None
+    result = _guarded(title, text, html_variants=fragments, source_required=True,
+                      source_complete=True)
+    result.update(source_kind="ats_html", source_url=url)
+    if (not pg.valid(result["text"], result["posting_guard"])
+            or result["posting_guard"].get("source_verified") is not True
+            or "source_html_unavailable" in result["posting_guard"].get("reasons", [])
+            or not matched_source_witness({"jd_url": url}, result)):
+        return None
+    return result
+
+
+def _workable_candidate_matches(candidate: object, account: str, code: str) -> bool:
+    """A supplied link may be the account form or Workable's tenantless shortlink."""
+    try:
+        p = urlsplit(str(candidate))
+        if p.scheme != "https" or p.hostname != "apply.workable.com":
+            return False
+        path = p.path.rstrip("/")
+        return path in {f"/{account}/j/{code}", f"/j/{code}"}
+    except ValueError:
+        return False
+
+
+def _from_new_ats(url: str) -> dict | None:
+    parsed = _api_url(url)
+    if parsed is None:
+        return None
+    vendor, original, external, endpoint, identity = parsed
+    if vendor == "workable":
+        payload = _workable_request(endpoint)
+    else:
+        try:
+            with httpx.Client(timeout=8, follow_redirects=False) as client:
+                response = client.get(endpoint)
+            if response.status_code != 200:
+                return None
+            payload = response.json() if vendor != "personio" else response.text
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+    try:
+        # The native detail/widget must not declare missing, truncated, or paginated
+        # role material before its HTML can be marked as verified source.
+        if vendor != "personio" and _api_incomplete(payload):
+            return None
+        if vendor == "workday":
+            info = payload.get("jobPostingInfo") if isinstance(payload, dict) else None
+            if not isinstance(info, dict) or info.get("externalPath") != external:
+                return None
+            body = info.get("jobDescription")
+            fragments = [body] if isinstance(body, str) else []
+            return _api_meta(original, str(info.get("title") or ""), fragments)
+        if vendor == "workable":
+            jobs = payload.get("jobs") if isinstance(payload, dict) else None
+            matches = [j for j in jobs or [] if isinstance(j, dict)
+                       and str(j.get("shortcode") or "") == identity["code"]]
+            if len(matches) != 1:
+                return None
+            job = matches[0]
+            for candidate in (job.get("url"), job.get("application_url"), job.get("shortlink")):
+                if candidate and not _workable_candidate_matches(
+                        candidate, identity["account"], identity["code"]):
+                    return None
+            description = job.get("description")
+            return _api_meta(original, str(job.get("title") or ""),
+                             [description] if isinstance(description, str) else [])
+        if vendor == "eightfold":
+            if not isinstance(payload, dict) or str(payload.get("id") or "") != identity["id"]:
+                return None
+            canonical = payload.get("canonicalPositionUrl")
+            if canonical:
+                p = urlsplit(str(canonical))
+                expected_host = f"{identity['tenant']}.eightfold.ai"
+                expected_path = f"/careers/job/{identity['id']}"
+                if (p.scheme != "https" or p.hostname != expected_host
+                        or p.path.rstrip("/") != expected_path):
+                    return None
+            description = payload.get("job_description")
+            return _api_meta(original, str(payload.get("title") or ""),
+                             [description] if isinstance(description, str) else [])
+        if vendor == "personio":
+            root = ET.fromstring(payload or "")
+            if root.tag != "workzag-jobs":
+                return None
+            positions = root.findall("position")
+            matches = [p for p in positions
+                       if (p.get("id") or p.findtext("id") or "").strip() == identity["id"]]
+            if len(matches) != 1:
+                return None
+            position = matches[0]
+            # A flat <description> may be a shared intro; without the declared
+            # jobDescriptions list its completeness is unobservable, so miss.
+            sections = position.findall(".//jobDescriptions/*")
+            fragments = [x.text if x.text and x.text.strip() else
+                         next((child.text for child in x if child.text), "")
+                         for x in sections]
+            return _api_meta(original, position.findtext("name") or "", fragments)
+        if vendor == "smartrecruiters":
+            if (not isinstance(payload, dict) or str(payload.get("id") or "") != identity["id"]):
+                return None
+            company = payload.get("company")
+            if (isinstance(company, dict)
+                    and company.get("identifier") not in (None, identity["company"])):
+                return None
+            canonical = payload.get("postingUrl")
+            if not canonical:
+                return None
+            p = urlsplit(str(canonical))
+            if (p.scheme != "https" or p.hostname != "jobs.smartrecruiters.com"
+                    or p.path.strip("/").split("/")[0] != identity["company"]
+                    or p.path.strip("/").split("/")[1].split("-")[0] != identity["id"]):
+                return None
+            sections = payload.get("jobAd", {}).get("sections", {})
+            required = sections.get("jobDescription", {}).get("text")
+            if not _html_piece(required):
+                return None
+            fragments = [required]
+            for key in ("qualifications", "additionalInformation"):
+                value = sections.get(key, {}).get("text")
+                if value:
+                    fragments.append(value)
+            return _api_meta(original, str(payload.get("name") or ""), fragments)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, ET.ParseError):
+        return None
+    return None
 
 
 def _text(html: str) -> str:
@@ -324,6 +636,9 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     """Guarded title, text, posting_guard and provenance for a posting."""
     if not _valid_reader_url(url):
         return _guarded("", "", source_required=True)
+    api_ats = _from_new_ats(url)
+    if api_ats is not None:
+        return api_ats
     ats = _from_ats(url)
     if ats and ats.get("_ashby_body_length", len(ats["text"])) > 200:
         return _public_ats(ats)
