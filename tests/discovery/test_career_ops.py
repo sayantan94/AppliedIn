@@ -1232,8 +1232,8 @@ def test_late_stop_during_timeout_cleanup_prevents_next_tick_restart(
     board, monkeypatch, timeout_style,
 ):
     """An acknowledged STOP during classification must win over timeout retry."""
-    network, stores, _, _ = _network_fixture(board, monkeypatch)
-    state, receipt = _saved_search({"now": datetime(2026, 11, 7, 12, tzinfo=UTC)}, count=3)
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
     data = co._read()
     data.update(network_search=state, last_network=receipt)
     co._write(data)
