@@ -59,6 +59,9 @@ class Policy:
 class Decision:
     allow: bool
     reason: str
+    # Legacy CLI first output line for this decision; the event log keeps the
+    # structured reason above. Empty means "STOP <reason>" is not legacy-shaped.
+    message: str = ""
 
 
 def _key(value: object) -> str:
@@ -224,34 +227,62 @@ def evaluate(
     """Read-only guard. Called under the existing per-root fcntl lock."""
     at = (at or datetime.now(UTC)).astimezone(UTC)
     if not isinstance(current, dict) or current.get("pk") != pk:
-        return Decision(False, "row_missing")
+        return Decision(False, "row_missing", "STOP row not found")
     if current.get("status") == "skipped":
-        return Decision(False, "skipped")
+        return Decision(
+            False, "skipped",
+            "STOP row is skipped; ask the lead (an unskip goes through /actions/retry)",
+        )
     if _submit_evidence(current):
-        return Decision(False, "already_submitted")
+        if current.get("status") in _APPLIED or current.get("confirmation_id"):
+            return Decision(
+                False, "already_submitted",
+                f"STOP row already {current.get('status')} / has confirmation",
+            )
+        return Decision(
+            False, "already_submitted",
+            "STOP row has a possible submission or submit hold",
+        )
     if current.get("status") not in ("tailored", "submitting", "needs_human"):
-        return Decision(False, "status_blocked")
+        return Decision(False, "status_blocked", "STOP row has no tailored résumé")
     if _handoff_blocks(root, pk):
-        return Decision(False, "owner_handoff")
+        return Decision(
+            False, "owner_handoff",
+            "STOP owner row (owner-handoff.md); leave it to the owner, or ask "
+            "the lead for a BACK TO AGENTS line",
+        )
     claim = _read_claim(root, pk)
     if claim.get("submit_clicked") or claim.get("state") in ("submit-clicked", "recorded"):
-        return Decision(False, "submit_once")
+        return Decision(
+            False, "submit_once",
+            "STOP claim is submit-clicked; a Submit may have happened. "
+            "Report to the lead.",
+        )
     if board is not None and board != str(
         current.get("greenhouse_board") or current.get("board") or ""
     ):
-        return Decision(False, "board_pin")
+        ats = str(current.get("ats") or "")
+        return Decision(
+            False, "board_pin",
+            f"STOP row ats {ats!r} is not board {board!r}",
+        )
 
     job_id = current.get("job_id")
     company = _company_key(current.get("company"), policy)
     title = _title_key(current.get("title"), policy)
     if not isinstance(job_id, str) or not job_id or not company:
-        return Decision(False, "identity_missing")
+        return Decision(False, "identity_missing", "STOP row not found")
     if pk in policy.NEVER:
-        return Decision(False, "blocked_row")
+        return Decision(
+            False, "blocked_row", "STOP row is on the never/parked list",
+        )
     if any(pk == token or pk.startswith(token) for token in policy.PARKED):
-        return Decision(False, "parked")
+        return Decision(False, "parked", "STOP row is on the never/parked list")
     if company in policy.CAPS and at.date() <= policy.CAPS[company].date():
-        return Decision(False, "company_date_cap")
+        return Decision(
+            False, "company_date_cap",
+            f"STOP company cap until {policy.CAPS[company].date().isoformat()}",
+        )
     others = []
     for row in rows:
         if not isinstance(row, dict) or row.get("pk") == pk:
@@ -273,11 +304,17 @@ def evaluate(
         if isinstance(pair, str) and frozenset((pk, pair)) in policy.DISTINCT_PAIRS:
             continue
         if other.get("job_id") == job_id:
-            return Decision(False, "duplicate_job_id")
+            return Decision(
+                False, "duplicate_job_id",
+                f"STOP same job already applied as {other.get('pk')}",
+            )
         if (title and title not in _PLACEHOLDER_TITLES
                 and title == _title_key(other.get("title"), policy)
                 and company == _company_key(other.get("company"), policy)):
-            return Decision(False, "duplicate_title_company")
+            return Decision(
+                False, "duplicate_title_company",
+                f"STOP same job already applied as {other.get('pk')}",
+            )
 
     prior = sum(
         1 for row in others
@@ -286,8 +323,11 @@ def evaluate(
     )
     cap = policy.COUNT_CAPS.get(company, DEFAULT_COMPANY_CAP)
     if prior >= cap:
-        return Decision(False, "company_cap")
-    return Decision(True, "eligible")
+        return Decision(
+            False, "company_cap",
+            f"STOP company count cap {cap} per 180 days reached ({prior})",
+        )
+    return Decision(True, "eligible", "OK")
 
 
 @contextmanager
@@ -350,7 +390,45 @@ def _matches_claim(claim: dict, pk: str, board: str, pid: str, state: str) -> bo
 
 
 _OPERATIONS = ("start", "submit", "done", "release", "reopen")
-_USAGE = "usage: precheck {start,submit,done,release,reopen} pk board\n"
+_USAGE = '''Board-agent pre-check: may this row be applied to, and record its claim state.
+
+Usage (from the repo root):
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py start <pk> <board>
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py submit <pk> <board>
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py done <pk> <board>
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py release <pk> <board>
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py reopen <pk> <board>
+
+start   checks the row and writes a claim. Prints OK or STOP <reason>.
+submit  re-checks the row right before the Submit click and marks the claim
+        "submit-clicked". Run it, and click Submit only after it prints OK.
+done    marks the claim "recorded" after /actions/mark-applied returned ok.
+release removes the claim of a row you stopped before any Submit click.
+reopen  turns a submit-clicked claim back into filling, ONLY when bsk returned
+        effect_state none for the Submit click and a fresh snapshot still shows
+        the unsent form with no confirmation.
+
+A claim in state "submit-clicked" without "recorded" means the form may have
+been sent. Never start that row again; report it to the lead.'''
+
+# The legacy success line names the transition for every verb except start and
+# submit; keep that exact first line rather than a generic OK.
+_OK_LINE = {
+    "start": "OK", "submit": "OK", "done": "OK recorded",
+    "release": "OK released", "reopen": "OK reopened",
+}
+
+
+def _claim_failure_message(op: str | None, prior: dict, board: str | None) -> str:
+    # Legacy prints a different claim STOP per verb; restore the first line.
+    state = prior.get("state") if prior else None
+    if op == "submit":
+        return f"STOP no filling claim of board {board}: {prior or None}"
+    if not prior or prior.get("board") != board:
+        return f"STOP no claim of board {board}: {prior or None}"
+    if op == "reopen":
+        return f"STOP claim is {state}, not submit-clicked"
+    return f"STOP claim is {state}; a Submit may have happened. Report to the lead."
 
 
 def main(
@@ -371,9 +449,14 @@ def main(
             prior = _read_claim(root, pk) if pk else {}
             prior_state = prior.get("state")
             if not valid:
-                reason, output, code = "invalid_arguments", _USAGE, 2
-            elif os.environ.get("BOARD_AGENT_BOARD") not in (None, board):
-                reason, output, code = "board_pin", "STOP: board_pin\n", 1
+                reason, output, code = "invalid_arguments", _USAGE + "\n", 2
+            elif (pinned := os.environ.get("BOARD_AGENT_BOARD")) not in (None, board):
+                reason = "board_pin"
+                output = (
+                    f"STOP your board is {pinned!r} (BOARD_AGENT_BOARD), "
+                    f"not {board!r}\n"
+                )
+                code = 1
             else:
                 try:
                     if op in ("start", "submit"):
@@ -383,7 +466,9 @@ def main(
                             tracking = make_stores().tracking
                     if op == "start":
                         if prior:
-                            decision = Decision(False, "claim_exists")
+                            decision = Decision(
+                                False, "claim_exists", f"STOP claim exists: {prior}",
+                            )
                         else:
                             current = tracking.get(pk)
                             decision = evaluate(
@@ -398,7 +483,10 @@ def main(
                             })
                     elif op == "submit":
                         if not _matches_claim(prior, pk, board, pid, "filling"):
-                            decision = Decision(False, "claim_mismatch")
+                            decision = Decision(
+                                False, "claim_mismatch",
+                                _claim_failure_message(op, prior, board),
+                            )
                         else:
                             # The eligibility check happens after claim validation,
                             # immediately before recording the external click intent.
@@ -420,6 +508,7 @@ def main(
                             "recorded" if _matches_claim(
                                 prior, pk, board, pid, "submit-clicked"
                             ) else "claim_mismatch",
+                            _claim_failure_message(op, prior, board),
                         )
                         if decision.allow:
                             _write_claim(root, pk, {
@@ -432,6 +521,7 @@ def main(
                             "released" if _matches_claim(
                                 prior, pk, board, pid, "filling"
                             ) else "claim_mismatch",
+                            _claim_failure_message(op, prior, board),
                         )
                         if decision.allow:
                             _claim_path(root, pk).unlink()
@@ -443,6 +533,7 @@ def main(
                             "reopened" if _matches_claim(
                                 prior, pk, board, pid, "submit-clicked"
                             ) else "claim_mismatch",
+                            _claim_failure_message(op, prior, board),
                         )
                         if decision.allow:
                             next_claim = {**prior, "state": "filling",
@@ -453,7 +544,10 @@ def main(
                     # The legacy CLI returns 1 for a guard STOP; 2 stays the
                     # usage/precheck-unavailable convention.
                     code = 0 if decision.allow else 1
-                    output = "OK\n" if decision.allow else "STOP: " + reason + "\n"
+                    if decision.allow:
+                        output = _OK_LINE[op] + "\n"
+                    else:
+                        output = (decision.message or f"STOP {reason}") + "\n"
                 except (PrecheckUnavailable, OSError, ValueError, RuntimeError, TypeError):
                     reason, output, code = (
                         "precheck_unavailable", "STOP: precheck unavailable\n", 2,
