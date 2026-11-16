@@ -131,17 +131,24 @@ def stop() -> dict:
     # Signal first, while that lock may be held, so its next per-row
     # continue_check can observe Stop. The scan reservation and active kind
     # exclude unrelated Career Ops work without a second lock.
+    active = co._ACTIVE
     if not (co._SCAN.locked() and co._RUNNING
-            and co._ACTIVE.get("kind") == "network"):
+            and active.get("kind") == "network"):
         return {"stopping": False}
     STOP.set()
-    # Progress still uses the board lock; never block *signaling* on it.
+    # Signal before waiting on the board lock during preparation. A scan may
+    # finish in that interval, so acknowledge only while this reservation can
+    # still persist the STOP, not after its terminal write.
     with co._LOCK:
-        if co._RUNNING and co._ACTIVE.get("kind") == "network":
-            co.report_progress(
-                "Stopping scan; completed results are saved. You can continue later."
-            )
-    return {"stopping": True}
+        acknowledged = bool(
+            co._SCAN.locked() and co._RUNNING
+            and co._ACTIVE is active and active.get("kind") == "network"
+        )
+    if acknowledged:
+        co.report_progress(
+            "Stopping scan; completed results are saved. You can continue later."
+        )
+    return {"stopping": acknowledged}
 
 
 # A full directory scan including Workday (12,000+ tenants, one site each) runs
@@ -524,12 +531,24 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 **co.progress_snapshot(), "running": False, "active_search": {}
             }
             with co._LOCK:
-                data = co._read()
-                # Never replace orphaned/invalid saved search state with defaults.
-                data["last_network"] = receipt
-                if state:
-                    data["network_search"] = state
-                co._write(data)
+                try:
+                    # A STOP may arrive during final progress/snapshot handling.
+                    # Commit its outcome and deactivate as one board-locked step;
+                    # stop() must revalidate under this same lock to acknowledge.
+                    if STOP.is_set():
+                        receipt["stopped"] = True
+                        receipt["batch_success"] = False
+                        receipt["complete"] = False
+                        receipt["finished_at"] = co.now()
+                    data = co._read()
+                    # Never replace orphaned/invalid saved search state with defaults.
+                    data["last_network"] = receipt
+                    if state:
+                        data["network_search"] = state
+                    co._write(data)
+                finally:
+                    co._RUNNING = False
+                    co._ACTIVE = {}
         except Exception:
             co.log.exception("Could not finalize Career Ops network receipt")
         finally:
