@@ -194,8 +194,9 @@ if(request.inject){
     el.contentWindow=makeWindow({url:'https://example.test/protected/login'});
   }
   const chosen=request.selected||detection.found.find(c=>c.visible)?.id||'none';
-  injection=evaluate(request.inject+'('+JSON.stringify(detection)+','+
-    JSON.stringify(chosen)+','+JSON.stringify(request.answer||'SYNTHETIC_TOKEN')+')');
+  const expression=request.direct || request.inject+'('+JSON.stringify(detection)+','+
+    JSON.stringify(chosen)+','+JSON.stringify(request.answer||'SYNTHETIC_TOKEN')+')';
+  injection=evaluate(expression);
 }
 const values=[];
 for(const d of all)for(const e of d.querySelectorAll('input,textarea'))values.push(e.value);
@@ -204,14 +205,14 @@ process.stdout.write(JSON.stringify({detection,injection,counts,values}));
 
 
 def _node(fixture: dict, *, inject: bool = False, drift: str | None = None,
-          answer: str = "SYNTHETIC_TOKEN") -> dict:
+          answer: str = "SYNTHETIC_TOKEN", direct: str | None = None) -> dict:
     if not shutil.which("node"):
         pytest.skip("Node absent: actual DETECT_JS/INJECT_JS tests not executed")
     result = subprocess.run(
         ["node", "--input-type=commonjs", "-e", _NODE],
         input=json.dumps({"fixture": fixture, "detect": cs.DETECT_JS,
                           "inject": cs.INJECT_JS if inject else None,
-                          "drift": drift, "answer": answer}),
+                          "drift": drift, "answer": answer, "direct": direct}),
         text=True, capture_output=True, timeout=10, check=True,
     )
     return json.loads(result.stdout)
@@ -467,6 +468,36 @@ def test_capsolver_poll_and_missing_solution():
     with pytest.raises(cs.CaptchaError) as exc:
         cs._token({"text": "not a token"}, "ReCaptchaV2TaskProxyLess")
     assert exc.value.reason == "solution_missing"
+
+
+def test_run_success_uses_exact_expression_and_task(tmp_path, monkeypatch):
+    fixture = _nested(enterprise=True, s="S1", action="apply",
+                      provider="https://www.google.com/recaptcha/enterprise/anchor?k=K&s=S1&sa=apply")
+    detected = _node(fixture)["detection"]
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "SYNTHETIC_KEY")
+    calls = []
+
+    def fake_eval(session, tab, expression):
+        calls.append(expression)
+        if expression == cs.DETECT_JS:
+            return detected
+        return _node(fixture, inject=True, direct=expression)["injection"]
+
+    captured = []
+
+    def fake_solve(task, key):
+        captured.append((task, key))
+        return "TASK", "SYNTHETIC_TOKEN"
+
+    monkeypatch.setattr(cs, "evaluate", fake_eval)
+    monkeypatch.setattr(cs, "solve", fake_solve)
+    code, log = cs.run("S", None, False, tmp_path)
+    assert (code, log["result"]) == (0, "injected")
+    assert len(calls) == 2 and len(captured) == 1
+    assert captured[0][0]["enterprisePayload"] == {"s": "S1"}
+    assert captured[0][0]["pageAction"] == "apply"
+    assert captured[0][1] == "SYNTHETIC_KEY"
+    assert "SYNTHETIC_TOKEN" not in json.dumps(log)
 
 
 def test_run_guards_nested_frame_before_provider(tmp_path, monkeypatch):
