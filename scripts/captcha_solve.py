@@ -288,7 +288,9 @@ INJECT_JS = r"""((approved,selected,answer)=>{
  // All URL/frame/widget/receiver/callback facts remain exactly compared.
  const view=s=>({...s,found:s.found.map(c=>{
    if(c.kind!=='image')return c;
-   const {body,...other}=c;return other;
+   const {body,...other}=c;
+   if(/^data:/i.test(other.src||''))other.src='data:image/sha256';
+   return other;
  })});
  if(JSON.stringify(view(now))!==JSON.stringify(approved))
    return JSON.stringify({__cs:1,reason:'binding_changed'});
@@ -650,6 +652,8 @@ def run(session: str, tab: str | None, dry_run: bool, base: Path) -> tuple[int, 
         for item in approved.get("found", []):
             if item.get("kind") == "image":
                 item.pop("body", None)
+                if str(item.get("src", "")).lower().startswith("data:"):
+                    item["src"] = "data:image/sha256"
         expression = (INJECT_JS + "(" + json.dumps(approved, ensure_ascii=True) +
                       "," + json.dumps(challenge["id"]) + "," +
                       json.dumps(token, ensure_ascii=True) + ")")
