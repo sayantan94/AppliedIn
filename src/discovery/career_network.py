@@ -501,7 +501,7 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 receipt["complete"] = False
             # Only deadlines stay unfinalized; STOP and ordinary failures retain
             # the existing six-hour cooling period.
-            receipt["finished_at"] = None if timed_out else co.now()
+            receipt["finished_at"] = None if timed_out and not receipt["stopped"] else co.now()
             co.report_progress(
                 f"{receipt['found']} matches saved · {receipt['companies']} company boards checked"
                 + (
