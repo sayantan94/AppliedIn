@@ -69,9 +69,9 @@ def world(tmp_path, monkeypatch):
             json.dumps(policy), encoding="utf-8"
         )
 
-    def invoke(op="start", pk=PK, board=BOARD):
+    def invoke(op="start", pk=PK, board=BOARD, *extra):
         return guard.main(
-            [op, pk, board], legacy_dir=tmp_path / "not-an-operator",
+            [op, pk, board, *extra], legacy_dir=tmp_path / "not-an-operator",
             tracking=tracking, at=NOW,
         )
 
@@ -154,21 +154,32 @@ def test_release_does_not_remove_submit_clicked_or_recorded(world):
 
 def test_reopen_only_from_clicked_by_claiming_agent(world, monkeypatch):
     w = world
-    assert w.invoke("reopen") == 1
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 1
     assert w.invoke("start") == 0
-    assert w.invoke("reopen") == 1
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 1
     assert w.invoke("submit") == 0
+    clicked = _claim(w.root)
     monkeypatch.setenv("BOARD_AGENT_PID", "9999")
-    assert w.invoke("reopen") == 1
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 1
     monkeypatch.setenv("BOARD_AGENT_PID", "4242")
-    assert w.invoke("reopen", board="another-board") == 1
-    assert _claim(w.root)["state"] == "submit-clicked"
-    assert w.invoke("reopen") == 0
-    assert _claim(w.root)["state"] == "filling"
-    assert not _claim(w.root)["submit_clicked"]
-    assert "submit_clicked_at" not in _claim(w.root)
+    assert w.invoke("reopen", PK, "another-board", "--not-sent-confirmed") == 1
+    assert w.invoke("reopen") == 1
+    assert _claim(w.root) == clicked
+
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 0
+    reopened = _claim(w.root)
+    assert reopened["state"] == "filling"
+    assert reopened["submit_clicked"] is False
+    assert "submit_clicked_at" not in reopened
+    assert reopened["previous_submit_clicked_at"] == clicked["submit_clicked_at"]
+    assert reopened["submit_click_attempted_before_reopen"] is True
+    assert reopened["reopen_not_sent_confirmed"] is True
+    assert reopened["reopen_not_sent_confirmed_at"] == NOW.isoformat()
+    assert w.invoke("start") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_exists"
     assert w.invoke("submit") == 0
     assert _claim(w.root)["state"] == "submit-clicked"
+    assert _claim(w.root)["previous_submit_clicked_at"] == clicked["submit_clicked_at"]
 
 
 def test_board_and_pid_identity_pins_all_transitions(world, monkeypatch, capsys):
@@ -369,12 +380,176 @@ def test_count_cap_fifth_sixth_and_180_day_expiry(world):
         (f"{PK} BACK TO AGENTS\n", True),
         (f"{PK} DONE\n", True),
         (f"{PK} DONE\n{PK} active\n", False),
+        (f"{PK} active\nother-co#candidate DONE\n", False),
+        (f"{PK} DONE\nother-co#candidate active\n", True),
+        (f"{PK} BACK TO AGENTS is discussed\n", False),
+        (f"{PK} DONE within a sentence\n", False),
+        (f"{PK} undone\n", False),
+        (f"{PK} DONE.\n", False),
+        (f"{PK} DONE,\n", False),
+        (f"{PK} DONE!\n", False),
+        (f"{PK} DONE?\n", False),
+        (f"{PK} not DONE\n", False),
+        (f"{PK} no BACK TO AGENTS\n", False),
+        (f"{PK} never DONE\n", False),
+        (f"{PK} without DONE\n", False),
+        (f"{PK} didn't DONE\n", False),
+        (f"{PK} -n't DONE\n", False),
+        (f"{PK} DONE   \n", True),
+        (f"{PK} back to agents \t\n", True),
+        (f"{PK}2 DONE\n", True),
     ],
 )
 def test_handoff_holds_only_the_named_row(world, handoff, allowed):
     w = world
     (w.root / "owner-handoff.md").write_text(handoff, encoding="utf-8")
     assert (w.invoke() == 0) is allowed
+
+
+# The final per-row line, not prose mentioning a marker, controls the gate.
+def test_embedded_terminal_marker_does_not_release(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} BACK TO AGENTS is mentioned but not terminal\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+def test_negated_terminal_marker_does_not_release(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} not DONE\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+def test_other_row_marker_does_not_release(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} active\nother-co#candidate BACK TO AGENTS\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+@pytest.mark.parametrize(
+    ("last_exact", "other", "allowed"),
+    [
+        ("active", "DONE", False),
+        ("DONE", "active", True),
+    ],
+)
+def test_handoff_prefixed_pk_does_not_change_last_exact_row(
+    world, last_exact, other, allowed,
+):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {last_exact}\nother-{PK} {other}\n", encoding="utf-8",
+    )
+    assert (w.invoke() == 0) is allowed
+    if not allowed:
+        assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+@pytest.mark.parametrize(
+    ("last_exact", "other", "allowed"),
+    [
+        ("active", "DONE", False),
+        ("DONE", "active", True),
+    ],
+)
+def test_handoff_hyphen_suffix_pk_does_not_change_last_exact_row(
+    world, last_exact, other, allowed,
+):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {last_exact}\n{PK}-2 {other}\n", encoding="utf-8",
+    )
+    assert (w.invoke() == 0) is allowed
+    if not allowed:
+        assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+@pytest.mark.parametrize("status", [
+    "cannot be DONE",
+    "cannot be marked DONE",
+    "please mark DONE",
+    "please BACK TO AGENTS",
+    "was marked DONE",
+    "is now DONE",
+])
+def test_handoff_prose_qualified_final_marker_does_not_release(world, status):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {status}\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+    assert _claim(w.root) is None
+
+
+@pytest.mark.parametrize("status", [
+    f"{PK}: DONE",
+    f"{PK} | BACK TO AGENTS",
+    f"{PK} - done",
+    f"  {PK} back to agents  ",
+])
+def test_handoff_exact_terminal_marker_with_separator_releases(world, status):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        status + "\n", encoding="utf-8",
+    )
+    assert w.invoke() == 0
+
+
+def test_release_after_confirmed_reopen_retains_submit_witness(
+    world, monkeypatch, capsys,
+):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    clicked = _claim(w.root)
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 0
+    reopened = _claim(w.root)
+    assert reopened["previous_submit_clicked_at"] == clicked["submit_clicked_at"]
+    assert reopened["submit_click_attempted_before_reopen"] is True
+    capsys.readouterr()
+
+    assert w.invoke("release") == 1
+    assert capsys.readouterr().out == (
+        "STOP claim retains a Submit attempt; ask the lead "
+        "for explicit resolution\n"
+    )
+    assert _events(w.root)[-1]["reason"] == "submit_witness"
+    assert _claim(w.root) == reopened
+
+    # A second agent cannot bypass the not-sent confirmation by starting over.
+    monkeypatch.setenv("BOARD_AGENT_PID", "9999")
+    assert w.invoke("start") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_exists"
+    assert w.invoke("submit") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_mismatch"
+    assert _claim(w.root) == reopened
+
+
+def test_unconfirmed_reopen_refuses_second_submit_and_keeps_witness(world, capsys):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    clicked = _claim(w.root)
+    capsys.readouterr()
+    assert w.invoke("reopen") == 1
+    assert capsys.readouterr().out == (
+        "STOP Submit click may have happened; confirm not sent "
+        "with --not-sent-confirmed\n"
+    )
+    assert _events(w.root)[-1]["reason"] == "not_sent_confirmation_required"
+    assert _claim(w.root) == clicked
+    assert w.invoke("submit") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_mismatch"
+    assert _claim(w.root) == clicked
 
 
 def test_skipped_and_unconfirmed_submit_row_guard(world):
@@ -394,8 +569,14 @@ def test_submission_without_claim_fails_even_when_row_eligible(world):
     assert _events(w.root)[-1]["reason"] == "claim_mismatch"
 
 
-@pytest.mark.parametrize("args", [[], ["start"], ["bogus", PK, BOARD],
-                                      ["start", PK, BOARD, "extra"]])
+@pytest.mark.parametrize("args", [
+    [], ["start"], ["bogus", PK, BOARD],
+    ["start", PK, BOARD, "extra"],
+    ["submit", PK, BOARD, "--not-sent-confirmed"],
+    ["done", PK, BOARD, "--not-sent-confirmed"],
+    ["release", PK, BOARD, "--not-sent-confirmed"],
+    ["reopen", PK, BOARD, "extra"],
+])
 def test_invalid_arguments_record_original_argv_and_return_code(world, args, capsys):
     w = world
     rc = guard.main(args, legacy_dir=w.tmp, tracking=w.tracking, at=NOW)
@@ -555,6 +736,7 @@ assert Path(sys.modules["tools.submit_precheck"].__file__).resolve() == expected
 # published 10/10 comparison: the exit code and first output line for each
 # synthetic scenario. This test never calls the old script; it freezes those
 # observations so the replacement cannot drift from the historical first line.
+# The reopen scenario now supplies the required not-sent confirmation flag.
 GOLDEN_FIRST_LINES = {
     "eligible_start": [(0, "OK")],
     "start_submit_done": [(0, "OK"), (0, "OK"), (0, "OK recorded")],
@@ -611,7 +793,7 @@ def test_legacy_first_lines_golden_table(tmp_path, monkeypatch, capsys):
         ),
         "submit_reopen_submit": (
             [row], [["start", pk, board], ["submit", pk, board],
-                    ["reopen", pk, board], ["submit", pk, board]],
+                    ["reopen", pk, board, "--not-sent-confirmed"], ["submit", pk, board]],
             "Synthetic handoff\nDONE\n", board,
         ),
         "invalid_args": ([row], [["start", pk]], "Synthetic handoff\nDONE\n", board),
