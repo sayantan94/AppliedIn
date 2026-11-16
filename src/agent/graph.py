@@ -34,6 +34,7 @@ from core.config import get_settings
 from core.logging import get_logger
 from core.steering import before_model
 from tools.schema import MatchScore
+from discovery.relevance import classify_location_fit
 
 log = get_logger(__name__)
 _SKILLS = Path(__file__).parent / "skills"
@@ -408,6 +409,48 @@ def _scorer_before_model(callback_context, llm_request):
         llm_request.append_instructions([_SCORER_FORMAT_CORRECTION])
 
 
+
+def _normalize_no_claim_response(llm_response, parts, text: str) -> str:
+    """Change the actual ADK response only for a strictly typed no-claim."""
+    import json
+
+    try:
+        obj = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if (not isinstance(obj, dict) or
+            not isinstance(obj.get("dealbreaker"), str) or
+            obj["dealbreaker"].strip().casefold() not in {"", "none", "n/a"} or
+            type(obj.get("score")) is not int or
+            not 0 <= obj["score"] <= 10 or
+            ("reasoning" in obj and not isinstance(obj["reasoning"], str))):
+        return text
+    normalized = {**obj, "dealbreaker": None}
+    canonical = json.dumps(normalized, ensure_ascii=True)
+    # ADK saves this same object via __maybe_save_output_to_state; never
+    # normalize a shadow copy after its output-key state has already changed.
+    live_parts = [p for p in parts if not getattr(p, "thought", False)
+                  and isinstance(getattr(p, "text", None), str)]
+    if not live_parts:
+        return text
+    try:
+        original_parts = [p.text for p in live_parts]
+        live_parts[0].text = canonical
+        for p in live_parts[1:]:
+            p.text = ""
+        observed = "".join(p.text or "" for p in live_parts)
+        if observed != canonical:
+            raise ValueError("callback mutation not observable")
+    except (ValueError, TypeError, AttributeError) as exc:
+        for p, original in zip(live_parts, locals().get("original_parts", ())):
+            try:
+                p.text = original
+            except (ValueError, TypeError, AttributeError):
+                pass
+        raise _ScorerBadContent("schema_invalid") from exc
+    return canonical
+
+
 def _scorer_after_model(callback_context, llm_response):
     # This callback runs before ADK's __maybe_save_output_to_state. Raise our
     # content-only marker here, not after model_validate_json has already
@@ -419,6 +462,7 @@ def _scorer_after_model(callback_context, llm_response):
     parts = getattr(llm_response.content, "parts", None) or ()
     text = "".join(part.text or "" for part in parts
                    if not getattr(part, "thought", False))
+    text = _normalize_no_claim_response(llm_response, parts, text)
     try:
         MatchScore.model_validate_json(text)
     except ValueError as exc:
@@ -427,27 +471,23 @@ def _scorer_after_model(callback_context, llm_response):
 
 
 def _effective_scorer_score(raw: MatchScore, jd_text: str) -> int:
-    """Only a substantive quote in scorer-visible JD can activate a code cap.
-
-    Presence is not proof of a preference conflict: kind remains model-selected.
-    Work authorization cannot add a code-owned cap, even with a real quote.
-    """
-    claim = raw.dealbreaker
-    if claim is None or claim.kind == "authorization":
-        return raw.score
-
-    quote = " ".join((claim.quote or "").casefold().split())
-    if len(quote) < 24 or len(quote.split()) < 4:
-        # Do not expose the quoted job text or candidate preferences in logs.
-        log.warning("scorer dealbreaker cap ignored: insufficient JD quote")
-        return raw.score
-
-    visible_jd = " ".join((jd_text or "").casefold().split())
-    if quote not in visible_jd:
-        log.warning("scorer dealbreaker cap ignored: quote absent from scorer-visible JD")
-        return raw.score
-    return min(raw.score, 3)
-
+    """Only proven geography or the existing qualified other quote can cap."""
+    source = None
+    if classify_location_fit(jd_text) == "out_of_class":
+        source = "location"
+    elif raw.dealbreaker is not None and raw.dealbreaker.kind == "other":
+        quote = " ".join((raw.dealbreaker.quote or "").casefold().split())
+        if len(quote) < 24 or len(quote.split()) < 4:
+            log.warning("scorer dealbreaker cap ignored: insufficient JD quote")
+        elif quote not in " ".join((jd_text or "").casefold().split()):
+            log.warning("scorer dealbreaker cap ignored: quote absent from scorer-visible JD")
+        else:
+            source = "other"
+    effective = min(raw.score, 3) if source else raw.score
+    if effective < raw.score:
+        log.warning("scorer_dealbreaker_cap_applied source=%s raw=%d effective=%d",
+                    source, raw.score, effective)
+    return effective
 
 class _SafeScorer(LlmAgent):
     async def _run_async_impl(self, ctx):
