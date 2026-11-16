@@ -8,6 +8,7 @@ pixels/event ordering or deferred network/Submit effects.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 import shutil
@@ -194,7 +195,12 @@ if(request.inject){
     el.contentWindow=makeWindow({url:'https://example.test/protected/login'});
   }
   const chosen=request.selected||detection.found.find(c=>c.visible)?.id||'none';
-  const expression=request.direct || request.inject+'('+JSON.stringify(detection)+','+
+  const approved=JSON.parse(JSON.stringify(detection));
+  for(const c of approved.found)if(c.kind==='image'){
+    delete c.body;
+    if(/^data:/i.test(c.src||''))c.src='data:image/sha256';
+  }
+  const expression=request.direct || request.inject+'('+JSON.stringify(approved)+','+
     JSON.stringify(chosen)+','+JSON.stringify(request.answer||'SYNTHETIC_TOKEN')+')';
   injection=evaluate(expression);
 }
@@ -393,6 +399,7 @@ def test_actual_js_image_data_uri_callback_free_fill_handoff():
     task = cs.build_task(c, "https://example.test/apply")
     assert task == {"type": "ImageToTextTask", "body": base64.b64encode(_PNG).decode()}
     assert base64.b64decode(task["body"]) == _PNG
+    assert c["bodyHash"] == hashlib.sha256(task["body"].encode("ascii")).hexdigest()
     assert page["injection"]["reason"] == "callback_missing"
     assert "AB12" in page["values"]
 
@@ -421,6 +428,33 @@ def test_actual_js_source_canvas_and_css_only_handoff(unreadable):
     with pytest.raises(cs.CaptchaError) as exc:
         cs.pick_challenge(page["detection"]["found"])
     assert exc.value.reason == "image_unreadable"
+
+
+def test_image_near_limit_keeps_injection_argument_compact(tmp_path, monkeypatch):
+    image = _PNG + b"z" * (110 * 1024)
+    fixture = {"url": "https://example.test/apply",
+               "images": [{"src": "data:image/png;base64," + base64.b64encode(image).decode()}]}
+    detected = _node(fixture)["detection"]
+    exprs = []
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "SYNTHETIC_KEY")
+
+    def fake_eval(session, tab, expression):
+        if expression == cs.DETECT_JS:
+            return detected
+        exprs.append(expression)
+        return _node(fixture, inject=True, direct=expression, answer="AB12")["injection"]
+
+    def fake_solve(task, key):
+        assert task["type"] == "ImageToTextTask"
+        assert base64.b64decode(task["body"]) == image
+        return "T", "AB12"
+
+    monkeypatch.setattr(cs, "evaluate", fake_eval)
+    monkeypatch.setattr(cs, "solve", fake_solve)
+    code, log = cs.run("S", None, False, tmp_path)
+    assert code == 4 and log["reason"] == "callback_missing"
+    assert len(exprs) == 1 and len(exprs[0]) < 128000
+    assert "AB12" not in json.dumps(log)
 
 
 def test_image_body_oversize_rejected_before_payment():
