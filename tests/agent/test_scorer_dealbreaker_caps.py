@@ -616,7 +616,8 @@ def test_remote_only_onsite_pre_score_gate_prevents_any_scorer(harness, monkeypa
                         lambda _: Preferences(remote_only=True))
     h.stores.tracking.row["location"] = "On-site, Japan"
     async def onsite(_):
-        return pg.analyze("On-site — Japan; worksite: Japan")
+        # Reach the existing eligibility gate rather than the unreadable-JD floor.
+        return pg.analyze(JD + "\nOn-site — Japan; worksite: Japan")
     monkeypatch.setattr(R, "_jd_meta", onsite)
     result = _run(h)
     assert result["result"] == "skipped"
