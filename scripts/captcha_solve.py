@@ -56,7 +56,7 @@ BLOCKED_URL = re.compile(
 # prevents a stale, previously approved binding from mutating a changed page.
 SCAN_JS = r"""(()=>{
  const out={__cs:1,url:String(window.location.href),password:false,frames:[],found:[],opaque:[]};
- const handles=Object.create(null), docs=[];
+ const handles=Object.create(null), docs=[], wins=[];
  const key=e=>{const d=e.ownerDocument;return Array.prototype.indexOf.call(d.querySelectorAll('*'),e)};
  const style=(w,e)=>{try{return w.getComputedStyle(e)}catch(_){return {display:'none'}}};
  const shown=(w,e)=>{
@@ -112,7 +112,7 @@ SCAN_JS = r"""(()=>{
  const add=(c,h)=>{out.found.push(c);handles[c.id]=h};
  const visit=(w,d,path)=>{
    const frame={path,url:String(w.location.href),password:!!d.querySelector('input[type=password]')};
-   out.frames.push(frame);docs.push(d);
+   out.frames.push(frame);docs.push(d);wins.push(w);
    if(path==='top')out.password=frame.password;
    const owners=[];
    d.querySelectorAll('[data-sitekey],.g-recaptcha,.cf-turnstile,.h-captcha').forEach(e=>{
@@ -125,7 +125,7 @@ SCAN_JS = r"""(()=>{
    });
    const iframes=Array.from(d.querySelectorAll('iframe'));
    iframes.forEach((f,i)=>{
-     const src=attr(f,'src'),fpath=path+'/iframe:'+i+':'+attr(f,'id')+':'+attr(f,'name');
+     const src=attr(f,'src'),fpath=path+'/iframe:'+i+':'+attr(f,'id')+':'+attr(f,'name')+'|src:'+src;
      let u;try{u=new URL(src,String(w.location.href))}catch(_){u=null}
      const p=u?provider(u):null;
      if(p){
@@ -159,13 +159,13 @@ SCAN_JS = r"""(()=>{
        else if(!c.frame)c.frame=p.frame||'';
        return;
      }
-     try{
-       const cw=f.contentWindow,cd=cw&&cw.document;
-       if(!cw||!cd)throw Error('opaque');
-       visit(cw,cd,fpath);
-     }catch(_){
+     let cw=null,cd=null;
+     try{cw=f.contentWindow;cd=cw&&cw.document}catch(_){}
+     if(!cw||!cd){
        if(shown(w,f)&&/captcha|challenge|verification/i.test(src+' '+attr(f,'title')+' '+attr(f,'id')))
          out.opaque.push(fpath);
+     }else{
+       try{visit(cw,cd,fpath)}catch(_){out.opaque.push('scan_error:'+fpath)}
      }
    });
    // Bind receivers only within this document and only to an unambiguous owner.
@@ -222,9 +222,16 @@ SCAN_JS = r"""(()=>{
      }
      add(c,h);
    });
+   // Canvas-source and CSS-only image challenges must not be "no challenge".
+   d.querySelectorAll('canvas[data-captcha],canvas.captcha,canvas[id*="captcha" i],.captcha-image,[data-captcha-background]').forEach(e=>{
+     if(!shown(w,e)||e.tagName==='IMG'||e.querySelectorAll('img').length)return;
+     const id=path+'|unsupported-image:'+key(e);
+     add({id,kind:'image',sitekey:'',visible:true,receiver:'',receiverCount:0,
+       callbacks:[],callbackHints:[],body:'',imageStatus:'image_unreadable'}, {});
+   });
  };
  try{visit(window,document,'top')}catch(_){out.opaque.push('scan_error')}
- return {snapshot:out,handles,docs};
+ return {snapshot:out,handles,docs,wins};
 })"""
 DETECT_JS = "(()=>JSON.stringify((" + SCAN_JS + ")().snapshot))()"
 INJECT_JS = r"""((approved,selected,answer)=>{
@@ -239,23 +246,38 @@ INJECT_JS = r"""((approved,selected,answer)=>{
  const h=live.handles[selected],field=h&&h.receiver;
  if(!field||typeof answer!=='string'||!answer)
    return JSON.stringify({__cs:1,reason:'binding_changed'});
- let submitted=false,called=0,failed=false;
+ let submitted=false,called=0,failed=false,networkObserved=false;
  const watch=()=>{submitted=true};
- const watched=[];
+ const watched=[],fetchRestores=[];
  try{
    for(const d of live.docs){d.addEventListener('submit',watch,true);watched.push(d)}
- }catch(_){for(const d of watched){try{d.removeEventListener('submit',watch,true)}catch(e){}}
-   return JSON.stringify({__cs:1,reason:'possible_commit'});}
+   // Observe synchronous fetch on reachable windows during events/callback.
+   // No claim is made about deferred requests, other network APIs or commits.
+   for(const w of live.wins){
+     if(typeof w.fetch!=='function')continue;
+     const original=w.fetch;
+     const wrapped=function(...args){networkObserved=true;return original.apply(this,args)};
+     w.fetch=wrapped;
+     if(w.fetch===wrapped)fetchRestores.push([w,original,wrapped]);
+   }
+ }catch(_){
+   for(const d of watched){try{d.removeEventListener('submit',watch,true)}catch(e){}}
+   for(const [w,original,wrapped] of fetchRestores){try{if(w.fetch===wrapped)w.fetch=original}catch(e){}}
+   return JSON.stringify({__cs:1,reason:'possible_commit'});
+ }
  try{
    field.value=answer;
    if(field.tagName==='TEXTAREA')field.innerHTML=answer;
    field.dispatchEvent(new Event('input',{bubbles:true}));
    field.dispatchEvent(new Event('change',{bubbles:true}));
    const refs=h.callbacks||[];
-   if(refs.length===1&&!submitted){
+   if(submitted||networkObserved)return JSON.stringify({__cs:1,reason:'possible_commit',called});
+   if(!field.isConnected||field.value!==answer)
+     return JSON.stringify({__cs:1,reason:'response_unverified',called});
+   if(refs.length===1){
      try{refs[0].fn(answer);called=1}catch(_){failed=true}
    }
-   if(submitted||failed)return JSON.stringify({__cs:1,reason:'possible_commit',called});
+   if(submitted||failed||networkObserved)return JSON.stringify({__cs:1,reason:'possible_commit',called});
    let after;
    try{after=(""" + SCAN_JS + r""")().snapshot}catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
    if(JSON.stringify(after)!==JSON.stringify(approved))
@@ -267,7 +289,12 @@ INJECT_JS = r"""((approved,selected,answer)=>{
    if(called!==1)return JSON.stringify({__cs:1,reason:'callback_unconfirmed',called});
    return JSON.stringify({__cs:1,result:'injected',fields:1,callbacks:1,called:1});
  }catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
- finally{for(const d of watched){try{d.removeEventListener('submit',watch,true)}catch(_){}}}
+ finally{
+   for(const d of watched){try{d.removeEventListener('submit',watch,true)}catch(_){}}
+   for(const [w,original,wrapped] of fetchRestores){
+     try{if(w.fetch===wrapped)w.fetch=original}catch(_){}
+   }
+ }
 })"""
 
 
