@@ -155,6 +155,34 @@ SCAN_JS = r"""(()=>{
    }
    return {refs,hints};
  };
+ // This WeakMap preserves callable reference identity between evaluations in
+ // the same page realm. Losing the realm/map changes the nonce and fails closed;
+ // labels and source text alone cannot distinguish replacement closures.
+ const callbackWitness=(w,fn)=>{
+   const marker=Symbol.for('appliedin.captcha.callback-witness.v1');
+   try{
+     let state=w[marker];
+     if(!state){
+       state={ids:new WeakMap(),next:0,
+         nonce:Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)};
+       w[marker]=state;
+       if(w[marker]!==state)return '';
+     }
+     if(!state.ids||typeof state.ids.get!=='function'||!state.nonce)return '';
+     let id=state.ids.get(fn);
+     if(!id){
+       id=state.nonce+':'+(++state.next);
+       state.ids.set(fn,id);
+     }
+     return id;
+   }catch(_){return ''}
+ };
+ const markCallbacks=(c,cb,w)=>{
+   c.callbacks=cb.refs.map(x=>x.label);
+   c.callbackHints=cb.hints;
+   c.callbackWitnesses=cb.refs.map(x=>callbackWitness(w,x.fn));
+   if(c.callbackWitnesses.some(x=>!x))c.invalid=true;
+ };
  const add=(c,h)=>{out.found.push(c);handles[c.id]=h};
  const visit=(w,d,path)=>{
    const frame={path,url:String(w.location.href),password:!!d.querySelector('input[type=password]')};
@@ -175,10 +203,13 @@ SCAN_JS = r"""(()=>{
      let u;try{u=new URL(src,String(w.location.href))}catch(_){u=null}
      const p=u?provider(u):null;
      if(p){
-       let matches=owners.filter(o=>o.c.kind===p.kind&&(!p.sitekey||o.c.sitekey===p.sitekey));
+       const compatible=o=>o.c.kind===p.kind&&(!p.sitekey||!o.c.sitekey||o.c.sitekey===p.sitekey);
+       const matches=owners.filter(compatible);
        const near=typeof f.closest==='function'?f.closest('.g-recaptcha,.cf-turnstile,.h-captcha'):null;
-       let target=near?owners.find(o=>o.e===near):null;
-       if(!target&&matches.length===1)target=matches[0];
+       // A challenge nested under a different provider (or key) is a separate
+       // visible candidate, never evidence for the surrounding widget.
+       let target=near?owners.find(o=>o.e===near&&compatible(o)):null;
+       if(!target&&!near&&matches.length===1)target=matches[0];
        if(!target){
          // Attach a popup to one unowned anchor, but never merge separate anchors.
          const virtual=owners.filter(o=>o.c.kind===p.kind&&o.c.virtual&&o.c.sitekey===p.sitekey);
@@ -192,6 +223,10 @@ SCAN_JS = r"""(()=>{
          target={c,e:null,w,d,virtual:true};owners.push(target);add(c,{owner:null,w,d});
        }
        const c=target.c,vis=shown(w,f);
+       // A bframe can accompany its anchor, but two distinct anchors are
+       // distinct instances even when their provider and sitekey agree.
+       if(p.frame==='anchor'&&c.providerFrames.some(frame=>frame.frame==='anchor'&&frame.path!==fpath))
+         c.invalid=true;
        c.providerFrames.push({path:fpath,src:String(u.href),visible:vis,frame:p.frame||''});
        c.visible=c.visible||vis && (p.frame!=='anchor'||c.size!=='invisible');
        c.enterprise=!!(c.enterprise||p.enterprise);
@@ -226,12 +261,17 @@ SCAN_JS = r"""(()=>{
      if(receivers.length===1){
        c.receiver=path+'|field:'+key(receivers[0]);
        const cb=callbacks(w,o.e,receivers[0]);
-       c.callbacks=cb.refs.map(x=>x.label);c.callbackHints=cb.hints;
+       markCallbacks(c,cb,w);
        Object.assign(handles[c.id],{receiver:receivers[0],callbacks:cb.refs});
      }
    }
    // Text/image CAPTCHA: only an explicitly identifiable img and one nearby answer field.
-   const images=d.querySelectorAll('img[data-captcha],img.captcha,img[id*="captcha" i],img[alt*="captcha" i]');
+   const images=Array.from(d.querySelectorAll('img[data-captcha],img.captcha,img[id*="captcha" i],img[alt*="captcha" i]'));
+   // The wrapper can identify the CAPTCHA even when the contained img has no marker.
+   d.querySelectorAll('.captcha-image').forEach(wrapper=>{
+     for(const img of wrapper.querySelectorAll('img'))
+       if(!images.includes(img))images.push(img);
+   });
    images.forEach(img=>{
      if(!shown(w,img))return;
      const owner=typeof img.closest==='function'?img.closest('form,[data-captcha-container]'):null;
@@ -245,14 +285,19 @@ SCAN_JS = r"""(()=>{
      if(answers.length===1){
        c.receiver=path+'|field:'+key(answers[0]);h.receiver=answers[0];
        const cb=callbacks(w,owner||img.parentElement,answers[0]);
-       c.callbacks=cb.refs.map(x=>x.label);c.callbackHints=cb.hints;h.callbacks=cb.refs;
+       markCallbacks(c,cb,w);h.callbacks=cb.refs;
      }
-     if(answers.length===1&&img.complete&&img.naturalWidth>0&&img.naturalHeight>0){
+     const width=Number(img.naturalWidth),height=Number(img.naturalHeight);
+     // Bound canvas allocation before creating a canvas, regardless of
+     // how small the compressed image file or displayed CSS box may be.
+     const safePixels=Number.isSafeInteger(width)&&Number.isSafeInteger(height)&&
+       width>0&&height>0&&width<=4096&&height<=4096&&width*height<=4194304;
+     if(answers.length===1&&img.complete&&safePixels){
        try{
          let uri=c.src;
          if(!/^data:/i.test(uri)){
            const canvas=d.createElement('canvas');
-           canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+           canvas.width=width;canvas.height=height;
            canvas.getContext('2d').drawImage(img,0,0);
            uri=canvas.toDataURL('image/png');
          }
@@ -270,7 +315,10 @@ SCAN_JS = r"""(()=>{
    });
    // Canvas-source and CSS-only image challenges must not be "no challenge".
    d.querySelectorAll('canvas[data-captcha],canvas.captcha,canvas[id*="captcha" i],.captcha-image,[data-captcha-background]').forEach(e=>{
-     if(!shown(w,e)||e.tagName==='IMG'||e.querySelectorAll('img').length)return;
+     if(!shown(w,e)||e.tagName==='IMG')return;
+     // A visible marked child was already scanned above. An unshown child
+     // still leaves visible wrapper evidence that cannot be treated as absent.
+     if(Array.from(e.querySelectorAll('img')).some(img=>shown(w,img)))return;
      const id=path+'|unsupported-image:'+key(e);
      add({id,kind:'image',sitekey:'',visible:true,receiver:'',receiverCount:0,
        callbacks:[],callbackHints:[],body:'',imageStatus:'image_unreadable'}, {});
@@ -330,9 +378,13 @@ INJECT_JS = r"""((approved,selected,answer)=>{
      return JSON.stringify({__cs:1,reason:'response_unverified',called});
    // Input/change handlers may drift the binding; do not call back into it.
    let afterEvents;
-   try{afterEvents=(""" + SCAN_JS + r""")().snapshot}
+   try{afterEvents=(""" + SCAN_JS + r""")()}
    catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
-   if(JSON.stringify(view(afterEvents))!==JSON.stringify(approved))
+   if(JSON.stringify(view(afterEvents.snapshot))!==JSON.stringify(approved))
+     return JSON.stringify({__cs:1,reason:'possible_commit',called});
+   const afterRefs=(afterEvents.handles[selected]||{}).callbacks||[];
+   if(afterRefs.length!==refs.length||
+       afterRefs.some((ref,i)=>ref.fn!==refs[i].fn||ref.label!==refs[i].label))
      return JSON.stringify({__cs:1,reason:'possible_commit',called});
    if(refs.length===1){
      try{
