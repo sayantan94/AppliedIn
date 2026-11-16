@@ -50,6 +50,7 @@ _WORKABLE_LOCK = threading.Lock()
 _WORKABLE_NEXT_START = 0.0
 _WORKABLE_CLOCK = time.monotonic
 _WORKABLE_SLEEP = time.sleep
+_WORKABLE_WALL_CLOCK = time.time
 
 
 def _api_url(url: str):
@@ -121,7 +122,10 @@ def _api_url(url: str):
 def _workable_start(deadline: float) -> bool:
     """Serialize only Workable start reservations; queued calls share the caller budget."""
     global _WORKABLE_NEXT_START
-    with _WORKABLE_LOCK:
+    remaining = deadline - _WORKABLE_CLOCK()
+    if remaining <= 0 or not _WORKABLE_LOCK.acquire(timeout=remaining):
+        return False
+    try:
         now = _WORKABLE_CLOCK()
         start = max(now, _WORKABLE_NEXT_START)
         delay = start - now
@@ -134,6 +138,8 @@ def _workable_start(deadline: float) -> bool:
             return False
         _WORKABLE_NEXT_START = now + 1.5
         return True
+    finally:
+        _WORKABLE_LOCK.release()
 
 
 def _retry_after(value: str | None, now: float) -> float:
@@ -164,7 +170,7 @@ def _workable_request(endpoint: str):
         except (httpx.HTTPError, TimeoutError):
             return None
         if response.status_code == 429 and attempt == 0:
-            delay = _retry_after(response.headers.get("Retry-After"), _WORKABLE_CLOCK())
+            delay = _retry_after(response.headers.get("Retry-After"), _WORKABLE_WALL_CLOCK())
             if delay > 4 or _WORKABLE_CLOCK() + delay >= deadline:
                 return None
             _WORKABLE_SLEEP(delay)
@@ -180,6 +186,40 @@ def _workable_request(endpoint: str):
 
 def _html_piece(value: object) -> bool:
     return isinstance(value, str) and bool(re.search(r"<[a-z][^>]*>", value, re.I))
+
+
+def _api_incomplete(value: object) -> bool:
+    """An API's own partial-content evidence cannot become a complete HTML witness."""
+    if isinstance(value, list):
+        return any(_api_incomplete(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for raw_key, field in value.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.replace("_", "").replace("-", "").lower()
+        if key in {"truncated", "istruncated", "partial", "ispartial",
+                   "incomplete", "isincomplete", "hasmore", "hasnext",
+                   "hasnextpage", "hasmorepages", "hasmoresections"} and field:
+            return True
+        if key in {"complete", "iscomplete", "responsecomplete", "sectionscomplete",
+                   "descriptioncomplete", "contentcomplete"} and field is False:
+            return True
+        if key in {"pagination", "paging", "pageinfo", "nextpage", "nextcursor",
+                   "nextpagetoken", "continuationtoken", "missingsections",
+                   "missingrequiredsections", "omittedsections"} and field:
+            return True
+    required = value.get("requiredSections", value.get("required_sections"))
+    if isinstance(required, list) and required:
+        sections = value.get("sections")
+        if not isinstance(sections, dict):
+            return True
+        for name in required:
+            section = sections.get(name) if isinstance(name, str) else None
+            content = section.get("text") if isinstance(section, dict) else section
+            if not _html_piece(content):
+                return True
+    return any(_api_incomplete(item) for item in value.values())
 
 
 def _api_meta(url: str, title: str, fragments: list[str]) -> dict | None:
@@ -229,6 +269,10 @@ def _from_new_ats(url: str) -> dict | None:
         except (httpx.HTTPError, ValueError, TypeError):
             return None
     try:
+        # The native detail/widget must not declare missing, truncated, or paginated
+        # role material before its HTML can be marked as verified source.
+        if vendor != "personio" and _api_incomplete(payload):
+            return None
         if vendor == "workday":
             info = payload.get("jobPostingInfo") if isinstance(payload, dict) else None
             if not isinstance(info, dict) or info.get("externalPath") != external:
@@ -266,7 +310,9 @@ def _from_new_ats(url: str) -> dict | None:
                              [description] if isinstance(description, str) else [])
         if vendor == "personio":
             root = ET.fromstring(payload or "")
-            positions = root.findall(".//position")
+            if root.tag != "workzag-jobs":
+                return None
+            positions = root.findall("position")
             matches = [p for p in positions
                        if (p.get("id") or p.findtext("id") or "").strip() == identity["id"]]
             if len(matches) != 1:
