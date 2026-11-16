@@ -51,7 +51,10 @@ def test_display_is_single_scalar_but_original_shape_survives(primary, expected)
     assert isinstance(job.location, str)
     assert job.job_id == BASE["id"] and job.jd_url == URL
     assert "{" not in job.location
-    assert "Ashby location: " in job.jd_text
+    if primary is None:
+        assert "Ashby location:" not in job.jd_text
+    else:
+        assert "Ashby location: " in job.jd_text
     assert pg.valid(job.jd_text, job.posting_guard)
     assert job.jd_text.startswith(ashby_location_metadata(posting))
 
