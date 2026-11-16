@@ -523,6 +523,109 @@ def test_legacy_apply_role_exact_url_reuses_protected_original_pk(env):
     assert env.tracking.status_calls == []
 
 
+
+
+def test_legacy_apply_role_variant_refuses_applied_row_without_duplicate(env):
+    """A decorated equivalent URL must not bypass an old applied hash-key row."""
+    import hashlib
+
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    variant = "https://boards.greenhouse.io/example-co/jobs/4242/?utm_source=example"
+    old = JobRecord(
+        company="Legacy Example Co",
+        job_id=hashlib.sha1(url.encode()).hexdigest()[:12],
+        title="Previously submitted synthetic role", jd_url=url,
+        jd_text=JD_TEXT, ats="custom",
+    )
+    assert env.tracking.put_new(old)
+    env.tracking.rows[old.pk].update(
+        status="applied", confirmation_id="synthetic-receipt",
+        attempts=3, approved=True,
+    )
+    saved = deepcopy(env.tracking.rows[old.pk])
+
+    result = _apply(env, variant)
+    assert result.json() == {"ok": False, "error": "protected_tracking_state"}
+    assert len(env.tracking.rows) == 1
+    assert env.tracking.rows[old.pk] == saved
+    assert env.reader.calls == []
+    assert env.runs == []
+    assert env.tracking.guard_calls == []
+    assert env.tracking.metadata_calls == []
+    assert env.tracking.status_calls == []
+
+
+def test_legacy_apply_role_variant_reuses_original_pk_and_source(env):
+    """A reusable historic row is refreshed, never migrated or re-dispatched."""
+    import hashlib
+
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    variant = "https://boards.greenhouse.io/example-co/jobs/4242/?utm_source=example"
+    inspected = pg.analyze(JD_TEXT, source_required=True,
+                           html_variants=["<p>Safe synthetic posting</p>"])
+    old = JobRecord(
+        company="Legacy Example Co",
+        job_id=hashlib.sha1(url.encode()).hexdigest()[:12],
+        title="Original synthetic title", jd_url=url,
+        jd_text=inspected["text"],
+        posting_guard=inspected["posting_guard"], ats="custom",
+    )
+    assert env.tracking.put_new(old)
+    env.tracking.rows[old.pk].update(
+        status="tailored", attempts=4, approved=True,
+        resume_s3_key="synthetic-artifact",
+    )
+    env.reader.title = "Updated Synthetic Platform Engineer"
+
+    result = _apply(env, variant)
+    assert result.json() == {
+        "ok": True, "status": "existing", "pk": old.pk,
+        "company": "Legacy Example Co", "title": env.reader.title,
+    }
+    assert len(env.tracking.rows) == 1
+    row = env.tracking.rows[old.pk]
+    assert row["pk"] == make_pk(row["company"], row["job_id"]) == old.pk
+    assert row["company"] == "Legacy Example Co"
+    assert row["job_id"] == old.job_id
+    assert row["jd_url"] == url and row["ats"] == "custom"
+    assert row["status"] == "tailored"
+    assert row["title"] == env.reader.title
+    assert row["attempts"] == 4 and row["approved"] is True
+    assert row["resume_s3_key"] == "synthetic-artifact"
+    assert pg.valid(row["jd_text"], row["posting_guard"])
+    assert env.tracking.guard_calls == [(old.pk, True)]
+    assert env.tracking.metadata_calls == [
+        (old.pk, {"title": env.reader.title}),
+    ]
+    assert env.tracking.status_calls == []
+    assert env.reader.calls == [url]
+    assert env.runs == []
+
+
+def test_legacy_apply_role_variant_refuses_ambiguous_old_keys(env):
+    """Two independently proved historic pks for one posting cannot be chosen."""
+    import hashlib
+
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    variant = "https://boards.greenhouse.io/example-co/jobs/4242/?utm_source=example"
+    old_id = hashlib.sha1(url.encode()).hexdigest()[:12]
+    for company in ("Legacy Example One", "Legacy Example Two"):
+        assert env.tracking.put_new(JobRecord(
+            company=company, job_id=old_id, title="Synthetic duplicate",
+            jd_url=url, jd_text=JD_TEXT, ats="custom",
+        ))
+    saved = deepcopy(env.tracking.rows)
+
+    result = _apply(env, variant)
+    assert result.json() == {"ok": False, "error": "ambiguous_posting_identity"}
+    assert env.tracking.rows == saved
+    assert env.reader.calls == []
+    assert env.runs == []
+    assert env.tracking.guard_calls == []
+    assert env.tracking.metadata_calls == []
+    assert env.tracking.status_calls == []
+
+
 def test_workday_canonical_pk_is_safe_for_single_segment_actions(env):
     """Every ordinary pk route must be able to address an admitted Workday row."""
     url = "https://example-co.wd5.myworkdayjobs.com/External/job/Remote/R123"

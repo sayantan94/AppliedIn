@@ -579,7 +579,7 @@ def _manual_role_identity(url: str) -> dict | None:
 
 
 def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tuple[dict | None, bool]:
-    """Prefer canonical pks; recover historic rows only with exact source proof.
+    """Prefer canonical pks; recover historic rows using stored URL/hash proof.
 
     A LinkedIn query parameter is not proof that two distinct ATS postings
     are the same. Cross-ATS merges must not be driven by that parameter.
@@ -610,17 +610,24 @@ def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tup
                                                row.get("job_id") or "")):
                 continue
             matches[row["pk"]] = row
-    elif source_url:
-        # Pre-#372 apply-role persisted sha1(full URL)[:12] as a custom job ID.
-        # Only the *exact* stored source plus the old hash is enough to recover
-        # it. Never migrate its pk or admit an unrelated same-number posting.
-        old_job_id = hashlib.sha1(source_url.encode()).hexdigest()[:12]
+    elif source_url and not direct:
+        # Pre-#372 apply-role hashed the entire *stored* source URL. Prove
+        # that historic URL/hash pair before comparing parsed ATS posting IDs:
+        # decorative query/slash differences must not evade a protected row.
         for row in tracking.all():
-            if (not isinstance(row, dict) or row.get("jd_url") != source_url
-                    or row.get("ats") != "custom"
-                    or row.get("job_id") != old_job_id
-                    or row.get("pk") != make_pk(row.get("company") or "",
-                                               row.get("job_id") or "")):
+            if (not isinstance(row, dict) or row.get("ats") != "custom"
+                    or not isinstance(row.get("jd_url"), str) or not row["jd_url"]
+                    or not isinstance(row.get("job_id"), str)
+                    or not isinstance(row.get("company"), str) or not row["company"]
+                    or row["job_id"] != hashlib.sha1(
+                        row["jd_url"].encode()).hexdigest()[:12]
+                    or row.get("pk") != make_pk(row["company"], row["job_id"])):
+                continue
+            previous = _manual_role_identity(row["jd_url"])
+            # The canonical job_id includes vendor, tenant, context and posting.
+            # No rewrite of the old pk, job_id, company or source is warranted.
+            if (not previous or previous["ats"] != identity["ats"]
+                    or previous["job_id"] != identity["job_id"]):
                 continue
             matches[row["pk"]] = row
 
