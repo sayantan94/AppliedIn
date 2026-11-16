@@ -117,12 +117,12 @@ def test_exact_per_invocation_event_shape_and_order(world, capsys):
         "prior_claim_state": None, "agent_pid": "4242",
         "allow": True, "reason": "eligible",
     }]
-    assert w.invoke("start") == 2
+    assert w.invoke("start") == 1
     output = capsys.readouterr()
     assert output.out == "STOP: claim_exists\n"
     assert _events(w.root)[1] == {
         "at": NOW.isoformat(), "pk": PK, "operation": "start",
-        "argv": ["start", PK, BOARD], "return_code": 2,
+        "argv": ["start", PK, BOARD], "return_code": 1,
         "output": "STOP: claim_exists\n", "prior_claim_state": "filling",
         "agent_pid": "4242", "allow": False, "reason": "claim_exists",
     }
@@ -130,9 +130,9 @@ def test_exact_per_invocation_event_shape_and_order(world, capsys):
 
 def test_release_removes_only_matching_filling_claim(world, monkeypatch):
     w = world
-    assert w.invoke("release") == 2
+    assert w.invoke("release") == 1
     assert w.invoke("start") == 0
-    assert w.invoke("release", board="another-board") == 2
+    assert w.invoke("release", board="another-board") == 1
     assert _claim(w.root)["state"] == "filling"
     assert w.invoke("release") == 0
     assert _claim(w.root) is None
@@ -144,24 +144,24 @@ def test_release_does_not_remove_submit_clicked_or_recorded(world):
     w = world
     assert w.invoke("start") == 0
     assert w.invoke("submit") == 0
-    assert w.invoke("release") == 2
+    assert w.invoke("release") == 1
     assert _claim(w.root)["state"] == "submit-clicked"
     assert w.invoke("done") == 0
-    assert w.invoke("release") == 2
-    assert w.invoke("done") == 2
+    assert w.invoke("release") == 1
+    assert w.invoke("done") == 1
     assert _claim(w.root)["state"] == "recorded"
 
 
 def test_reopen_only_from_clicked_by_claiming_agent(world, monkeypatch):
     w = world
-    assert w.invoke("reopen") == 2
+    assert w.invoke("reopen") == 1
     assert w.invoke("start") == 0
-    assert w.invoke("reopen") == 2
+    assert w.invoke("reopen") == 1
     assert w.invoke("submit") == 0
     monkeypatch.setenv("BOARD_AGENT_PID", "9999")
-    assert w.invoke("reopen") == 2
+    assert w.invoke("reopen") == 1
     monkeypatch.setenv("BOARD_AGENT_PID", "4242")
-    assert w.invoke("reopen", board="another-board") == 2
+    assert w.invoke("reopen", board="another-board") == 1
     assert _claim(w.root)["state"] == "submit-clicked"
     assert w.invoke("reopen") == 0
     assert _claim(w.root)["state"] == "filling"
@@ -173,12 +173,12 @@ def test_reopen_only_from_clicked_by_claiming_agent(world, monkeypatch):
 
 def test_board_and_pid_identity_pins_all_transitions(world, monkeypatch, capsys):
     w = world
-    assert w.invoke("start", board="wrong-board") == 2
+    assert w.invoke("start", board="wrong-board") == 1
     assert capsys.readouterr().out == "STOP: board_pin\n"
     assert w.invoke("start") == 0
     monkeypatch.setenv("BOARD_AGENT_PID", "another-pid")
-    assert w.invoke("submit") == 2
-    assert w.invoke("release") == 2
+    assert w.invoke("submit") == 1
+    assert w.invoke("release") == 1
     assert _claim(w.root)["agent_pid"] == "4242"
     monkeypatch.setenv("BOARD_AGENT_PID", "4242")
     assert w.invoke("submit") == 0
@@ -188,7 +188,7 @@ def test_submit_rechecks_status_and_eligibility_immediately(world, capsys):
     w = world
     assert w.invoke("start") == 0
     w.seed({**JOB, "status": "skipped"})
-    assert w.invoke("submit") == 2
+    assert w.invoke("submit") == 1
     assert capsys.readouterr().out.endswith("STOP: skipped\n")
     assert _claim(w.root)["state"] == "filling"
     w.seed(JOB)
@@ -197,7 +197,7 @@ def test_submit_rechecks_status_and_eligibility_immediately(world, capsys):
         "company": "other-co", "title": "Different role",
         "status": "applied", "applied_at": NOW.isoformat(),
     })
-    assert w.invoke("submit") == 2
+    assert w.invoke("submit") == 1
     assert _events(w.root)[-1]["reason"] == "duplicate_job_id"
     assert _claim(w.root)["state"] == "filling"
 
@@ -207,12 +207,12 @@ def test_submitted_click_counts_but_does_not_mark_applied(world):
     assert w.invoke("start") == 0
     assert w.invoke("submit") == 0
     assert w.tracking.get(PK)["status"] == "tailored"
-    assert w.invoke("start") == 2
+    assert w.invoke("start") == 1
     w.seed({
         "pk": "example-co#next", "job_id": "next", "company": "example-co",
         "title": JOB["title"], "status": "tailored", "greenhouse_board": BOARD,
     })
-    assert w.invoke("start", pk="example-co#next") == 2
+    assert w.invoke("start", pk="example-co#next") == 1
     assert _events(w.root)[-1]["reason"] == "duplicate_title_company"
 
 
@@ -223,7 +223,7 @@ def test_duplicate_job_id_despite_different_title_and_company(world):
         "company": "another-co", "title": "Different role",
         "status": "applied", "applied_at": NOW.isoformat(),
     })
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "duplicate_job_id"
 
 
@@ -234,7 +234,7 @@ def test_normalized_title_company_and_distinct_companies(world):
         "company": "Example Co", "title": "  SYNTHETIC--Engineer!  ",
         "status": "applied_manual", "applied_at": NOW.isoformat(),
     })
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "duplicate_title_company"
     w.seed({
         "pk": "example-co#old", "job_id": "old",
@@ -258,12 +258,12 @@ def test_never_and_parked_row_identifiers(world):
     w = world
     w.policy["NEVER"] = [PK]
     w.save()
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "blocked_row"
     w.policy["NEVER"] = []
     w.policy["PARKED"] = ["example-co#"]
     w.save()
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "parked"
 
 
@@ -275,7 +275,7 @@ def test_explicit_distinct_pair_exception_exempts_duplicate_not_cap(world):
         "status": "applied", "applied_at": NOW.isoformat(),
     }
     w.seed(other)
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     w.policy["DISTINCT_PAIRS"] = [[PK, other["pk"]]]
     w.save()
     assert w.invoke() == 0
@@ -283,7 +283,7 @@ def test_explicit_distinct_pair_exception_exempts_duplicate_not_cap(world):
     assert w.invoke("release") == 0
     w.policy["COUNT_CAPS"] = {"example-co": 1}
     w.save()
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "company_cap"
 
 
@@ -291,7 +291,7 @@ def test_company_date_cap(world):
     w = world
     w.policy["CAPS"] = {"example-co": "2026-01-01"}
     w.save()
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "company_date_cap"
     w.policy["CAPS"] = {"example-co": "2025-12-31"}
     w.save()
@@ -316,20 +316,24 @@ def test_count_cap_fifth_sixth_and_180_day_expiry(world):
     assert w.invoke() == 0  # Four qualifying priors and the fifth candidate.
     assert w.invoke("release") == 0
     w.seed(priors[4])
-    assert w.invoke() == 2  # Five qualifying priors and the sixth candidate.
+    assert w.invoke() == 1  # Five qualifying priors and the sixth candidate.
     assert _events(w.root)[-1]["reason"] == "company_cap"
 
 
 @pytest.mark.parametrize(
     ("handoff", "allowed"),
     [
-        ("", False), ("Active request", False),
-        ("Active\nBACK TO AGENTS\nstill active", False),
-        ("Active\nBACK TO AGENTS\n", True),
-        ("Active\nDONE\n", True),
+        ("", True),
+        ("Active request", True),
+        ("other-co#unrelated active\n", True),
+        (f"{PK} active\n", False),
+        (f"{PK} BACK TO AGENTS\nstill active\n", True),
+        (f"{PK} BACK TO AGENTS\n", True),
+        (f"{PK} DONE\n", True),
+        (f"{PK} DONE\n{PK} active\n", False),
     ],
 )
-def test_handoff_last_line_only(world, handoff, allowed):
+def test_handoff_holds_only_the_named_row(world, handoff, allowed):
     w = world
     (w.root / "owner-handoff.md").write_text(handoff, encoding="utf-8")
     assert (w.invoke() == 0) is allowed
@@ -338,16 +342,16 @@ def test_handoff_last_line_only(world, handoff, allowed):
 def test_skipped_and_unconfirmed_submit_row_guard(world):
     w = world
     w.seed({**JOB, "status": "skipped"})
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "skipped"
     w.seed({**JOB, "status": "needs_human", "submit_clicked_at": NOW.isoformat()})
-    assert w.invoke() == 2
+    assert w.invoke() == 1
     assert _events(w.root)[-1]["reason"] == "already_submitted"
 
 
 def test_submission_without_claim_fails_even_when_row_eligible(world):
     w = world
-    assert w.invoke("submit") == 2
+    assert w.invoke("submit") == 1
     assert _claim(w.root) is None
     assert _events(w.root)[-1]["reason"] == "claim_mismatch"
 
@@ -359,19 +363,19 @@ def test_invalid_arguments_record_original_argv_and_return_code(world, args, cap
     rc = guard.main(args, legacy_dir=w.tmp, tracking=w.tracking, at=NOW)
     assert rc == 2
     output = capsys.readouterr()
-    assert output.out == ""
-    assert output.err.startswith("usage: precheck ")
+    assert output.out.startswith("usage: precheck ")
+    assert output.err == ""
     event = _events(w.root)[-1]
     assert event["argv"] == args
     assert event["return_code"] == 2
-    assert event["output"] == output.err
+    assert event["output"] == output.out
     assert event["reason"] == "invalid_arguments"
     assert event["prior_claim_state"] is None
 
 
 def test_help_is_logged_and_does_not_create_claim(world, capsys):
     w = world
-    assert guard.main(["--help"], legacy_dir=w.tmp, tracking=w.tracking, at=NOW) == 0
+    assert guard.main(["--help"], legacy_dir=w.tmp, tracking=w.tracking, at=NOW) == 2
     assert "usage: precheck" in capsys.readouterr().out
     assert _claim(w.root) is None
     assert _events(w.root)[-1]["argv"] == ["--help"]
@@ -436,7 +440,7 @@ def test_sequential_and_concurrent_start_are_serialized_in_one_process(world):
     w = world
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: w.invoke("start"), range(2)))
-    assert sorted(results) == [0, 2]
+    assert sorted(results) == [0, 1]
     assert _claim(w.root)["state"] == "filling"
     events = _events(w.root)
     assert len(events) == 2
@@ -449,7 +453,7 @@ def test_concurrent_submit_records_one_click_transition(world):
     assert w.invoke("start") == 0
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: w.invoke("submit"), range(2)))
-    assert sorted(results) == [0, 2]
+    assert sorted(results) == [0, 1]
     assert _claim(w.root)["state"] == "submit-clicked"
     events = _events(w.root)
     assert len(events) == 3
@@ -491,7 +495,7 @@ sys.argv = [str(script), "--help"]
 try:
     runpy.run_path(str(script), run_name="__main__")
 except SystemExit as exc:
-    assert exc.code == 0
+    assert exc.code == 2
 else:
     raise AssertionError("shim did not terminate")
 assert Path(sys.modules["tools.submit_precheck"].__file__).resolve() == expected

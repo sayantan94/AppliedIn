@@ -197,17 +197,24 @@ def _when(row: dict) -> datetime | None:
     return None
 
 
-def _handoff_blocks(root: Path) -> bool:
+def _handoff_blocks(root: Path, pk: str) -> bool:
+    # The legacy guard only holds a row that a handoff line actually names; the
+    # last such line must release it with BACK TO AGENTS or DONE. A whole-file
+    # last line would let an unrelated owner row block or release every row.
     path = root / "owner-handoff.md"
     if not path.exists():
         return False
     if not path.is_file() or path.is_symlink():
         raise PrecheckUnavailable("invalid handoff file")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise PrecheckUnavailable("unreadable handoff file") from exc
-    return not lines or lines[-1] not in ("BACK TO AGENTS", "DONE")
+    named = re.compile(re.escape(pk) + r"(?![0-9a-z])")
+    lines = [line for line in text.splitlines() if named.search(line)]
+    if not lines:
+        return False
+    return not re.search(r"\bBACK TO AGENTS\b|\bDONE\b", lines[-1].upper())
 
 
 def evaluate(
@@ -224,7 +231,7 @@ def evaluate(
         return Decision(False, "already_submitted")
     if current.get("status") not in ("tailored", "submitting", "needs_human"):
         return Decision(False, "status_blocked")
-    if _handoff_blocks(root):
+    if _handoff_blocks(root, pk):
         return Decision(False, "owner_handoff")
     claim = _read_claim(root, pk)
     if claim.get("submit_clicked") or claim.get("state") in ("submit-clicked", "recorded"):
@@ -358,20 +365,15 @@ def main(
     board = raw[2] if len(raw) > 2 else None
     pid = _agent_pid()
     valid = len(raw) == 3 and op in _OPERATIONS and bool(pk) and bool(board)
-    help_requested = raw in (["--help"], ["-h"])
     try:
         root = _root(legacy_dir)
         with _serialized(root):
             prior = _read_claim(root, pk) if pk else {}
             prior_state = prior.get("state")
-            error_stream = False
-            if help_requested:
-                reason, output, code = "help", _USAGE, 0
-            elif not valid:
+            if not valid:
                 reason, output, code = "invalid_arguments", _USAGE, 2
-                error_stream = True
             elif os.environ.get("BOARD_AGENT_BOARD") not in (None, board):
-                reason, output, code = "board_pin", "STOP: board_pin\n", 2
+                reason, output, code = "board_pin", "STOP: board_pin\n", 1
             else:
                 try:
                     if op in ("start", "submit"):
@@ -448,13 +450,14 @@ def main(
                             next_claim.pop("submit_clicked_at", None)
                             _write_claim(root, pk, next_claim)
                     reason = decision.reason
-                    code = 0 if decision.allow else 2
+                    # The legacy CLI returns 1 for a guard STOP; 2 stays the
+                    # usage/precheck-unavailable convention.
+                    code = 0 if decision.allow else 1
                     output = "OK\n" if decision.allow else "STOP: " + reason + "\n"
                 except (PrecheckUnavailable, OSError, ValueError, RuntimeError, TypeError):
                     reason, output, code = (
                         "precheck_unavailable", "STOP: precheck unavailable\n", 2,
                     )
-                    error_stream = True
             _append_event(
                 root, pk=pk, operation=op, at=now, argv=raw,
                 return_code=code, output=output, reason=reason,
@@ -463,7 +466,7 @@ def main(
     except (PrecheckUnavailable, OSError, ValueError, RuntimeError, TypeError):
         print("STOP: precheck unavailable", file=sys.stderr)
         return 2
-    print(output, end="", file=sys.stderr if error_stream else sys.stdout)
+    print(output, end="", file=sys.stdout)
     return code
 
 
