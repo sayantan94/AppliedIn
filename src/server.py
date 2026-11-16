@@ -1938,7 +1938,8 @@ def create_app() -> FastAPI:
     def tailor_text(body: dict, background: BackgroundTasks):
         """Tailor a pasted JD only; its text identity never becomes an ATS job."""
         import hashlib
-        from core.models import JobRecord
+        from core.models import JobRecord, Status
+        from core.storage.base import REPAIR_READER_FIELDS
         from tools import posting_guard as pg
 
         text = ((body or {}).get("text") or "").strip()
@@ -1953,8 +1954,7 @@ def create_app() -> FastAPI:
         # text and must never become text-only rows.
         existing = [row for row in stores.tracking.all()
                     if row.get("ats") == "custom" and not row.get("jd_url")
-                    and row.get("job_id") in {job_id, "text-" + digest[:12]}
-                    and (row.get("jd_text") or "").strip() == text]
+                    and row.get("job_id") in {job_id, "text-" + digest[:12]}]
         if len(existing) > 1:
             return {"ok": False, "error": "ambiguous_text_identity"}
         row = existing[0] if existing else None
@@ -1970,6 +1970,23 @@ def create_app() -> FastAPI:
                 return {"ok": False, "error": "posting_guard_conflict"}
             if not _manual_update_display(stores, pk, {
                     "title": title, "display_company": company}):
+                return {"ok": False, "error": "tracking_conflict"}
+            # Only a status-conditional patch can restage a prior tailored or
+            # skipped text card; set_status could overwrite in-flight work.
+            current = stores.tracking.get_current(pk)
+            if (not current or _review_row_conflict(current)
+                    or submit_hold.blocked(pk, current, tracking=stores.tracking)
+                    or current.get("status") not in {
+                        "found", "skipped", "error", "failed", "tailored"
+                    }):
+                return {"ok": False, "error": "tracking_conflict"}
+            reader = {key: current[key] for key in REPAIR_READER_FIELDS
+                      if key in current}
+            if not stores.tracking.update_if_status(
+                    pk, current["status"],
+                    {"status": Status.FOUND, "skip_reason": "",
+                     "fail_kind": "", "fail_reason": ""},
+                    expected_reader=reader):
                 return {"ok": False, "error": "tracking_conflict"}
             return {"ok": True, "status": "existing", "pk": pk,
                     "company": company, "title": title}
@@ -2073,15 +2090,28 @@ def create_app() -> FastAPI:
             return {"ok": True, "status": "existing", "pk": pk,
                     "company": company, "title": title}
 
+        # A new row is not source-verified until the guarded compare commits.
+        # On a failed compare it must retain the untrusted placeholder JD.
+        pending = pg.analyze("", source_required=True)
         job = JobRecord(company=company, job_id=identity["job_id"], title=title,
-                        jd_url=read_url, jd_text=meta["text"],
-                        posting_guard=meta["posting_guard"], ats=identity["ats"],
+                        jd_url=read_url, jd_text=pending["text"],
+                        posting_guard=pending["posting_guard"], ats=identity["ats"],
                         posted_at=meta.get("posted_at") or "")
         pk = job.pk
         if not stores.tracking.put_new(job):
             return {"ok": False, "error": "tracking_conflict"}
         if not _commit_manual_posting(pk, stores, meta):
-            return {"ok": False, "error": "posting_guard_conflict"}
+            # Historical apply-role callers expect a persisted new card and a
+            # background task. Never score it after a failed guarded write.
+            def _guard_conflict() -> None:
+                import logging
+                logging.getLogger("server").warning(
+                    "apply-role: posting guard conflict for %s; scorer not started", pk)
+
+            background.add_task(_guard_conflict)
+            return {"ok": True, "status": "found", "pk": pk,
+                    "company": company, "title": title,
+                    "warning": "posting_guard_conflict"}
 
         def _run() -> None:
             import logging
@@ -3006,6 +3036,7 @@ def create_app() -> FastAPI:
         return {"waiting": Verification(make_stores(settings).tracking.r).pending()}
 
     @app.post("/actions/skip/{pk:path}")
+    @app.post("/actions/skip/{pk}")
     def skip(pk: str):
         """Decline a job: mark it skipped AND take it out of the apply queue.
 
