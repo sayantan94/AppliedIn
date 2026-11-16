@@ -160,9 +160,11 @@ def _claim_path(root: Path, pk: str) -> Path:
 
 def _read_claim(root: Path, pk: str) -> dict:
     path = _claim_path(root, pk)
+    if path.is_symlink():
+        raise PrecheckUnavailable("unsafe claim file")
     if not path.exists():
         return {}
-    if not path.is_file() or path.is_symlink():
+    if not path.is_file():
         raise PrecheckUnavailable("invalid claim file")
     try:
         claim = json.loads(path.read_text(encoding="utf-8"))
@@ -204,7 +206,7 @@ def _handoff_blocks(root: Path) -> bool:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise PrecheckUnavailable("unreadable handoff file") from exc
-    return bool(lines) and lines[-1] not in ("BACK TO AGENTS", "DONE")
+    return not lines or lines[-1] not in ("BACK TO AGENTS", "DONE")
 
 
 def evaluate(
