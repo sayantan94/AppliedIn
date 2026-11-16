@@ -134,16 +134,19 @@ def test_verified_quote_projects_effective_score_after_raw_witness(
     assert len(witnessed) == 1
     raw_text, forwarded = witnessed[0]
     assert json.loads(raw_text)["score"] == 8  # unchanged ADK model witness
-    assert forwarded["score"] == 3              # after validation, before yield
+    effective = 3 if kind == "other" else 8
+    assert forwarded["score"] == effective        # after validation, before yield
     assert forwarded["dealbreaker"]["kind"] == kind
-    assert h.next.observed == [3]  # the next ADK agent sees effective score
-    assert h.stores.tracking.row["match_score"] == 3
-    assert h.saved[0]["match_score"] == 3  # existing persisted score
+    assert h.next.observed == [effective]  # next ADK agent sees projected score
+    assert h.stores.tracking.row["match_score"] == effective
+    assert h.saved[0]["match_score"] == effective
 
 
 @pytest.mark.parametrize("kind", ["location", "other"])
-def test_code_cap_reaches_ordinary_shortlist_threshold(harness, kind):
+def test_code_cap_reaches_ordinary_shortlist_threshold(harness, monkeypatch, kind):
     h = harness
+    if kind == "location":
+        _fresh_scorer_state(monkeypatch, JD + "\nRemote — Japan-only")
     h.fake.scripted = [_response(_payload(kind=kind, quote=GOOD_QUOTE))]
     result = _run(h)
     assert result["result"] == "skipped"
@@ -153,18 +156,16 @@ def test_code_cap_reaches_ordinary_shortlist_threshold(harness, kind):
     assert len(h.fake.requests) == 1
 
 
-def test_verbatim_location_dealbreaker_caps_at_three(harness, monkeypatch):
-    # A high raw fit must not bypass the shortlist gate when the scorer cites
-    # a substantive location requirement verbatim from its own visible JD.
+def test_verbatim_location_dealbreaker_without_geo_proof_does_not_cap(harness, monkeypatch):
+    # A model quote about an unspecified example city is not geographic proof.
     h = harness
     quote = "This role requires on-site work in Example City every weekday."
     _fresh_scorer_state(monkeypatch, JD + " " + quote)
     h.fake.scripted = [_response(_payload(score=9, kind="location", quote=quote))]
     result = _run(h)
-    assert result["result"] == "skipped"
-    assert h.stores.tracking.row["skip_reason"] == "low_score"
-    assert h.stores.tracking.row["match_score"] == 3
-    assert h.next.observed == []
+    assert result["result"] != "skipped"
+    assert h.stores.tracking.row["match_score"] == 9
+    assert h.next.observed == [9]
     assert len(h.fake.requests) == 1
 
 
@@ -192,7 +193,10 @@ def test_insufficient_or_false_quotes_are_non_capping(
     assert h.saved[0]["match_score"] == 8
     warnings = [r.getMessage() for r in caplog.records
                 if "scorer dealbreaker cap ignored" in r.getMessage()]
-    assert warnings
+    if claim["kind"] == "other":
+        assert warnings
+    else:
+        assert not warnings  # model location claims are not quote-capped
     assert all(GOOD_QUOTE not in message and JD not in message for message in warnings)
 
 
@@ -536,3 +540,85 @@ def test_punctuation_free_requirement_bullet_does_not_consume_next_line(harness,
     assert _run(h) == {"result": "skipped", "pk": h.pk,
                        "reason": "eligibility conflict: " + family}
     assert h.next.observed == h.fake.requests == []
+
+
+@pytest.mark.parametrize("kind,expected_source", [
+    (None, "location"), ("location", "location"),
+    ("authorization", "location"), ("other", "location"),
+])
+def test_proven_out_of_class_wins_once_over_model_claim(
+    harness, monkeypatch, caplog, kind, expected_source,
+):
+    h = harness
+    jd = JD + "\nRemote — Japan-only"
+    _fresh_scorer_state(monkeypatch, jd)
+    h.fake.scripted = [_response(_payload(kind=kind, quote=GOOD_QUOTE))]
+    with caplog.at_level(logging.WARNING):
+        outcome = _run(h)
+    assert outcome["result"] == "skipped"
+    assert h.stores.tracking.row["match_score"] == 3
+    applied = [r.getMessage() for r in caplog.records
+               if "scorer_dealbreaker_cap_applied" in r.getMessage()]
+    assert applied == [
+        f"scorer_dealbreaker_cap_applied source={expected_source} raw=8 effective=3"
+    ]
+    assert all(JD not in m and "example-co" not in m and GOOD_QUOTE not in m
+               for m in applied)
+
+
+@pytest.mark.parametrize("posting", [
+    "Remote — APAC; Office: Japan",
+    "Remote; Location: US",
+    "Remote worldwide; Remote US-only",
+])
+def test_in_class_or_unknown_ignores_location_quote(
+    harness, monkeypatch, caplog, posting,
+):
+    h = harness
+    jd = JD + "\n" + posting
+    _fresh_scorer_state(monkeypatch, jd)
+    h.fake.scripted = [_response(_payload(kind="location", quote=GOOD_QUOTE))]
+    with caplog.at_level(logging.WARNING):
+        _run(h)
+    assert h.next.observed == [8]
+    assert h.stores.tracking.row["match_score"] == 8
+    assert not [r for r in caplog.records
+                if "scorer_dealbreaker_cap_applied" in r.getMessage()]
+
+
+def test_other_qualified_quote_logs_one_applied_cap(harness, caplog):
+    h = harness
+    h.fake.scripted = [_response(_payload(kind="other", quote=GOOD_QUOTE))]
+    with caplog.at_level(logging.WARNING):
+        _run(h)
+    applied = [r.getMessage() for r in caplog.records
+               if "scorer_dealbreaker_cap_applied" in r.getMessage()]
+    assert applied == ["scorer_dealbreaker_cap_applied source=other raw=8 effective=3"]
+
+
+def test_nonreducing_cap_emits_no_applied_log(harness, monkeypatch, caplog):
+    h = harness
+    _fresh_scorer_state(monkeypatch, JD + "\nRemote — US-only")
+    h.fake.scripted = [_response(_payload(score=2))]
+    with caplog.at_level(logging.WARNING):
+        _run(h)
+    assert h.stores.tracking.row["match_score"] == 2
+    assert not [r for r in caplog.records
+                if "scorer_dealbreaker_cap_applied" in r.getMessage()]
+
+
+def test_remote_only_onsite_pre_score_gate_prevents_any_scorer(harness, monkeypatch):
+    from discovery.watchlist import Preferences
+    from tools import posting_guard as pg
+
+    h = harness
+    monkeypatch.setattr(R, "_effective_prefs",
+                        lambda _: Preferences(remote_only=True))
+    h.stores.tracking.row["location"] = "On-site, Japan"
+    async def onsite(_):
+        return pg.analyze("On-site — Japan; worksite: Japan")
+    monkeypatch.setattr(R, "_jd_meta", onsite)
+    result = _run(h)
+    assert result["result"] == "skipped"
+    assert h.fake.requests == []
+    assert h.next.observed == []
