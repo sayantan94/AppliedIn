@@ -123,9 +123,13 @@ function makeWindow(spec){
     if(widget.enterprise)w.grecaptcha={enterprise:{}};
     const receiver=widget.kind==='turnstile'?'cf-turnstile-response':'g-recaptcha-response';
     if(widget.receiver!==false){
-      owner.appendChild(new Element(widget.kind==='turnstile'?'input':'textarea',
-        {name:receiver},doc));
+      const attrs={name:receiver};
+      if(widget.receiverCallback)attrs['data-callback']=widget.receiverCallback;
+      if(widget.eventBehavior==='submit')attrs['data-event-submit']=true;
+      if(widget.eventBehavior==='clear')attrs['data-event-clear']=true;
+      owner.appendChild(new Element(widget.kind==='turnstile'?'input':'textarea',attrs,doc));
     }
+    if(widget.receiverCallback)w[widget.receiverCallback]=()=>{counts.callbacks++};
     if(widget.duplicateReceiver)owner.appendChild(new Element('textarea',{name:receiver},doc));
     if(widget.callback){
       w[widget.callback]=(answer)=>{
@@ -137,6 +141,7 @@ function makeWindow(spec){
         if(widget.behavior==='navigate')w.location.href='https://example.test/elsewhere';
         if(widget.behavior==='submit')doc.emit('submit');
         if(widget.behavior==='fetch')w.fetch('/synthetic');
+        if(widget.behavior==='async')return {then:()=>{}};
         if(widget.behavior==='remove'){
           const el=owner.querySelectorAll('input,textarea')[0];
           if(el){el.isConnected=false;owner.children=owner.children.filter(child=>child!==el);}
@@ -322,6 +327,7 @@ def test_actual_js_duplicate_receiver_refuses():
     ({"callback": "complete", "behavior": "throw"}, "possible_commit"),
     ({"callback": "complete", "behavior": "submit"}, "possible_commit"),
     ({"callback": "complete", "behavior": "fetch"}, "possible_commit"),
+    ({"callback": "complete", "behavior": "async"}, "possible_commit"),
     ({"callback": "complete", "behavior": "navigate"}, "possible_commit"),
     ({"callback": "complete", "behavior": "remove"}, "possible_commit"),
     ({"callback": "complete", "behavior": "clear"}, "response_unverified"),
@@ -332,6 +338,36 @@ def test_actual_js_callback_outcomes(widget, reason):
     assert page["counts"]["callbacks"] <= 1
     # Any submission here is callback-origin, never script-issued.
     assert page["counts"]["submits"] == (1 if widget.get("behavior") == "submit" else 0)
+
+
+def test_actual_js_two_bound_callbacks_fill_then_handoff():
+    page = _node(_widget(receiverCallback="second"), inject=True)
+    assert page["injection"]["reason"] == "callback_ambiguous"
+    assert page["counts"]["callbacks"] == 0
+    assert page["values"].count("SYNTHETIC_TOKEN") == 1
+
+
+@pytest.mark.parametrize("event", ["submit", "clear"])
+def test_actual_js_event_effect_refuses_callback(event):
+    page = _node(_widget(eventBehavior=event), inject=True)
+    assert page["injection"]["reason"] in ("possible_commit", "response_unverified")
+    assert page["counts"]["callbacks"] == 0
+
+
+def test_actual_js_keyless_visible_turnstile_refuses():
+    page = _node({"url": "https://example.test/apply",
+                  "widgets": [{"kind": "turnstile", "sitekey": ""}]})
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert exc.value.reason == "unsupported_widget"
+
+
+def test_enterprise_optional_metadata_is_not_fabricated():
+    page = _node(_widget(enterprise=True))
+    challenge = cs.pick_challenge(page["detection"]["found"])
+    task = cs.build_task(challenge, page["detection"]["url"])
+    assert task["type"] == "ReCaptchaV2EnterpriseTaskProxyLess"
+    assert "enterprisePayload" not in task and "pageAction" not in task
 
 
 def test_enterprise_conflicting_metadata_refused():
@@ -454,6 +490,17 @@ def test_run_fails_closed_after_ambiguous_callback(tmp_path, monkeypatch):
     code, log = cs.run("S", None, False, tmp_path)
     assert code == 4 and log["reason"] == "callback_missing"
     assert "VERY_PRIVATE_TOKEN" not in json.dumps(log)
+
+
+def test_run_malformed_postmutation_result_is_possible_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "KEY")
+    detected = _node(_widget())["detection"]
+    replies = iter([detected, {"__cs": 1, "reason": {"untrusted": "value"}}])
+    monkeypatch.setattr(cs, "evaluate", lambda *args: next(replies))
+    monkeypatch.setattr(cs, "solve", lambda *args: ("T", "PRIVATE_TEST_TOKEN"))
+    code, log = cs.run("S", None, False, tmp_path)
+    assert code == 4 and log["reason"] == "possible_commit"
+    assert "PRIVATE_TEST_TOKEN" not in json.dumps(log)
 
 
 def test_run_dry_run_is_not_injected(tmp_path, monkeypatch):
