@@ -377,6 +377,43 @@ def test_handoff_holds_only_the_named_row(world, handoff, allowed):
     assert (w.invoke() == 0) is allowed
 
 
+# Pre-change characterization: document the legacy fail-open behavior before
+# the behavior-change commit inverts these expectations.
+def test_characterization_embedded_marker_currently_releases(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} BACK TO AGENTS is mentioned but not terminal\n", encoding="utf-8",
+    )
+    assert w.invoke() == 0
+
+
+def test_characterization_negated_marker_currently_releases(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} not DONE\n", encoding="utf-8",
+    )
+    assert w.invoke() == 0
+
+
+def test_characterization_other_row_marker_does_not_release(world):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} active\nother-co#candidate BACK TO AGENTS\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+def test_characterization_unconfirmed_reopen_currently_allows_second_submit(world):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    assert w.invoke("reopen") == 0
+    assert _claim(w.root)["state"] == "filling"
+    assert "submit_clicked_at" not in _claim(w.root)
+    assert w.invoke("submit") == 0
+
+
 def test_skipped_and_unconfirmed_submit_row_guard(world):
     w = world
     w.seed({**JOB, "status": "skipped"})
