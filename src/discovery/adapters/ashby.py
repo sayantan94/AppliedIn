@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 
 from core.models import JobRecord
+from tools import posting_guard as pg
 
 from ..watchlist import CompanyConfig
 
@@ -72,13 +73,17 @@ class AshbyAdapter:
         resp.raise_for_status()
         jobs = []
         for j in resp.json().get("jobs", []):
+            inspected = pg.analyze(ashby_jd_text(
+                j, str(j.get("descriptionPlain") or j.get("description") or "")
+            ))
             jobs.append(
                 JobRecord(
                     company=company.name,
                     job_id=str(j["id"]),
                     title=j.get("title", ""),
                     jd_url=j.get("jobUrl", ""),
-                    jd_text=ashby_jd_text(j, str(j.get("descriptionPlain") or j.get("description") or "")),
+                    jd_text=inspected["text"],
+                    posting_guard=inspected["posting_guard"],
                     location=ashby_display_location(j.get("location")),
                     ats=self.ats,
                     # Ashby publishes publishedAt and leaves updatedAt null on the board feed.
