@@ -1350,6 +1350,61 @@ def test_timeout_stop_after_final_check_is_recorded_and_not_rescheduled(
     assert network.STOP.is_set()  # No new reserve_scan(clear_network_stop=True).
 
 
+def test_timeout_stop_during_terminal_write_is_not_falsely_acknowledged(
+    board, monkeypatch,
+):
+    """A STOP signalled inside the final locked write cannot claim a lost receipt."""
+    # Capture a genuine thread before the scheduler fixture installs InlineThread.
+    from threading import Thread
+
+    network, _, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+
+    def timed_events(payload):
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        raise TimeoutError("synthetic scanner deadline")
+
+    original_write = co._write
+    stop_threads = []
+    acknowledgements = []
+
+    def stop_during_final_write(data):
+        last = data.get("last_network") or {}
+        if (not stop_threads
+                and last.get("progress", {}).get("running") is False):
+            stopper = Thread(target=lambda: acknowledgements.append(network.stop()))
+            stop_threads.append(stopper)
+            stopper.start()
+            # The STOP signal is lock-free, but acknowledgement must wait for
+            # final write and transition to inactive under the same board lock.
+            assert network.STOP.wait(5)
+        original_write(data)
+
+    monkeypatch.setattr(network, "events", timed_events)
+    monkeypatch.setattr(co, "_write", stop_during_final_write)
+    try:
+        co.scheduled_tick()
+    finally:
+        for stopper in stop_threads:
+            stopper.join(5)
+
+    assert len(stop_threads) == 1
+    assert not stop_threads[0].is_alive()
+    assert acknowledgements == [{"stopping": False}]
+    final = co._read()["last_network"]
+    assert final["stopped"] is False and final["finished_at"] is None
+    assert final["batch_success"] is False and final["complete"] is False
+    assert network.STOP.is_set()
+    assert not co._RUNNING and not co._SCAN.locked()
+
+
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):
     network, stores, clock, _ = _network_fixture(board, monkeypatch)
     state, receipt = _saved_search(clock, count=1)
