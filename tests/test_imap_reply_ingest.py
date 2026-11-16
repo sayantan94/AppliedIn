@@ -44,11 +44,11 @@ def test_competing_alias_used_pk_blocks_company_fallback():
 def test_matcher_fallback_requires_explicit_company_and_subject_title():
     rows = [{"pk": "example-co#one", "company": "example-co", "title": "Backend Engineer"}]
     assert reply_ingest.match_message(header(From="Example-co Recruiting <jobs@shared-ats.test>",
-                                             Subject="Backend Engineer"), rows, []) == "example-co#one"
+                                             Subject="Backend Engineer"), rows, []) == "UNASSIGNED"
     assert reply_ingest.match_message(header(From="Recruiting <jobs@shared-ats.test>",
                                              Subject="Backend Engineer"), rows, []) == "UNASSIGNED"
     encoded = b"From: Recruiting <jobs@shared-ats.test>\r\nSubject: =?UTF-8?Q?Example-co_Backend_Engineer?=\r\n\r\n"
-    assert reply_ingest.match_message(encoded, rows, []) == "example-co#one"
+    assert reply_ingest.match_message(encoded, rows, []) == "UNASSIGNED"
 
 
 def test_imap_wrapper_sets_finite_timeout_and_only_safe_fetches(monkeypatch):
@@ -161,10 +161,12 @@ def test_bad_header_with_eligible_alias_is_unassigned_between_valid_messages(tmp
         def fetch_text_prefix(self, uid): return b"body must remain in memory"
         def logout(self): pass
     stores = type("Stores", (), {"tracking": Tracking()})()
-    assert reply_ingest.ingest_pass(settings, credentials, stores, Client()) == 3
+    assert reply_ingest.ingest_pass(settings, credentials, stores, Client()) == 2
     records = reply_ingest.read_records(settings)
-    assert [record["pk"] for record in records] == [row["pk"], "UNASSIGNED", row["pk"]]
-    assert records[1]["sender"] == ""
+    assert [record["pk"] for record in records] == [row["pk"], row["pk"]]
+    assert len(records) == 2
+    state = json.loads((tmp_path / reply_ingest.STATE_NAME).read_text())["accounts"][reply_ingest._account_key(credentials)]
+    assert state["unresolved_uids"] == [2] and state["last_uid"] == 1
     assert b"body must remain in memory" not in (tmp_path / reply_ingest.STATE_NAME).read_bytes()
     assert len(candidates_read) == 2
 
@@ -252,7 +254,7 @@ def test_multiple_alias_used_pks_need_unique_subject_title():
              "profile_id": "rot-a"},
             {"pk": "example-co#two", "company": "example-co", "title": "Platform Engineer",
              "profile_id": "rot-a"}]
-    assert reply_ingest.match_message(header(To=alias["email"], Subject="Platform Engineer"), rows, [alias]) == "example-co#two"
+    assert reply_ingest.match_message(header(To=alias["email"], Subject="Platform Engineer"), rows, [alias]) == "UNASSIGNED"
     assert reply_ingest.match_message(header(To=alias["email"], Subject="reply"), rows, [alias]) == "UNASSIGNED"
 
 
@@ -534,7 +536,7 @@ def test_classifier_failure_records_null_label_and_advances(tmp_path, monkeypatc
     inserted = reply_ingest.ingest_pass(settings, fake_credentials(), fake_stores(tracking), client,
                                        lambda *_: (_ for _ in ()).throw(RuntimeError("classifier")))
     assert inserted == 1
-    assert reply_ingest.read_records(settings)[0]["label"] is None
+    assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
     account = json.loads((tmp_path / reply_ingest.STATE_NAME).read_text())["accounts"][reply_ingest._account_key(fake_credentials())]
     assert account["last_uid"] == 1
 
@@ -572,5 +574,183 @@ def test_uid_commit_holds_lock_across_state_reread_and_write(tmp_path, monkeypat
     monkeypatch.setattr(reply_ingest, "_write_state", locked_write)
     key = reply_ingest._account_key(fake_credentials())
     record = {"record_id": "record-1", "date": "", "sender": "", "subject": "",
-              "message_id": "", "label": None, "pk": "UNASSIGNED"}
+              "message_id": "", "label": "unclassified", "pk": "UNASSIGNED"}
+    reply_ingest._account_state(tmp_path / reply_ingest.STATE_NAME, key, "15")
     assert reply_ingest._commit_uid(tmp_path / reply_ingest.STATE_NAME, key, "15", 1, record, "")
+
+
+def test_submission_proof_is_unique_global_and_status_bounded():
+    row = {"pk": "example-co#one", "company": "example-co", "title": "Backend Engineer",
+           "status": "applied", "profile_id": "rot-jobs"}
+    same_title = dict(row, pk="example-co#two", profile_id="")
+    old = dict(row, pk="example-co#old", status="tailored")
+    alias = {"id": "rot-jobs", "email": "jobs@first.test", "company": "example-co",
+             "used_pks": [row["pk"]]}
+    msg = header(To="JOBS@FIRST.TEST", Subject="Backend Engineer")
+    assert reply_ingest.match_message(msg, [same_title, row], [alias]) == row["pk"]
+    assert reply_ingest.match_message(msg, [row, same_title], [alias]) == row["pk"]
+    assert reply_ingest.match_message(msg, [old], [alias]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [row], [dict(alias, used_pks=[])]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [row], [dict(alias, used_pks=[old["pk"], row["pk"]])]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [row], [dict(alias, used_pks=[row["pk"], same_title["pk"]])]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [dict(row, profile_id="rot-different")], [alias]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [row], [alias, dict(alias, email="jobs@second.test")]) == "UNASSIGNED"
+    # record_submission could write the second domain's submission on the first
+    # ID-matched ledger row. Neither address can authenticate that history.
+    assert reply_ingest.match_message(header(To="jobs@second.test"), [row],
+                                      [alias, dict(alias, email="jobs@second.test")]) == "UNASSIGNED"
+    assert reply_ingest.match_message(msg, [row],
+                                      [alias, dict(alias, id="rot-other", email="other@test", used_pks=[row["pk"]])]) == "UNASSIGNED"
+    assert reply_ingest.match_message(header(To="jobs@first.test, other@test"), [row],
+                                      [alias, dict(alias, id="rot-other", email="other@test", used_pks=[])]) == "UNASSIGNED"
+    assert reply_ingest.match_message(header(From="example-co Updates <noreply@ats.test>",
+                                             Subject="Backend Engineer"), [row], [alias]) == "UNASSIGNED"
+
+
+def test_historical_multi_use_never_disambiguates_using_subject_or_candidate_filter():
+    row = {"pk": "example-co#new", "company": "example-co", "title": "Backend Engineer",
+           "status": "applied_manual", "profile_id": "rot-a"}
+    old = dict(row, pk="example-co#old", status="discovered", title="Platform Engineer")
+    alias = {"id": "rot-a", "email": "reply@unique.test", "company": "example-co",
+             "used_pks": [old["pk"], row["pk"]]}
+    for subject in ("Application update", "Backend Engineer", row["pk"], "42", "Platform Engineer"):
+        assert reply_ingest.match_message(header(To=alias["email"], Subject=subject),
+                                          [row], [alias]) == "UNASSIGNED"
+        assert reply_ingest.match_message(header(To=alias["email"], Subject=subject),
+                                          [old, row], [alias]) == "UNASSIGNED"
+    assert reply_ingest.match_message(header(To=alias["email"]), [row],
+                                      [dict(alias, used_pks=[row["pk"]])]) == row["pk"]
+
+
+def test_first_scan_floor_and_omitted_uid_hole_survive_without_backfill(tmp_path, monkeypatch):
+    class Window(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.body_reads = []
+        def fetch_text_prefix(self, uid):
+            self.body_reads.append(uid)
+            return b"synthetic inline text"
+    messages = {uid: (b"From: recruiter@example-co.test\r\nMessage-ID: <uid-"
+                      + str(uid).encode() + b"@example-co.test>\r\n\r\n")
+                for uid in range(801, 1002)}
+    messages[801] = b""
+    first = Window("90", range(1, 1001), messages)
+    settings, inserted = run_fake_ingest(tmp_path, monkeypatch, first, classifier=lambda *_: "other")
+    key = reply_ingest._account_key(fake_credentials())
+    path = tmp_path / reply_ingest.STATE_NAME
+    state = json.loads(path.read_text())["accounts"][key]
+    assert inserted == 199 and first.fetched == list(range(801, 1001))
+    assert first.body_reads == list(range(802, 1001))
+    assert state["uid_floor"] == 800 and state["unresolved_uids"] == [801]
+    assert state["last_uid"] == 800 and state["scan_pending"] is False
+
+    omitted = Window("90", range(802, 1002), messages)
+    _, inserted = run_fake_ingest(tmp_path, monkeypatch, omitted, classifier=lambda *_: "other")
+    state = json.loads(path.read_text())["accounts"][key]
+    assert omitted.queries == ["UID 801:*"] and omitted.fetched == [1001]
+    assert omitted.body_reads == [1001] and inserted == 1
+    assert state["last_uid"] == 800 and state["unresolved_uids"] == [801]
+    messages[801] = (b"From: recruiter@example-co.test\r\n"
+                     b"Message-ID: <uid-801@example-co.test>\r\n\r\n")
+    recovered = Window("90", range(801, 1002), messages)
+    _, inserted = run_fake_ingest(tmp_path, monkeypatch, recovered, classifier=lambda *_: "other")
+    state = json.loads(path.read_text())["accounts"][key]
+    assert recovered.queries == ["UID 801:*"] and recovered.fetched == [801]
+    assert recovered.body_reads == [801] and inserted == 1
+    assert state["unresolved_uids"] == [] and state["last_uid"] == 1001
+    assert len(state["records"]) == 201
+    assert all(uid > 800 for client in (first, omitted, recovered) for uid in client.fetched)
+
+
+def test_unknown_and_stale_uidvalidity_cannot_reset_or_commit(tmp_path):
+    path = tmp_path / reply_ingest.STATE_NAME
+    key = reply_ingest._account_key(fake_credentials())
+    reply_ingest._account_state(path, key, "7")
+    reply_ingest._set_first_floor(path, key, "7", [801, 802])
+    reply_ingest._mark_unresolved(path, key, "7", 801)
+    reply_ingest._account_state(path, key, "8")
+    reply_ingest._set_first_floor(path, key, "8", [901, 902])
+    reply_ingest._mark_unresolved(path, key, "8", 901)
+    before = json.loads(path.read_text())
+    for old in ("7", "unknown", "", "0", "abc"):
+        reply_ingest._account_state(path, key, old)
+        reply_ingest._finish_scan(path, key, old)
+        reply_ingest._advance_cursor(path, key, old, 9999)
+        reply_ingest._mark_unresolved(path, key, old, 888)
+        assert not reply_ingest._commit_uid(path, key, old, 9999, {
+            "record_id": "stale", "label": "other", "pk": "UNASSIGNED"}, "")
+    assert json.loads(path.read_text()) == before
+
+
+def test_unclassified_exact_uid_retry_keeps_manual_assignment(tmp_path, monkeypatch):
+    credentials = fake_credentials()
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    mid = b"Message-ID: <exact@example-co.test>\r\n"
+    headers = {4: b"From: recruiter@example-co.test\r\n" + mid + b"Subject: update\r\n\r\n"}
+    first = FakeClient("22", [4], headers)
+    error = lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic provider error"))
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), first, classifier=error) == 1
+    rows = reply_ingest.read_records(settings)
+    assert len(rows) == 1 and rows[0]["label"] == "unclassified"
+    rid = rows[0]["record_id"]
+    assert reply_ingest.assign(rid, "example-co#manual", settings) == "assigned"
+    path = tmp_path / reply_ingest.STATE_NAME
+    account = json.loads(path.read_text())["accounts"][reply_ingest._account_key(credentials)]
+    assert account["record_uids"] == {rid: {"uid": 4, "uidvalidity": "22"}}
+    assert "record_uids" not in rows[0] and "uid_floor" not in rows[0]
+    second = FakeClient("22", [4], headers)
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), second,
+                                    classifier=lambda *_: "rejection") == 0
+    final = reply_ingest.read_records(settings)
+    assert final[0]["record_id"] == rid and final[0]["pk"] == "example-co#manual"
+    assert final[0]["label"] == "rejection" and len(final) == 1
+    assert second.fetched == [4]
+
+
+def test_retry_refuses_mismatched_id_old_generation_and_unlinked_legacy(tmp_path, monkeypatch):
+    credentials = fake_credentials()
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    path = tmp_path / reply_ingest.STATE_NAME
+    headers = {1: b"Message-ID: <first@test>\r\n\r\n"}
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    first = FakeClient("41", [1], headers)
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), first,
+                                    classifier=lambda *_: "unclassified") == 1
+    key = reply_ingest._account_key(credentials)
+    data = json.loads(path.read_text())
+    account = data["accounts"][key]
+    rid = account["records"][0]["record_id"]
+    account["records"].append({"record_id": "legacy", "message_id": "<legacy@test>",
+                                "label": "unclassified", "pk": "UNASSIGNED"})
+    reply_ingest._write_state(path, data)
+    wrong = FakeClient("41", [1], {1: b"Message-ID: <different@test>\r\n\r\n"})
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), wrong,
+                                    classifier=lambda *_: "rejection") == 0
+    assert [r["label"] for r in reply_ingest.read_records(settings)] == ["unclassified", "unclassified"]
+    changed = FakeClient("42", [1], headers)
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), changed,
+                                    classifier=lambda *_: "rejection") == 0  # same Message-ID dedup
+    data = json.loads(path.read_text())["accounts"][key]
+    assert data["record_uids"][rid]["uidvalidity"] == "41"
+    assert [r["label"] for r in reply_ingest.read_records(settings)] == ["unclassified", "unclassified"]
+
+
+def test_unreadable_headers_and_unlinked_empty_prefix_do_not_admit(tmp_path, monkeypatch):
+    class EmptyPrefix(FakeClient):
+        def fetch_text_prefix(self, uid):
+            return b""
+    messages = {1: b"", 2: b"garbage text", 3: b"Subject: ordinary reply\r\n\r\n",
+                4: b"Message-ID: <safe@test>\r\nSubject: ordinary reply\r\n\r\n",
+                5: b"Subject: Application security code: 123456\r\n\r\n"}
+    client = EmptyPrefix("43", [1, 2, 3, 4, 5], messages)
+    calls = []
+    settings, inserted = run_fake_ingest(tmp_path, monkeypatch, client,
+                                         classifier=lambda *_: calls.append("model") or "other")
+    assert inserted == 2 and calls == []
+    rows = reply_ingest.read_records(settings)
+    assert [r["label"] for r in rows] == ["unclassified", "other"]
+    account = json.loads((tmp_path / reply_ingest.STATE_NAME).read_text())["accounts"][reply_ingest._account_key(fake_credentials())]
+    assert account["unresolved_uids"] == [1, 2, 3]
+    assert account["last_uid"] == 0
+    assert all(f"43:{i}" not in account["processed"] for i in (1, 2, 3))
