@@ -1227,6 +1227,62 @@ def test_manual_stop_after_timeout_stays_finalized(board, monkeypatch):
 
 
 
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+def test_late_stop_during_timeout_cleanup_prevents_next_tick_restart(
+    board, monkeypatch, timeout_style,
+):
+    """An acknowledged STOP during classification must win over timeout retry."""
+    network, stores, _, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search({"now": datetime(2026, 11, 7, 12, tzinfo=UTC)}, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def timed_events(payload):
+        attempts.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if timeout_style == "exception":
+            raise TimeoutError("synthetic scanner deadline")
+        yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+
+    acknowledgements = []
+
+    def stop_during_classification(search_id):
+        assert search_id == state["id"]
+        assert not network.STOP.is_set()
+        acknowledgements.append(network.stop())
+
+    monkeypatch.setattr(network, "events", timed_events)
+    monkeypatch.setattr("discovery.career_fit.classify_search",
+                        stop_during_classification)
+    co.scheduled_tick()
+
+    saved = co._read()
+    final = saved["last_network"]
+    assert acknowledgements == [{"stopping": True}]
+    assert network.STOP.is_set()
+    assert final["stopped"] is True
+    assert final["batch_success"] is False and final["complete"] is False
+    assert final["finished_at"] is not None
+    assert final["scan_error"]  # Timeout evidence is retained despite STOP.
+    assert final["progress"]["running"] is False
+    assert saved["network_search"]["id"] == state["id"]
+    assert saved["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 3,
+    }
+    assert not co._RUNNING and not co._SCAN.locked()
+    stores.queue.enqueue.assert_not_called()
+
+    co.scheduled_tick()  # Finalized STOP cannot be cleared for an immediate retry.
+    assert len(attempts) == 1
+    assert network.STOP.is_set()
+
+
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):
     network, stores, clock, _ = _network_fixture(board, monkeypatch)
     state, receipt = _saved_search(clock, count=1)
