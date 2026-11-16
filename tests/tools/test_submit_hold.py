@@ -44,6 +44,29 @@ def world(monkeypatch):
     return stores, ApplyQueue(client)
 
 
+
+
+def test_server_startup_recovers_tailoring_without_touching_other_rows(world):
+    """A killed tailor must become retryable without rewriting unrelated applications."""
+    stores, _ = world
+    tracking = stores.tracking
+    tracking.set_status(PK, Status.TAILORING)
+    unaffected_pk = 'example-co#unaffected'
+    assert tracking.put_new(JobRecord(
+        company='example-co', job_id='unaffected',
+        title='Test Analyst', jd_url='https://example.test/job/other',
+        jd_text='Synthetic role, unchanged after startup',
+    ))
+    tracking.set_status(unaffected_pk, Status.TAILORED)
+    before = tracking.r.get(f'app:{unaffected_pk}')
+
+    server._recover_stuck(None)
+
+    assert tracking.get(PK)['status'] == 'found'
+    assert tracking.r.get(f'app:{unaffected_pk}') == before
+    assert tracking.get(unaffected_pk)['status'] == 'tailored'
+
+
 def test_mark_uses_tracking_client_without_ttl(world):
     stores, _ = world
     submit_hold.mark(PK, tracking=stores.tracking)
