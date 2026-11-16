@@ -227,6 +227,8 @@ def _from_ats(url: str) -> dict | None:
     try:
         with httpx.Client(timeout=20, follow_redirects=True) as c:
             if ashby:
+                from discovery.adapters.ashby import ashby_jd_text, ashby_location_metadata
+
                 r = c.get(f"https://api.ashbyhq.com/posting-api/job-board/{org}")
                 r.raise_for_status()
                 for j in r.json().get("jobs", []):
@@ -241,12 +243,18 @@ def _from_ats(url: str) -> dict | None:
                     if (job_id == str(j.get("id", "")) or
                             (target_seg and target_seg[-1] == job_id)):
                         html = j.get("descriptionHtml")
+                        description = str(j.get("descriptionPlain") or html or "")
+                        metadata = ashby_location_metadata(j)
                         result = _guarded(
                             str(j.get("title", "")),
-                            str(j.get("descriptionPlain") or html or ""),
+                            ashby_jd_text(j, description),
                             html_variants=[html] if html else [],
                             source_required=True)
-                        result.update(source_kind="ats_html", source_url=url)
+                        # Internal reconciliation fields are removed before
+                        # any fetch_jd_meta result reaches its caller.
+                        result.update(source_kind="ats_html", source_url=url,
+                                      _ashby_metadata=metadata,
+                                      _ashby_body_length=len(pg.analyze(description)["text"]))
                         return result
             elif greenhouse:
                 r = c.get(f"https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{job_id}",
@@ -292,13 +300,33 @@ def _from_ats(url: str) -> dict | None:
         log.debug("board API miss for %s: %s", url, exc)
     return None
 
+
+def _ashby_selected_text(text: str, ats: dict | None, url: str) -> str:
+    """Reconcile metadata only from the URL-matched Ashby API posting."""
+    if (not ats or ats.get("source_kind") != "ats_html" or
+            ats.get("source_url") != url or
+            not pg.valid(ats.get("text", ""), ats.get("posting_guard"))):
+        return text
+    metadata = ats.get("_ashby_metadata")
+    if not isinstance(metadata, str) or not metadata:
+        return text
+    return metadata + "\n" + text
+
+
+def _public_ats(meta: dict | None) -> dict | None:
+    if meta is not None:
+        meta.pop("_ashby_metadata", None)
+        meta.pop("_ashby_body_length", None)
+    return meta
+
+
 def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     """Guarded title, text, posting_guard and provenance for a posting."""
     if not _valid_reader_url(url):
         return _guarded("", "", source_required=True)
     ats = _from_ats(url)
-    if ats and len(ats["text"]) > 200:
-        return ats
+    if ats and ats.get("_ashby_body_length", len(ats["text"])) > 200:
+        return _public_ats(ats)
     from discovery.resolver import BROWSER_HEADERS
 
     html_read = _get(url, BROWSER_HEADERS)
@@ -311,12 +339,13 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
             # A newly flagged short ATS read must not be dropped just
             # because the slower fallback failed to fetch a longer JD.
             if ats:
-                return ats
+                return _public_ats(ats)
             raise
         if seen is None:
-            return ats or _guarded("", "", source_required=True)
+            return _public_ats(ats) or _guarded("", "", source_required=True)
         if ats:
-            merged = pg.merge(seen["text"], seen["posting_guard"], ats["posting_guard"])
+            selected = _ashby_selected_text(seen["text"], ats, url)
+            merged = pg.merge(selected, seen["posting_guard"], ats["posting_guard"])
             seen.update(merged)
         return seen
 
@@ -351,7 +380,8 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     if ats:
         complete_ats = bool(ats["posting_guard"].get("source_verified"))
         # Never substitute another redirected page's JD for an ATS posting.
-        selected_text = hit["text"] if same_source else ats["text"]
+        selected_text = (_ashby_selected_text(hit["text"], ats, url)
+                         if same_source else ats["text"])
         combined = pg.merge(selected_text, hit["posting_guard"],
                             ats["posting_guard"], source_witness=complete_ats)
         hit.update(combined)
