@@ -1089,11 +1089,12 @@ def test_scheduled_priority_flags_busy_and_failed_thread_start(board, monkeypatc
 
 
 @pytest.mark.parametrize("outcome", [
-    "missing_done", "unavailable", "stopped", "exception", "interrupted"
+    "missing_done", "unavailable", "stopped", "exception"
 ])
 def test_network_failure_never_prepares_and_finalized_error_waits(
     board, monkeypatch, outcome,
 ):
+    """Ordinary finalized failures must not hammer directories every tick."""
     network, stores, clock, _ = _network_fixture(board, monkeypatch)
     payloads = []
 
@@ -1115,9 +1116,7 @@ def test_network_failure_never_prepares_and_finalized_error_waits(
         }
         if outcome == "exception":
             raise ValueError("synthetic scanner exception")
-        if outcome == "interrupted":
-            yield {"kind": "interrupted", "message": "synthetic timeout"}
-        elif outcome != "missing_done":
+        if outcome != "missing_done":
             yield {"kind": "done", "stopped": outcome == "stopped"}
 
     monkeypatch.setattr(network, "events", events)
@@ -1137,6 +1136,273 @@ def test_network_failure_never_prepares_and_finalized_error_waits(
     assert len(payloads) == 2
     assert co._read()["network_search"]["id"] == data["network_search"]["id"]
     assert co._read()["last_network"]["started_at"] == data["last_network"]["started_at"]
+
+
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+def test_network_timeout_resumes_saved_cursor_at_next_scheduled_tick(
+    board, monkeypatch, timeout_style,
+):
+    """A scanner deadline must not impose the six-hour wait on an unfinished batch."""
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=1)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    payloads = []
+
+    def timed_events(payload):
+        payloads.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if len(payloads) == 1:
+            yield {
+                "kind": "company", "source": "ashby",
+                "provider": "ashby", "company": "example-co",
+                "error": "", "read": 1, "old": 0, "undated": 0,
+                "filtered": 0, "capped": False,
+                "cursor": {"hash": "original-hash", "next": 2},
+                "jobs": [],
+            }
+            if timeout_style == "exception":
+                raise TimeoutError("synthetic scanner deadline")
+            yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+        else:
+            yield {"kind": "done", "stopped": False}
+
+    monkeypatch.setattr(network, "events", timed_events)
+    co.scheduled_tick()
+    first = co._read()
+    assert first["last_network"]["finished_at"] is None
+    assert first["last_network"]["scan_error"]
+    assert not first["last_network"]["batch_success"]
+    assert first["last_network"]["progress"]["running"] is False
+    assert first["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 2,
+    }
+    assert first["network_search"]["id"] == state["id"]
+    assert not co._RUNNING and not co._SCAN.locked()
+    stores.queue.enqueue.assert_not_called()
+
+    co.scheduled_tick()  # Same clock, so a finalized receipt would still be cooling down.
+    second = co._read()
+    assert len(payloads) == 2
+    assert payloads[0]["cursor"]["ashby"]["next"] == 1
+    assert payloads[1]["cursor"]["ashby"]["next"] == 2
+    assert payloads[1]["cutoff"] == state["cutoff"]
+    assert second["network_search"]["id"] == state["id"]
+    assert second["last_network"]["started_at"] == receipt["started_at"]
+    assert second["last_network"]["finished_at"] is not None
+    co.scheduled_tick()
+    assert len(payloads) == 2  # A finalized batch waits six hours.
+
+
+
+def test_manual_stop_after_timeout_stays_finalized(board, monkeypatch):
+    """An operator STOP after a deadline must not trigger an unwanted next-tick restart."""
+    network, _, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=1)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def interrupted(payload):
+        attempts.append(payload["cursor"]["ashby"]["next"])
+        yield {"kind": "source", "source": "ashby", "total": 10, "next": 1,
+               "hash": "original-hash", "status": "ok"}
+        yield {"kind": "interrupted", "message": "Scan reached its time limit"}
+        network.STOP.set()
+
+    monkeypatch.setattr(network, "events", interrupted)
+    co.scheduled_tick()
+    saved = co._read()["last_network"]
+    assert saved["stopped"]
+    assert saved["finished_at"] is not None
+    assert saved["progress"]["running"] is False
+    co.scheduled_tick()
+    assert attempts == [1]
+
+
+
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+def test_late_stop_during_timeout_cleanup_prevents_next_tick_restart(
+    board, monkeypatch, timeout_style,
+):
+    """An acknowledged STOP during classification must win over timeout retry."""
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def timed_events(payload):
+        attempts.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if timeout_style == "exception":
+            raise TimeoutError("synthetic scanner deadline")
+        yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+
+    acknowledgements = []
+
+    def stop_during_classification(search_id):
+        assert search_id == state["id"]
+        assert not network.STOP.is_set()
+        acknowledgements.append(network.stop())
+
+    monkeypatch.setattr(network, "events", timed_events)
+    monkeypatch.setattr("discovery.career_fit.classify_search",
+                        stop_during_classification)
+    co.scheduled_tick()
+
+    saved = co._read()
+    final = saved["last_network"]
+    assert acknowledgements == [{"stopping": True}]
+    assert network.STOP.is_set()
+    assert final["stopped"] is True
+    assert final["batch_success"] is False and final["complete"] is False
+    assert final["finished_at"] is not None
+    assert final["scan_error"]  # Timeout evidence is retained despite STOP.
+    assert final["progress"]["running"] is False
+    assert saved["network_search"]["id"] == state["id"]
+    assert saved["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 3,
+    }
+    assert not co._RUNNING and not co._SCAN.locked()
+    stores.queue.enqueue.assert_not_called()
+
+    co.scheduled_tick()  # Finalized STOP cannot be cleared for an immediate retry.
+    assert len(attempts) == 1
+    assert network.STOP.is_set()
+
+
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+@pytest.mark.parametrize("late_hook", ["progress", "snapshot"])
+def test_timeout_stop_after_final_check_is_recorded_and_not_rescheduled(
+    board, monkeypatch, timeout_style, late_hook,
+):
+    """STOP from final progress/snapshot must be durable before run deactivation."""
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def timed_events(payload):
+        attempts.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if timeout_style == "exception":
+            raise TimeoutError("synthetic scanner deadline")
+        yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+
+    acknowledgements = []
+    original_report = co.report_progress
+    original_snapshot = co.progress_snapshot
+
+    def stop_at_final_report(message):
+        # Earlier scanner progress is not a finalizer checkpoint.
+        if message.startswith("0 matches saved"):
+            acknowledgements.append(network.stop())
+        original_report(message)
+
+    def stop_at_final_snapshot():
+        # The receipt has already passed the old final STOP.is_set() check.
+        acknowledgements.append(network.stop())
+        return original_snapshot()
+
+    monkeypatch.setattr(network, "events", timed_events)
+    if late_hook == "progress":
+        monkeypatch.setattr(co, "report_progress", stop_at_final_report)
+    else:
+        monkeypatch.setattr(co, "progress_snapshot", stop_at_final_snapshot)
+
+    co.scheduled_tick()
+    saved = co._read()
+    final = saved["last_network"]
+    assert acknowledgements == [{"stopping": True}]
+    assert network.STOP.is_set()
+    assert final["stopped"] is True
+    assert final["batch_success"] is False
+    assert final["complete"] is False
+    assert final["finished_at"] is not None
+    assert final["scan_error"]
+    assert final["progress"]["running"] is False
+    assert saved["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 3,
+    }
+    stores.queue.enqueue.assert_not_called()
+    assert not co._RUNNING and not co._SCAN.locked()
+
+    co.scheduled_tick()
+    assert len(attempts) == 1
+    assert network.STOP.is_set()  # No new reserve_scan(clear_network_stop=True).
+
+
+def test_timeout_stop_during_terminal_write_is_not_falsely_acknowledged(
+    board, monkeypatch,
+):
+    """A STOP signalled inside the final locked write cannot claim a lost receipt."""
+    # Capture a genuine thread before the scheduler fixture installs InlineThread.
+    from threading import Thread
+
+    network, _, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+
+    def timed_events(payload):
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        raise TimeoutError("synthetic scanner deadline")
+
+    original_write = co._write
+    stop_threads = []
+    acknowledgements = []
+
+    def stop_during_final_write(data):
+        last = data.get("last_network") or {}
+        if (not stop_threads
+                and last.get("progress", {}).get("running") is False):
+            stopper = Thread(target=lambda: acknowledgements.append(network.stop()))
+            stop_threads.append(stopper)
+            stopper.start()
+            # The STOP signal is lock-free, but acknowledgement must wait for
+            # final write and transition to inactive under the same board lock.
+            assert network.STOP.wait(5)
+        original_write(data)
+
+    monkeypatch.setattr(network, "events", timed_events)
+    monkeypatch.setattr(co, "_write", stop_during_final_write)
+    try:
+        co.scheduled_tick()
+    finally:
+        for stopper in stop_threads:
+            stopper.join(5)
+
+    assert len(stop_threads) == 1
+    assert not stop_threads[0].is_alive()
+    assert acknowledgements == [{"stopping": False}]
+    final = co._read()["last_network"]
+    assert final["stopped"] is False and final["finished_at"] is None
+    assert final["batch_success"] is False and final["complete"] is False
+    assert network.STOP.is_set()
+    assert not co._RUNNING and not co._SCAN.locked()
 
 
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):

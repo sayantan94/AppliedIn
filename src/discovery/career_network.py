@@ -131,17 +131,34 @@ def stop() -> dict:
     # Signal first, while that lock may be held, so its next per-row
     # continue_check can observe Stop. The scan reservation and active kind
     # exclude unrelated Career Ops work without a second lock.
+    active = co._ACTIVE
     if not (co._SCAN.locked() and co._RUNNING
-            and co._ACTIVE.get("kind") == "network"):
+            and active.get("kind") == "network"):
         return {"stopping": False}
     STOP.set()
-    # Progress still uses the board lock; never block *signaling* on it.
+    # Signal before waiting on the board lock during preparation. A scan may
+    # finish in that interval, so acknowledge only while this reservation can
+    # still persist the STOP, not after its terminal write.
     with co._LOCK:
-        if co._RUNNING and co._ACTIVE.get("kind") == "network":
-            co.report_progress(
-                "Stopping scan; completed results are saved. You can continue later."
+        if (co._SCAN.locked() and co._RUNNING
+                and co._ACTIVE is active and active.get("kind") == "network"):
+            acknowledged = True
+        else:
+            # The worker may have honored STOP and deactivated while we waited
+            # for the lock. Match this reservation's progress run ID, not the
+            # logical search start time (which persists across resumed scans).
+            last = co._read().get("last_network") or {}
+            progress = last.get("progress") or {}
+            acknowledged = bool(
+                last.get("kind") == "network" and last.get("stopped")
+                and last.get("finished_at")
+                and progress.get("run_id") == active.get("started_at")
             )
-    return {"stopping": True}
+    if acknowledged:
+        co.report_progress(
+            "Stopping scan; completed results are saved. You can continue later."
+        )
+    return {"stopping": acknowledged}
 
 
 # A full directory scan including Workday (12,000+ tenants, one site each) runs
@@ -229,6 +246,7 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
     }
     state = {}
     done = False
+    timed_out = False
     source_seen = set()
     try:
         with co._LOCK:
@@ -392,6 +410,8 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                     if STOP.is_set():
                         receipt["stopped"] = True
                     else:
+                        # A scanner deadline is an unfinished batch, not a six-hour receipt.
+                        timed_out = True
                         receipt["scan_error"] = event["message"]
             elif kind == "done":
                 done = not event.get("stopped")
@@ -428,6 +448,12 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
             receipt["coverage"][name]["next"] >= receipt["coverage"][name]["total"]
             for name in filters["ats"]
         )
+    except TimeoutError as exc:
+        # Preserve the batch cursor for the very next scheduled tick.
+        timed_out = True
+        receipt["scan_error"] = str(exc) or "Network scanner timed out"
+        receipt["errors"].append({"company": "Scanner", "error": receipt["scan_error"]})
+        co.log.warning("Career Ops network scan timed out: %s", receipt["scan_error"])
     except Exception as exc:
         co.log.exception("Career Ops network scan failed")
         receipt["scan_error"] = str(exc)
@@ -486,11 +512,17 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 except Exception as exc:
                     receipt["prepare_error"] = str(exc)
                     co.log.exception("Career Ops network handoff failed")
+            # STOP may arrive during timeout cleanup, after the scanner's last
+            # check. Honor it before deciding whether this receipt is final.
+            if STOP.is_set():
+                receipt["stopped"] = True
             if receipt["stopped"]:
                 # A STOP while preparing is not a completed handoff.
                 receipt["batch_success"] = False
                 receipt["complete"] = False
-            receipt["finished_at"] = co.now()
+            # Only deadlines stay unfinalized; STOP and ordinary failures retain
+            # the existing six-hour cooling period.
+            receipt["finished_at"] = None if timed_out and not receipt["stopped"] else co.now()
             co.report_progress(
                 f"{receipt['found']} matches saved · {receipt['companies']} company boards checked"
                 + (
@@ -509,12 +541,24 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 **co.progress_snapshot(), "running": False, "active_search": {}
             }
             with co._LOCK:
-                data = co._read()
-                # Never replace orphaned/invalid saved search state with defaults.
-                data["last_network"] = receipt
-                if state:
-                    data["network_search"] = state
-                co._write(data)
+                try:
+                    # A STOP may arrive during final progress/snapshot handling.
+                    # Commit its outcome and deactivate as one board-locked step;
+                    # stop() must revalidate under this same lock to acknowledge.
+                    if STOP.is_set():
+                        receipt["stopped"] = True
+                        receipt["batch_success"] = False
+                        receipt["complete"] = False
+                        receipt["finished_at"] = co.now()
+                    data = co._read()
+                    # Never replace orphaned/invalid saved search state with defaults.
+                    data["last_network"] = receipt
+                    if state:
+                        data["network_search"] = state
+                    co._write(data)
+                finally:
+                    co._RUNNING = False
+                    co._ACTIVE = {}
         except Exception:
             co.log.exception("Could not finalize Career Ops network receipt")
         finally:
