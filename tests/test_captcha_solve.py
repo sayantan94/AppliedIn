@@ -40,13 +40,14 @@ function matches(e,selector){
       const [tag,cls]=s.split('.');
       return e.tagName.toLowerCase()===tag&&e.className.split(/\s+/).includes(cls);
     }
-    const m=s.match(/^([\w-]+)?\[([\w-]+)(?:(\^=|\*=|=)"([^"]*)")?(?: i)?\]$/);
+    const m=s.match(/^([\w-]+)?\[([\w-]+)(?:(\^=|\*=|=)(?:"([^"]*)"|([\w-]+)))?(?: i)?\]$/);
     if(m){
       if(m[1]&&e.tagName.toLowerCase()!==m[1])return false;
       const v=e.getAttribute(m[2]);if(v===null)return false;
       if(!m[3])return true;
       const a=s.endsWith(' i]')?v.toLowerCase():v;
-      const b=s.endsWith(' i]')?m[4].toLowerCase():m[4];
+      const expected=m[4]??m[5];
+      const b=s.endsWith(' i]')?expected.toLowerCase():expected;
       return m[3]==='='?a===b:m[3]==='^='?a.startsWith(b):a.includes(b);
     }
     return e.tagName.toLowerCase()===s;
