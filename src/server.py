@@ -767,10 +767,28 @@ def create_app() -> FastAPI:
         from core import flags
         preparation_runs = preparation.snapshot()
         from tools.browser_runtime import browser_status
+        queue_age_seconds = None
+        try:
+            import math
+            import time
+
+            from core.apply_queue import ApplyQueue
+
+            pending = ApplyQueue(stores.tracking.r).pending()
+            oldest = None
+            for item in pending:
+                stamp = float(item.get("queued_at") or 0)
+                if stamp > 0 and math.isfinite(stamp):
+                    oldest = stamp if oldest is None else min(oldest, stamp)
+            if pending:
+                # Legacy unstamped rows cannot date the queue to the epoch.
+                queue_age_seconds = max(0, int(time.time() - oldest)) if oldest is not None else 0
+        except Exception:  # noqa: BLE001 - a stat must never break the dashboard
+            pass
         return {"today_submitted": applied,
                 "llm_error": flags.llm_error(),
                 "browser_status": browser_status(settings),
-                "queue_age_seconds": None, "paused": flags.paused(),
+                "queue_age_seconds": queue_age_seconds, "paused": flags.paused(),
                 "apply_mode": flags.apply_mode(),
                 "submit_review": flags.submit_review_enabled(),
                 "headless": flags.browser_headless(),
