@@ -152,6 +152,7 @@ def test_cap_at_fifth_sixth_and_expired_boundary(world, capsys):
 @pytest.mark.parametrize(
     ("handoff", "allowed"),
     [
+        ("", False),
         ("An active request", False),
         ("An active request\nBACK TO AGENTS\nstill active", False),
         ("An active request\nBACK TO AGENTS\n", True),
