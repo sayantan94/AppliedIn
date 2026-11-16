@@ -1283,6 +1283,73 @@ def test_late_stop_during_timeout_cleanup_prevents_next_tick_restart(
     assert network.STOP.is_set()
 
 
+@pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
+@pytest.mark.parametrize("late_hook", ["progress", "snapshot"])
+def test_timeout_stop_after_final_check_is_recorded_and_not_rescheduled(
+    board, monkeypatch, timeout_style, late_hook,
+):
+    """STOP from final progress/snapshot must be durable before run deactivation."""
+    network, stores, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=3)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def timed_events(payload):
+        attempts.append(json.loads(json.dumps(payload)))
+        yield {
+            "kind": "source", "source": "ashby", "total": 10,
+            "next": payload["cursor"]["ashby"]["next"],
+            "hash": "original-hash", "status": "ok",
+        }
+        if timeout_style == "exception":
+            raise TimeoutError("synthetic scanner deadline")
+        yield {"kind": "interrupted", "message": "Scan reached its 5-hour time limit"}
+
+    acknowledgements = []
+    original_report = co.report_progress
+    original_snapshot = co.progress_snapshot
+
+    def stop_at_final_report(message):
+        # Earlier scanner progress is not a finalizer checkpoint.
+        if message.startswith("0 matches saved"):
+            acknowledgements.append(network.stop())
+        original_report(message)
+
+    def stop_at_final_snapshot():
+        # The receipt has already passed the old final STOP.is_set() check.
+        acknowledgements.append(network.stop())
+        return original_snapshot()
+
+    monkeypatch.setattr(network, "events", timed_events)
+    if late_hook == "progress":
+        monkeypatch.setattr(co, "report_progress", stop_at_final_report)
+    else:
+        monkeypatch.setattr(co, "progress_snapshot", stop_at_final_snapshot)
+
+    co.scheduled_tick()
+    saved = co._read()
+    final = saved["last_network"]
+    assert acknowledgements == [{"stopping": True}]
+    assert network.STOP.is_set()
+    assert final["stopped"] is True
+    assert final["batch_success"] is False
+    assert final["complete"] is False
+    assert final["finished_at"] is not None
+    assert final["scan_error"]
+    assert final["progress"]["running"] is False
+    assert saved["network_search"]["cursor"]["ashby"] == {
+        "hash": "original-hash", "next": 3,
+    }
+    stores.queue.enqueue.assert_not_called()
+    assert not co._RUNNING and not co._SCAN.locked()
+
+    co.scheduled_tick()
+    assert len(attempts) == 1
+    assert network.STOP.is_set()  # No new reserve_scan(clear_network_stop=True).
+
+
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):
     network, stores, clock, _ = _network_fixture(board, monkeypatch)
     state, receipt = _saved_search(clock, count=1)
