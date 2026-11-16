@@ -229,6 +229,7 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
     }
     state = {}
     done = False
+    timed_out = False
     source_seen = set()
     try:
         with co._LOCK:
@@ -392,6 +393,8 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                     if STOP.is_set():
                         receipt["stopped"] = True
                     else:
+                        # A scanner deadline is an unfinished batch, not a six-hour receipt.
+                        timed_out = True
                         receipt["scan_error"] = event["message"]
             elif kind == "done":
                 done = not event.get("stopped")
@@ -428,6 +431,12 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
             receipt["coverage"][name]["next"] >= receipt["coverage"][name]["total"]
             for name in filters["ats"]
         )
+    except TimeoutError as exc:
+        # Preserve the batch cursor for the very next scheduled tick.
+        timed_out = True
+        receipt["scan_error"] = str(exc) or "Network scanner timed out"
+        receipt["errors"].append({"company": "Scanner", "error": receipt["scan_error"]})
+        co.log.warning("Career Ops network scan timed out: %s", receipt["scan_error"])
     except Exception as exc:
         co.log.exception("Career Ops network scan failed")
         receipt["scan_error"] = str(exc)
@@ -490,7 +499,9 @@ def run_reserved(filters: dict | None, resume: bool = False, *,
                 # A STOP while preparing is not a completed handoff.
                 receipt["batch_success"] = False
                 receipt["complete"] = False
-            receipt["finished_at"] = co.now()
+            # Only deadlines stay unfinalized; STOP and ordinary failures retain
+            # the existing six-hour cooling period.
+            receipt["finished_at"] = None if timed_out else co.now()
             co.report_progress(
                 f"{receipt['found']} matches saved · {receipt['companies']} company boards checked"
                 + (
