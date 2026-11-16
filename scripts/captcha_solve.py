@@ -57,6 +57,52 @@ BLOCKED_URL = re.compile(
 SCAN_JS = r"""(()=>{
  const out={__cs:1,url:String(window.location.href),password:false,frames:[],found:[],opaque:[]};
  const handles=Object.create(null), docs=[], wins=[];
+ // SHA-256 of the base64 body lets the approval cross the CLI boundary
+ // without passing a 256 KiB image back as a single process argument.
+ const bodyHash=text=>{
+   const k=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+     0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+     0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+     0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+     0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+     0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+   const bits=text.length*8,bytes=Array.from(text,c=>c.charCodeAt(0));
+   bytes.push(128);while(bytes.length%64!==56)bytes.push(0);
+   const hi=Math.floor(bits/4294967296),lo=bits>>>0;
+   for(let i=3;i>=0;i--)bytes.push((hi>>>(i*8))&255);
+   for(let i=3;i>=0;i--)bytes.push((lo>>>(i*8))&255);
+   const h=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+     0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+   const rot=(x,n)=>(x>>>n)|(x<<(32-n));
+   for(let offset=0;offset<bytes.length;offset+=64){
+     const w=new Array(64);
+     for(let t=0;t<16;t++){
+       const i=offset+t*4;
+       w[t]=((bytes[i]<<24)|(bytes[i+1]<<16)|(bytes[i+2]<<8)|bytes[i+3])>>>0;
+     }
+     for(let t=16;t<64;t++){
+       const a=w[t-15],b=w[t-2];
+       const s0=rot(a,7)^rot(a,18)^(a>>>3);
+       const s1=rot(b,17)^rot(b,19)^(b>>>10);
+       w[t]=(w[t-16]+s0+w[t-7]+s1)>>>0;
+     }
+     let [a,b,c,d,e,f,g,z]=h;
+     for(let t=0;t<64;t++){
+       const s1=rot(e,6)^rot(e,11)^rot(e,25);
+       const choose=(e&f)^(~e&g);
+       const t1=(z+s1+choose+k[t]+w[t])>>>0;
+       const s0=rot(a,2)^rot(a,13)^rot(a,22);
+       const majority=(a&b)^(a&c)^(b&c);
+       const t2=(s0+majority)>>>0;
+       z=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;
+     }
+     for(const [i,v] of [a,b,c,d,e,f,g,z].entries())h[i]=(h[i]+v)>>>0;
+   }
+   return h.map(v=>v.toString(16).padStart(8,'0')).join('');
+ };
+
  const key=e=>{const d=e.ownerDocument;return Array.prototype.indexOf.call(d.querySelectorAll('*'),e)};
  const style=(w,e)=>{try{return w.getComputedStyle(e)}catch(_){return {display:'none'}}};
  const shown=(w,e)=>{
@@ -194,7 +240,7 @@ SCAN_JS = r"""(()=>{
        .filter(e=>e!==img&&e.type!=='hidden'&&e.type!=='password');
      const id=path+'|image:'+key(img),c={id,kind:'image',sitekey:'',visible:true,frame:'',
        receiver:'',receiverCount:answers.length,callbacks:[],callbackHints:[],body:'',
-       imageStatus:'image_unreadable',src:attr(img,'src'),invalid:false};
+       imageStatus:'image_unreadable',src:attr(img,'src'),bodyHash:'',invalid:false};
      const h={owner:owner||img.parentElement,w,d};
      if(answers.length===1){
        c.receiver=path+'|field:'+key(answers[0]);h.receiver=answers[0];
@@ -215,7 +261,7 @@ SCAN_JS = r"""(()=>{
            const raw=atob(m[2]),png=raw.slice(0,8)==='\x89PNG\r\n\x1a\n';
            const jpeg=raw.charCodeAt(0)===255&&raw.charCodeAt(1)===216&&raw.charCodeAt(2)===255;
            if(raw.length>0&&raw.length<=262144&&(m[1].toLowerCase()==='png'?png:jpeg)){
-             c.body=m[2];c.imageStatus='ok';
+             c.body=m[2];c.bodyHash=bodyHash(c.body);c.imageStatus='ok';
            }
          }
        }catch(_){}
@@ -238,7 +284,13 @@ INJECT_JS = r"""((approved,selected,answer)=>{
  let live;
  try{live=(""" + SCAN_JS + r""")()}catch(_){return JSON.stringify({__cs:1,reason:'binding_changed'})}
  const now=live.snapshot;
- if(JSON.stringify(now)!==JSON.stringify(approved))
+ // Only the image body bytes are replaced by their SHA-256 binding witness.
+ // All URL/frame/widget/receiver/callback facts remain exactly compared.
+ const view=s=>({...s,found:s.found.map(c=>{
+   if(c.kind!=='image')return c;
+   const {body,...other}=c;return other;
+ })});
+ if(JSON.stringify(view(now))!==JSON.stringify(approved))
    return JSON.stringify({__cs:1,reason:'binding_changed'});
  const matching=now.found.filter(c=>c.id===selected);
  if(matching.length!==1||matching[0].receiverCount!==1||!matching[0].receiver||matching[0].invalid)
@@ -278,7 +330,7 @@ INJECT_JS = r"""((approved,selected,answer)=>{
    let afterEvents;
    try{afterEvents=(""" + SCAN_JS + r""")().snapshot}
    catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
-   if(JSON.stringify(afterEvents)!==JSON.stringify(approved))
+   if(JSON.stringify(view(afterEvents))!==JSON.stringify(approved))
      return JSON.stringify({__cs:1,reason:'possible_commit',called});
    if(refs.length===1){
      try{
@@ -289,7 +341,7 @@ INJECT_JS = r"""((approved,selected,answer)=>{
    if(submitted||failed||networkObserved)return JSON.stringify({__cs:1,reason:'possible_commit',called});
    let after;
    try{after=(""" + SCAN_JS + r""")().snapshot}catch(_){return JSON.stringify({__cs:1,reason:'possible_commit',called})}
-   if(JSON.stringify(after)!==JSON.stringify(approved))
+   if(JSON.stringify(view(after))!==JSON.stringify(approved))
      return JSON.stringify({__cs:1,reason:'possible_commit',called});
    if(!field.isConnected||!field.value||field.value!==answer)
      return JSON.stringify({__cs:1,reason:'response_unverified',called});
@@ -588,9 +640,19 @@ def run(session: str, tab: str | None, dry_run: bool, base: Path) -> tuple[int, 
         started = time.monotonic()
         task_id, token = solve(task, key)
         log["solve_seconds"] = round(time.monotonic() - started, 1)
-        # This exact snapshot was Python-guarded before the paid task. JS
-        # re-scans and compares it inside the same evaluation before writing.
-        expression = (INJECT_JS + "(" + json.dumps(page, ensure_ascii=True) +
+        # Retain the isolated image bytes only for the paid task. The browser
+        # scanner and Python verify the same SHA-256, then compare the compact
+        # approved snapshot inside the mutating evaluation.
+        approved = json.loads(json.dumps(page))
+        for item in approved.get("found", []):
+            if item.get("kind") == "image":
+                item.pop("body", None)
+        if challenge["kind"] == "image":
+            import hashlib
+            digest = hashlib.sha256(challenge["body"].encode("ascii")).hexdigest()
+            if challenge.get("bodyHash") != digest:
+                raise CaptchaError(EXIT_UNSUPPORTED, "image_unreadable")
+        expression = (INJECT_JS + "(" + json.dumps(approved, ensure_ascii=True) +
                       "," + json.dumps(challenge["id"]) + "," +
                       json.dumps(token, ensure_ascii=True) + ")")
         try:
