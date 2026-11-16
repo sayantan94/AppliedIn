@@ -1138,8 +1138,6 @@ def test_network_failure_never_prepares_and_finalized_error_waits(
     assert co._read()["last_network"]["started_at"] == data["last_network"]["started_at"]
 
 
-
-
 @pytest.mark.parametrize("timeout_style", ["exception", "interrupted"])
 def test_network_timeout_resumes_saved_cursor_at_next_scheduled_tick(
     board, monkeypatch, timeout_style,
@@ -1199,6 +1197,34 @@ def test_network_timeout_resumes_saved_cursor_at_next_scheduled_tick(
     assert second["last_network"]["finished_at"] is not None
     co.scheduled_tick()
     assert len(payloads) == 2  # A finalized batch waits six hours.
+
+
+
+def test_manual_stop_after_timeout_stays_finalized(board, monkeypatch):
+    """An operator STOP after a deadline must not trigger an unwanted next-tick restart."""
+    network, _, clock, _ = _network_fixture(board, monkeypatch)
+    state, receipt = _saved_search(clock, count=1)
+    data = co._read()
+    data.update(network_search=state, last_network=receipt)
+    co._write(data)
+    attempts = []
+
+    def interrupted(payload):
+        attempts.append(payload["cursor"]["ashby"]["next"])
+        yield {"kind": "source", "source": "ashby", "total": 10, "next": 1,
+               "hash": "original-hash", "status": "ok"}
+        yield {"kind": "interrupted", "message": "Scan reached its time limit"}
+        network.STOP.set()
+
+    monkeypatch.setattr(network, "events", interrupted)
+    co.scheduled_tick()
+    saved = co._read()["last_network"]
+    assert saved["stopped"]
+    assert saved["finished_at"] is not None
+    assert saved["progress"]["running"] is False
+    co.scheduled_tick()
+    assert attempts == [1]
+
 
 
 def test_unfinalized_restart_uses_same_batch_start_and_cursor(board, monkeypatch):
