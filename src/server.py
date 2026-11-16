@@ -546,7 +546,9 @@ def _manual_role_identity(url: str) -> dict | None:
         # The tenant (not the vendor hostname or body-supplied company) owns
         # the readable employer. Freeze this component in the storage pk.
         label = tenant
-        identity_id = f"{ats}:{tenant.lower()}:{context.lower()}:{posting}"
+        # A Workday posting can contain path segments. The separator is
+        # outside the accepted token alphabet, so replacing '/' is bijective.
+        identity_id = f"{ats}:{tenant.lower()}:{context.lower()}:{posting.replace('/', '.')}"
     else:
         # Unknown sites are *not* promoted to a vendor. Use only the owning
         # registered hostname and exact path/query for a conservative identity.
@@ -576,20 +578,25 @@ def _manual_role_identity(url: str) -> dict | None:
             "linkedin_id": linkedin_id}
 
 
-def _manual_existing_role(tracking, identity: dict) -> tuple[dict | None, bool]:
-    """Find a deterministic pk or one explicitly recorded LinkedIn alias.
+def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tuple[dict | None, bool]:
+    """Prefer canonical pks; recover historic rows only with exact source proof.
 
-    Cross-key alias scans are intentionally sequential, not a claimed atomic
-    index. An ambiguous alias must never silently select a posting.
+    A LinkedIn query parameter is not proof that two distinct ATS postings
+    are the same. Cross-ATS merges must not be driven by that parameter.
     """
+    import hashlib
     from core.ids import make_pk
 
     pk = (make_pk(identity["company"], identity["job_id"])
           if identity["company"] and identity["job_id"] else "")
     direct = tracking.get(pk) if pk else None
     matches = {pk: direct} if direct else {}
-    linkedin_id = identity["linkedin_id"]
-    if linkedin_id:
+
+    if identity["ats"] == "linkedin":
+        # Preserve the already-supported single linked-row lookup, while
+        # requiring its ATS identity and source verification to be intact.
+        # This is not independent LinkedIn-to-ATS equivalence evidence.
+        linkedin_id = identity["linkedin_id"]
         for row in tracking.all():
             if not isinstance(row, dict) or not row.get("jd_url"):
                 continue
@@ -598,15 +605,25 @@ def _manual_existing_role(tracking, identity: dict) -> tuple[dict | None, bool]:
                     or not previous["company"] or not previous["job_id"]
                     or row.get("ats") != previous["ats"]
                     or row.get("job_id") != previous["job_id"]
+                    or (row.get("posting_guard") or {}).get("source_verified") is not True
                     or row.get("pk") != make_pk(row.get("company") or "",
                                                row.get("job_id") or "")):
                 continue
-            # Same vendor, different tenant/posting is not an alias just
-            # because a user supplied a number in a query string.
-            if (identity["ats"] == previous["ats"]
-                    and identity["job_id"] != previous["job_id"]):
+            matches[row["pk"]] = row
+    elif source_url:
+        # Pre-#372 apply-role persisted sha1(full URL)[:12] as a custom job ID.
+        # Only the *exact* stored source plus the old hash is enough to recover
+        # it. Never migrate its pk or admit an unrelated same-number posting.
+        old_job_id = hashlib.sha1(source_url.encode()).hexdigest()[:12]
+        for row in tracking.all():
+            if (not isinstance(row, dict) or row.get("jd_url") != source_url
+                    or row.get("ats") != "custom"
+                    or row.get("job_id") != old_job_id
+                    or row.get("pk") != make_pk(row.get("company") or "",
+                                               row.get("job_id") or "")):
                 continue
             matches[row["pk"]] = row
+
     if len(matches) > 1:
         return None, True
     return next(iter(matches.values()), None), False
@@ -1980,6 +1997,15 @@ def create_app() -> FastAPI:
                         "found", "skipped", "error", "failed", "tailored"
                     }):
                 return {"ok": False, "error": "tracking_conflict"}
+            # A normal completed text-only card already has its résumé.
+            # Repeating the same sanitized JD only refreshes display metadata;
+            # never downgrade it to found without another tailoring dispatch.
+            # Legacy failed/closed restaging remains on its existing path.
+            if (current["status"] == "tailored"
+                    and not any(current.get(field) for field in (
+                        "skip_reason", "fail_kind", "fail_reason"))):
+                return {"ok": True, "status": "existing", "pk": pk,
+                        "company": company, "title": title}
             reader = {key: current[key] for key in REPAIR_READER_FIELDS
                       if key in current}
             if not stores.tracking.update_if_status(
@@ -2039,7 +2065,7 @@ def create_app() -> FastAPI:
         if not identity:
             return {"ok": False, "error": "posting_identity_unresolved"}
         stores = make_stores(settings)
-        row, ambiguous = _manual_existing_role(stores.tracking, identity)
+        row, ambiguous = _manual_existing_role(stores.tracking, identity, url)
         if ambiguous:
             return {"ok": False, "error": "ambiguous_posting_identity"}
         if not row and not identity["company"]:
