@@ -123,12 +123,19 @@ def load_policy(root: Path) -> Policy:
     ):
         raise PrecheckUnavailable("invalid date caps")
     dates = {}
+    date_collisions = set()
     try:
         for company, value in caps.items():
             date = datetime.fromisoformat(value)
             if date.tzinfo is not None or date.time().isoformat() != "00:00:00":
                 raise ValueError("date cap must be a calendar date")
-            dates[_key(company)] = date.replace(tzinfo=UTC)
+            key = _key(company)
+            normalized_date = date.replace(tzinfo=UTC)
+            if key in dates:
+                date_collisions.add(key)
+                dates[key] = max(dates[key], normalized_date)
+            else:
+                dates[key] = normalized_date
     except ValueError as exc:
         raise PrecheckUnavailable("invalid date cap") from exc
     if not isinstance(count_caps, dict) or any(
@@ -147,9 +154,22 @@ def load_policy(root: Path) -> Policy:
         for pair in pairs
     ):
         raise PrecheckUnavailable("invalid distinct pair exceptions")
+    normalized_counts = {}
+    count_collisions = set()
+    for company, value in count_caps.items():
+        key = _key(company)
+        if key in normalized_counts:
+            count_collisions.add(key)
+            normalized_counts[key] = min(normalized_counts[key], value)
+        else:
+            normalized_counts[key] = value
+    for key in sorted(date_collisions):
+        print(f"WARNING: CAPS normalized key collision: {key}", file=sys.stderr)
+    for key in sorted(count_collisions):
+        print(f"WARNING: COUNT_CAPS normalized key collision: {key}", file=sys.stderr)
     return Policy(
         CAPS=dates,
-        COUNT_CAPS={_key(k): v for k, v in count_caps.items()},
+        COUNT_CAPS=normalized_counts,
         NEVER=frozenset(never),
         PARKED=tuple(parked),
         DISTINCT_PAIRS=frozenset(frozenset(pair) for pair in pairs),
