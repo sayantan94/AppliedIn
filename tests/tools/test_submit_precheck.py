@@ -1,45 +1,62 @@
-"""Synthetic offline characterization of the source-owned submit precheck.
+"""Offline, synthetic submit-precheck contract characterization.
 
-The ignored historical CLI is not available to public GitHub workers. These
-are source contract tests, not a claim that the old private CLI's argv or exact
-events have been compared. The operator must verify that before adoption.
+These assertions pin explicit decisions, CLI states and per-invocation events.
+The ignored historical CLI is not part of this repository: passing these tests
+alone does NOT prove pre-move equivalence, which requires an external oracle.
+No browser, real Submit, live Redis or owner file is used.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import fakeredis
 import pytest
 
 from core.storage.local import RedisTracking
-from tools import submit_precheck as precheck
+from tools import submit_precheck as guard
 
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+BOARD = "example-board"
+PK = "example-co#candidate"
 JOB = {
-    "pk": "example-co#candidate", "company": "example-co",
-    "job_id": "candidate", "title": "Synthetic Engineer",
-    "status": "tailored",
+    "pk": PK, "job_id": "candidate", "company": "example-co",
+    "title": "Synthetic Engineer", "status": "tailored",
+    "greenhouse_board": BOARD,
 }
+
+
+def _events(root: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (root / "precheck-events.log").read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _claim(root: Path, pk: str = PK) -> dict | None:
+    name = hashlib.sha256(pk.encode("utf-8")).hexdigest() + ".json"
+    path = root / "claims" / name
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    root = tmp_path / "precheck"
+    root = tmp_path / "data"
     root.mkdir()
-    policy = {
-        "company_caps": {}, "company_aliases": {},
-        "title_aliases": {}, "historical_applications": [],
-        "blocked_job_ids": [],
-    }
+    policy = json.loads(json.dumps(guard.PUBLIC_DEFAULTS))
     (root / "precheck-data.json").write_text(json.dumps(policy), encoding="utf-8")
     monkeypatch.setenv("APPLIEDIN_PRECHECK_DATA_DIR", str(root))
+    monkeypatch.setenv("BOARD_AGENT_PID", "4242")
+    monkeypatch.setenv("BOARD_AGENT_BOARD", BOARD)
     client = fakeredis.FakeRedis(decode_responses=True)
     tracking = RedisTracking(client)
 
@@ -48,274 +65,445 @@ def world(tmp_path, monkeypatch):
             client.set("app:" + row["pk"], json.dumps(row))
 
     def save():
-        (root / "precheck-data.json").write_text(json.dumps(policy), encoding="utf-8")
+        (root / "precheck-data.json").write_text(
+            json.dumps(policy), encoding="utf-8"
+        )
 
-    def invoke(operation="check", pk=JOB["pk"]):
-        return precheck.main([operation, pk], legacy_dir=tmp_path / "no-real-operator",
-                             tracking=tracking, at=NOW)
+    def invoke(op="start", pk=PK, board=BOARD):
+        return guard.main(
+            [op, pk, board], legacy_dir=tmp_path / "not-an-operator",
+            tracking=tracking, at=NOW,
+        )
 
     seed(JOB)
-    return root, policy, tracking, seed, save, invoke
+    return SimpleNamespace(
+        root=root, policy=policy, tracking=tracking, seed=seed,
+        save=save, invoke=invoke, tmp=tmp_path,
+    )
 
 
-def test_eligible_and_event_stability(world, capsys):
-    root, _, _, _, _, invoke = world
-    assert invoke() == 0
-    assert capsys.readouterr().out == "OK\n"
-    records = [json.loads(x) for x in (root / "precheck-events.log").read_text().splitlines()]
-    assert records == [{
-        "at": NOW.isoformat(), "pk": JOB["pk"], "operation": "check",
+def test_five_cli_operations_and_distinct_claim_states(world, capsys):
+    w = world
+    assert w.invoke("start") == 0
+    claim = _claim(w.root)
+    assert claim == {
+        "pk": PK, "board": BOARD, "agent_pid": "4242", "state": "filling",
+        "started_at": NOW.isoformat(), "submit_clicked": False,
+    }
+    assert w.invoke("submit") == 0
+    assert _claim(w.root) == {
+        **claim, "state": "submit-clicked", "submit_clicked": True,
+        "submit_clicked_at": NOW.isoformat(),
+    }
+    assert w.invoke("done") == 0
+    assert _claim(w.root)["state"] == "recorded"
+    assert _claim(w.root)["recorded_at"] == NOW.isoformat()
+    assert w.tracking.get(PK)["status"] == "tailored"
+    assert capsys.readouterr().out == "OK\nOK\nOK\n"
+    assert [(event["operation"], event["prior_claim_state"]) for event in
+            _events(w.root)] == [
+        ("start", None), ("submit", "filling"), ("done", "submit-clicked"),
+    ]
+
+
+def test_exact_per_invocation_event_shape_and_order(world, capsys):
+    w = world
+    assert w.invoke("start") == 0
+    output = capsys.readouterr()
+    assert (output.out, output.err) == ("OK\n", "")
+    assert _events(w.root) == [{
+        "at": NOW.isoformat(), "pk": PK, "operation": "start",
+        "argv": ["start", PK, BOARD], "return_code": 0, "output": "OK\n",
+        "prior_claim_state": None, "agent_pid": "4242",
         "allow": True, "reason": "eligible",
     }]
-    assert (root / "precheck.lock").is_file()
+    assert w.invoke("start") == 2
+    output = capsys.readouterr()
+    assert output.out == "STOP: claim_exists\n"
+    assert _events(w.root)[1] == {
+        "at": NOW.isoformat(), "pk": PK, "operation": "start",
+        "argv": ["start", PK, BOARD], "return_code": 2,
+        "output": "STOP: claim_exists\n", "prior_claim_state": "filling",
+        "agent_pid": "4242", "allow": False, "reason": "claim_exists",
+    }
 
 
-def test_duplicate_id_cannot_be_hidden_by_a_different_title_or_company(world, capsys):
-    root, _, _, seed, _, invoke = world
-    seed({
-        "pk": "another-co#candidate", "company": "another-co",
-        "job_id": "candidate", "title": "Different synthetic title",
+def test_release_removes_only_matching_filling_claim(world, monkeypatch):
+    w = world
+    assert w.invoke("release") == 2
+    assert w.invoke("start") == 0
+    assert w.invoke("release", board="another-board") == 2
+    assert _claim(w.root)["state"] == "filling"
+    assert w.invoke("release") == 0
+    assert _claim(w.root) is None
+    assert w.invoke("start") == 0
+    assert _claim(w.root)["state"] == "filling"
+
+
+def test_release_does_not_remove_submit_clicked_or_recorded(world):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    assert w.invoke("release") == 2
+    assert _claim(w.root)["state"] == "submit-clicked"
+    assert w.invoke("done") == 0
+    assert w.invoke("release") == 2
+    assert w.invoke("done") == 2
+    assert _claim(w.root)["state"] == "recorded"
+
+
+def test_reopen_only_from_clicked_by_claiming_agent(world, monkeypatch):
+    w = world
+    assert w.invoke("reopen") == 2
+    assert w.invoke("start") == 0
+    assert w.invoke("reopen") == 2
+    assert w.invoke("submit") == 0
+    monkeypatch.setenv("BOARD_AGENT_PID", "9999")
+    assert w.invoke("reopen") == 2
+    monkeypatch.setenv("BOARD_AGENT_PID", "4242")
+    assert w.invoke("reopen", board="another-board") == 2
+    assert _claim(w.root)["state"] == "submit-clicked"
+    assert w.invoke("reopen") == 0
+    assert _claim(w.root)["state"] == "filling"
+    assert not _claim(w.root)["submit_clicked"]
+    assert "submit_clicked_at" not in _claim(w.root)
+    assert w.invoke("submit") == 0
+    assert _claim(w.root)["state"] == "submit-clicked"
+
+
+def test_board_and_pid_identity_pins_all_transitions(world, monkeypatch, capsys):
+    w = world
+    assert w.invoke("start", board="wrong-board") == 2
+    assert capsys.readouterr().out == "STOP: board_pin\n"
+    assert w.invoke("start") == 0
+    monkeypatch.setenv("BOARD_AGENT_PID", "another-pid")
+    assert w.invoke("submit") == 2
+    assert w.invoke("release") == 2
+    assert _claim(w.root)["agent_pid"] == "4242"
+    monkeypatch.setenv("BOARD_AGENT_PID", "4242")
+    assert w.invoke("submit") == 0
+
+
+def test_submit_rechecks_status_and_eligibility_immediately(world, capsys):
+    w = world
+    assert w.invoke("start") == 0
+    w.seed({**JOB, "status": "skipped"})
+    assert w.invoke("submit") == 2
+    assert capsys.readouterr().out.endswith("STOP: skipped\n")
+    assert _claim(w.root)["state"] == "filling"
+    w.seed(JOB)
+    w.seed({
+        "pk": "other-co#candidate", "job_id": "candidate",
+        "company": "other-co", "title": "Different role",
         "status": "applied", "applied_at": NOW.isoformat(),
     })
-    assert invoke() == 2
-    assert capsys.readouterr().out == "STOP: duplicate_job_id\n"
-    event = json.loads((root / "precheck-events.log").read_text().splitlines()[-1])
-    assert event["reason"] == "duplicate_job_id"
+    assert w.invoke("submit") == 2
+    assert _events(w.root)[-1]["reason"] == "duplicate_job_id"
+    assert _claim(w.root)["state"] == "filling"
 
 
-def test_normalized_title_company_and_placeholder_are_distinct(world, capsys):
-    _, _, _, seed, _, invoke = world
-    seed({
-        "pk": "example-co#old", "company": "Example Co",
-        "job_id": "old", "title": "  SYNTHETIC--Engineer!  ",
+def test_submitted_click_counts_but_does_not_mark_applied(world):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    assert w.tracking.get(PK)["status"] == "tailored"
+    assert w.invoke("start") == 2
+    w.seed({
+        "pk": "example-co#next", "job_id": "next", "company": "example-co",
+        "title": JOB["title"], "status": "tailored", "greenhouse_board": BOARD,
+    })
+    assert w.invoke("start", pk="example-co#next") == 2
+    assert _events(w.root)[-1]["reason"] == "duplicate_title_company"
+
+
+def test_duplicate_job_id_despite_different_title_and_company(world):
+    w = world
+    w.seed({
+        "pk": "another-co#old", "job_id": "candidate",
+        "company": "another-co", "title": "Different role",
+        "status": "applied", "applied_at": NOW.isoformat(),
+    })
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "duplicate_job_id"
+
+
+def test_normalized_title_company_and_distinct_companies(world):
+    w = world
+    w.seed({
+        "pk": "example-co#old", "job_id": "old",
+        "company": "Example Co", "title": "  SYNTHETIC--Engineer!  ",
         "status": "applied_manual", "applied_at": NOW.isoformat(),
     })
-    assert invoke() == 2
-    assert "duplicate_title_company" in capsys.readouterr().out
-
-
-def test_title_aliases_and_distinct_company(world):
-    _, policy, tracking, seed, save, invoke = world
-    policy["company_aliases"] = {"example company": "example-co"}
-    policy["title_aliases"] = {"synthetic eng": "synthetic engineer"}
-    save()
-    seed({
-        "pk": "another-co#old", "company": "another-co",
-        "job_id": "old", "title": "Synthetic Engineer",
-        "status": "applied",
-    })
-    assert invoke() == 0
-    row = {**JOB, "title": "Synthetic Eng", "company": "Example Company"}
-    tracking.r.set("app:" + JOB["pk"], json.dumps(row))
-    seed({
-        "pk": "example-co#other", "company": "example-co",
-        "job_id": "other", "title": "Synthetic Engineer",
-        "status": "applied",
-    })
-    assert invoke() == 2
-
-
-def test_placeholder_title_is_not_a_wildcard_duplicate(world):
-    _, _, tracking, seed, _, invoke = world
-    tracking.r.set("app:" + JOB["pk"], json.dumps({**JOB, "title": "Unknown"}))
-    seed({
-        "pk": "example-co#prior", "company": "example-co",
-        "job_id": "prior", "title": "UNKNOWN",
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "duplicate_title_company"
+    w.seed({
+        "pk": "example-co#old", "job_id": "old",
+        "company": "another-co", "title": "Synthetic Engineer",
         "status": "applied", "applied_at": NOW.isoformat(),
     })
-    assert invoke() == 0
+    assert w.invoke() == 0
 
 
-def test_cap_at_fifth_sixth_and_expired_boundary(world, capsys):
-    _, _, _, seed, _, invoke = world
+def test_placeholder_title_not_a_wildcard(world):
+    w = world
+    w.seed({**JOB, "title": "Unknown"})
+    w.seed({
+        "pk": "example-co#old", "job_id": "old", "company": "example-co",
+        "title": "UNKNOWN", "status": "applied", "applied_at": NOW.isoformat(),
+    })
+    assert w.invoke() == 0
+
+
+def test_never_and_parked_row_identifiers(world):
+    w = world
+    w.policy["NEVER"] = [PK]
+    w.save()
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "blocked_row"
+    w.policy["NEVER"] = []
+    w.policy["PARKED"] = ["example-co#"]
+    w.save()
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "parked"
+
+
+def test_explicit_distinct_pair_exception_exempts_duplicate_not_cap(world):
+    w = world
+    other = {
+        "pk": "example-co#old", "job_id": "candidate",
+        "company": "example-co", "title": JOB["title"],
+        "status": "applied", "applied_at": NOW.isoformat(),
+    }
+    w.seed(other)
+    assert w.invoke() == 2
+    w.policy["DISTINCT_PAIRS"] = [[PK, other["pk"]]]
+    w.save()
+    assert w.invoke() == 0
+    assert _claim(w.root)["state"] == "filling"
+    assert w.invoke("release") == 0
+    w.policy["COUNT_CAPS"] = {"example-co": 1}
+    w.save()
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "company_cap"
+
+
+def test_company_date_cap(world):
+    w = world
+    w.policy["CAPS"] = {"example-co": "2026-01-01"}
+    w.save()
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "company_date_cap"
+    w.policy["CAPS"] = {"example-co": "2025-12-31"}
+    w.save()
+    assert w.invoke() == 0
+
+
+def test_count_cap_fifth_sixth_and_180_day_expiry(world):
+    w = world
     priors = [
         {
-            "pk": "example-co#prior-" + str(i),
-            "company": "example-co", "job_id": "prior-" + str(i),
-            "title": "Synthetic title " + str(i), "status": "applied",
+            "pk": f"example-co#prior-{i}", "job_id": f"prior-{i}",
+            "company": "example-co", "title": f"Synthetic role {i}",
+            "status": "applied",
             "applied_at": (NOW - timedelta(days=30)).isoformat(),
         }
         for i in range(5)
     ]
     expired = {
-        **priors[4],
-        "applied_at": (NOW - timedelta(days=180, seconds=1)).isoformat(),
+        **priors[4], "applied_at": (NOW - timedelta(days=180, seconds=1)).isoformat(),
     }
-    seed(*priors[:4], expired)
-    assert invoke() == 0  # Four qualifying priors, prospective fifth.
-    capsys.readouterr()
-    seed(priors[4])
-    assert invoke() == 2  # Five qualifying priors, prospective sixth.
-    assert capsys.readouterr().out == "STOP: company_cap\n"
+    w.seed(*priors[:4], expired)
+    assert w.invoke() == 0  # Four qualifying priors and the fifth candidate.
+    assert w.invoke("release") == 0
+    w.seed(priors[4])
+    assert w.invoke() == 2  # Five qualifying priors and the sixth candidate.
+    assert _events(w.root)[-1]["reason"] == "company_cap"
 
 
 @pytest.mark.parametrize(
     ("handoff", "allowed"),
     [
-        ("", False),
-        ("An active request", False),
-        ("An active request\nBACK TO AGENTS\nstill active", False),
-        ("An active request\nBACK TO AGENTS\n", True),
-        ("An active request\nDONE\n", True),
+        ("", False), ("Active request", False),
+        ("Active\nBACK TO AGENTS\nstill active", False),
+        ("Active\nBACK TO AGENTS\n", True),
+        ("Active\nDONE\n", True),
     ],
 )
-def test_last_line_handoff_only(world, handoff, allowed):
-    root, _, _, _, _, invoke = world
-    (root / "owner-handoff.md").write_text(handoff, encoding="utf-8")
-    assert (invoke() == 0) is allowed
+def test_handoff_last_line_only(world, handoff, allowed):
+    w = world
+    (w.root / "owner-handoff.md").write_text(handoff, encoding="utf-8")
+    assert (w.invoke() == 0) is allowed
 
 
-def test_skipped_and_unconfirmed_click_never_write_applied(world):
-    root, _, tracking, _, _, invoke = world
-    tracking.r.set("app:" + JOB["pk"], json.dumps({**JOB, "status": "skipped"}))
-    assert invoke() == 2
-    tracking.r.set("app:" + JOB["pk"], json.dumps(JOB))
-    assert invoke("record-click") == 0
-    assert invoke() == 2
-    assert tracking.get(JOB["pk"])["status"] == "tailored"
-    claims = list((root / "claims").glob("*.json"))
-    assert len(claims) == 1
-    claim = json.loads(claims[0].read_text())
-    assert claim["submit_clicked"] is True
-    assert claim["pk"] == JOB["pk"]
-    assert len((root / "precheck-events.log").read_text().splitlines()) == 3
+def test_skipped_and_unconfirmed_submit_row_guard(world):
+    w = world
+    w.seed({**JOB, "status": "skipped"})
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "skipped"
+    w.seed({**JOB, "status": "needs_human", "submit_clicked_at": NOW.isoformat()})
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "already_submitted"
 
 
-def test_submit_clicked_prior_counts_without_confirmed_status(world):
-    _, _, _, seed, _, invoke = world
-    seed({
-        "pk": "example-co#old", "company": "example-co",
-        "job_id": "candidate", "title": "Different synthetic role",
-        "status": "needs_human", "submit_clicked_at": NOW.isoformat(),
-    })
-    assert invoke() == 2
+def test_submission_without_claim_fails_even_when_row_eligible(world):
+    w = world
+    assert w.invoke("submit") == 2
+    assert _claim(w.root) is None
+    assert _events(w.root)[-1]["reason"] == "claim_mismatch"
 
 
-def test_unconfirmed_click_counts_for_another_job_without_applied_status(world):
-    _, _, tracking, seed, _, invoke = world
-    assert invoke("record-click") == 0
-    assert tracking.get(JOB["pk"])["status"] == "tailored"
-    seed({
-        "pk": "example-co#next", "company": "example-co",
-        "job_id": "next", "title": JOB["title"], "status": "tailored",
-    })
-    assert invoke("check", pk="example-co#next") == 2
+@pytest.mark.parametrize("args", [[], ["start"], ["bogus", PK, BOARD],
+                                      ["start", PK, BOARD, "extra"]])
+def test_invalid_arguments_record_original_argv_and_return_code(world, args, capsys):
+    w = world
+    rc = guard.main(args, legacy_dir=w.tmp, tracking=w.tracking, at=NOW)
+    assert rc == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.startswith("usage: precheck ")
+    event = _events(w.root)[-1]
+    assert event["argv"] == args
+    assert event["return_code"] == 2
+    assert event["output"] == output.err
+    assert event["reason"] == "invalid_arguments"
+    assert event["prior_claim_state"] is None
 
 
-def test_board_pin_exact_match(world, monkeypatch):
-    _, _, tracking, _, _, invoke = world
-    tracking.r.set("app:" + JOB["pk"], json.dumps({
-        **JOB, "greenhouse_board": "example-board",
-    }))
-    monkeypatch.setenv("BOARD_AGENT_BOARD", "different-board")
-    assert invoke() == 2
-    monkeypatch.setenv("BOARD_AGENT_BOARD", "example-board")
-    assert invoke() == 0
+def test_help_is_logged_and_does_not_create_claim(world, capsys):
+    w = world
+    assert guard.main(["--help"], legacy_dir=w.tmp, tracking=w.tracking, at=NOW) == 0
+    assert "usage: precheck" in capsys.readouterr().out
+    assert _claim(w.root) is None
+    assert _events(w.root)[-1]["argv"] == ["--help"]
 
 
-@pytest.mark.parametrize("override", ["", "relative/path", "/not-a-real-precheck-root"])
-def test_bad_override_refuses_before_any_guard_file_or_lock(world, monkeypatch, capsys,
-                                                              override):
-    root, _, tracking, _, _, _ = world
-    monkeypatch.setenv("APPLIEDIN_PRECHECK_DATA_DIR", override)
-    result = precheck.main(
-        ["check", JOB["pk"]], legacy_dir=root, tracking=tracking, at=NOW,
-    )
-    assert result != 0
-    captured = capsys.readouterr()
-    assert "OK" not in captured.out
-    assert not (root / "precheck-events.log").exists()
-    assert not (root / "precheck.lock").exists()
-    assert not (root / "claims").exists()
+def test_empty_or_invalid_json_refuses_closed(world, capsys):
+    w = world
+    (w.root / "precheck-data.json").unlink()
+    assert w.invoke() == 2
+    assert "OK" not in capsys.readouterr().out
+    assert _claim(w.root) is None
+    w.policy["COUNT_CAPS"] = {"example-co": -1}
+    w.save()
+    assert w.invoke() == 2
+    assert _events(w.root)[-1]["reason"] == "precheck_unavailable"
 
 
-def test_symlinked_lock_cannot_escape_valid_data_root(world, tmp_path, capsys):
-    root, _, _, _, _, invoke = world
+@pytest.mark.parametrize("value", ["", "relative", "/not-a-real-precheck-root"])
+def test_invalid_root_has_no_lock_or_event_effect(world, monkeypatch, capsys, value):
+    w = world
+    monkeypatch.setenv("APPLIEDIN_PRECHECK_DATA_DIR", value)
+    assert w.invoke() != 0
+    assert "OK" not in capsys.readouterr().out
+    assert not (w.root / "precheck.lock").exists()
+    assert not (w.root / "precheck-events.log").exists()
+    assert _claim(w.root) is None
+
+
+def test_symlinked_lock_and_log_cannot_escape(world, tmp_path):
+    w = world
     outside = tmp_path / "outside"
     outside.write_text("sentinel", encoding="utf-8")
-    (root / "precheck.lock").symlink_to(outside)
-    assert invoke() == 2
-    assert capsys.readouterr().out == ""
+    (w.root / "precheck.lock").symlink_to(outside)
+    assert w.invoke() == 2
     assert outside.read_text(encoding="utf-8") == "sentinel"
-    assert not (root / "precheck-events.log").exists()
+    assert not (w.root / "precheck-events.log").exists()
 
 
-def test_missing_or_invalid_json_fails_closed_with_no_lock(world, capsys):
-    root, policy, tracking, _, save, invoke = world
-    (root / "precheck-data.json").unlink()
-    assert invoke() == 2
-    assert "OK" not in capsys.readouterr().out
-    assert not (root / "precheck.lock").exists()
-    policy["company_caps"] = {"example-co": -1}
-    save()
-    assert invoke() == 2
-    assert not (root / "precheck.lock").exists()
-
-
-def test_unset_override_uses_disposable_legacy_shim_anchor(tmp_path, monkeypatch, capsys):
+def test_unset_override_anchors_at_disposable_installed_legacy_dir(
+    tmp_path, monkeypatch, capsys,
+):
     monkeypatch.delenv("APPLIEDIN_PRECHECK_DATA_DIR", raising=False)
     operator = tmp_path / "disposable" / ".local" / "operator"
     operator.mkdir(parents=True)
     (operator / "precheck-data.json").write_text(
-        json.dumps(precheck.PUBLIC_DEFAULTS), encoding="utf-8",
+        json.dumps(guard.PUBLIC_DEFAULTS), encoding="utf-8",
     )
+    monkeypatch.setenv("BOARD_AGENT_PID", "4242")
+    monkeypatch.setenv("BOARD_AGENT_BOARD", BOARD)
     tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
-    tracking.r.set("app:" + JOB["pk"], json.dumps(JOB))
-    assert precheck.main(["check", JOB["pk"]], legacy_dir=operator,
-                         tracking=tracking, at=NOW) == 0
+    tracking.r.set("app:" + PK, json.dumps(JOB))
+    assert guard.main(
+        ["start", PK, BOARD], legacy_dir=operator, tracking=tracking, at=NOW,
+    ) == 0
     assert capsys.readouterr().out == "OK\n"
-    assert (operator / "precheck.lock").exists()
+    assert (operator / "precheck.lock").is_file()
+    assert _claim(operator)["state"] == "filling"
     assert not (tmp_path / "precheck.lock").exists()
 
 
-def test_two_serialized_calls_record_two_events_not_one_winner(world):
-    root, _, _, _, _, invoke = world
+def test_sequential_and_concurrent_start_are_serialized_in_one_process(world):
+    w = world
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: invoke(), range(2)))
-    assert results == [0, 0]
-    events = [json.loads(s) for s in
-              (root / "precheck-events.log").read_text().splitlines()]
+        results = list(pool.map(lambda _: w.invoke("start"), range(2)))
+    assert sorted(results) == [0, 2]
+    assert _claim(w.root)["state"] == "filling"
+    events = _events(w.root)
     assert len(events) == 2
-    assert all(e["reason"] == "eligible" and e["allow"] for e in events)
+    assert sorted(e["reason"] for e in events) == ["claim_exists", "eligible"]
+    assert (w.root / "precheck.lock").is_file()
 
 
-def test_shim_can_bootstrap_from_foreign_cwd_without_checkout_pythonpath(tmp_path):
-    root = Path(__file__).resolve().parents[2]
-    shim = root / "scripts" / "submit_precheck_shim.py"
-    foreign = tmp_path / "foreign"
+def test_concurrent_submit_records_one_click_transition(world):
+    w = world
+    assert w.invoke("start") == 0
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: w.invoke("submit"), range(2)))
+    assert sorted(results) == [0, 2]
+    assert _claim(w.root)["state"] == "submit-clicked"
+    events = _events(w.root)
+    assert len(events) == 3
+    assert sorted(e["reason"] for e in events[1:]) == [
+        "claim_mismatch", "eligible",
+    ]
+
+
+def test_installed_equivalent_shim_from_foreign_cwd_no_checkout_injection(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    installed_tree = tmp_path / "disposable-tree"
+    installed = installed_tree / ".local" / "operator" / "precheck.py"
+    installed.parent.mkdir(parents=True)
+    copied_module = installed_tree / "src" / "tools" / "submit_precheck.py"
+    copied_module.parent.mkdir(parents=True)
+    shutil.copyfile(repo / "scripts" / "submit_precheck_shim.py", installed)
+    shutil.copyfile(repo / "src" / "tools" / "submit_precheck.py", copied_module)
+    root = tmp_path / "synthetic-data"
+    root.mkdir()
+    (root / "precheck-data.json").write_text(
+        json.dumps(guard.PUBLIC_DEFAULTS), encoding="utf-8",
+    )
+    foreign = tmp_path / "foreign-cwd"
     foreign.mkdir()
     child = r"""
 import runpy
 import sys
 from pathlib import Path
-repo, shim = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
-# An editable-install .pth can independently put src into sys.path even
-# after PYTHONPATH is cleared; remove it explicitly without disabling the
-# offline sitecustomize network audit hook.
+repo, script, expected = [Path(arg).resolve() for arg in sys.argv[1:]]
+# A package's editable .pth is not proof that the installed shim resolves the
+# local copy. Keep the existing offline sitecustomize startup guard active.
 sys.path[:] = [
     entry for entry in sys.path
     if Path(entry or ".").resolve() not in (repo, repo / "src")
 ]
 assert str(repo) not in sys.path
 assert str(repo / "src") not in sys.path
-sys.argv = [str(shim), "--help"]
+sys.argv = [str(script), "--help"]
 try:
-    runpy.run_path(str(shim), run_name="__main__")
+    runpy.run_path(str(script), run_name="__main__")
 except SystemExit as exc:
     assert exc.code == 0
 else:
-    raise AssertionError("shim help did not terminate as expected")
-assert Path(sys.modules["tools.submit_precheck"].__file__).resolve() == (
-    repo / "src" / "tools" / "submit_precheck.py"
-)
+    raise AssertionError("shim did not terminate")
+assert Path(sys.modules["tools.submit_precheck"].__file__).resolve() == expected
 """
     env = dict(os.environ)
-    # tests/offline/sitecustomize.py necessarily reinjects its own startup
-    # hook and blocks networking. It must NOT reinject the repo's import roots.
     env["PYTHONPATH"] = ""
+    env["APPLIEDIN_PRECHECK_DATA_DIR"] = str(root)
     run = subprocess.run(
-        [sys.executable, "-c", child, str(root), str(shim)],
+        [sys.executable, "-c", child, str(repo), str(installed), str(copied_module)],
         cwd=foreign, env=env, text=True, capture_output=True, timeout=30,
     )
     assert run.returncode == 0, run.stderr
-    assert "usage: precheck" in run.stdout.lower()
+    assert "usage: precheck" in run.stdout
+    assert len(_events(root)) == 1
+    assert _events(root)[0]["argv"] == ["--help"]
