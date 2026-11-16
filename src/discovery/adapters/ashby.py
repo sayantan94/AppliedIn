@@ -73,9 +73,10 @@ class AshbyAdapter:
         resp.raise_for_status()
         jobs = []
         for j in resp.json().get("jobs", []):
+            # Feed descriptions have no inspected HTML witness, regardless of length.
             inspected = pg.analyze(ashby_jd_text(
                 j, str(j.get("descriptionPlain") or j.get("description") or "")
-            ))
+            ), source_required=True)
             jobs.append(
                 JobRecord(
                     company=company.name,

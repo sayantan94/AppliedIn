@@ -153,6 +153,43 @@ def test_different_versions_are_not_forced_to_agree(monkeypatch):
     assert pg.valid(result["text"], result["posting_guard"])
 
 
+def test_long_feed_only_guard_forces_existing_matched_source_reread(monkeypatch):
+    # A long, otherwise clean Ashby feed is NOT an inspected HTML source.
+    import asyncio
+
+    from agent import run as R
+
+    j = posting("Remote — APAC. " + "Build synthetic services. " * 50,
+                location="Vietnam", workplaceType="Remote", isRemote=True)
+    feed = setup(monkeypatch, j)
+    assert len(feed.jd_text) >= 400
+    assert feed.posting_guard["status"] == "unchecked"
+    assert feed.posting_guard["source_verified"] is False
+    assert "source_html_unavailable" in feed.posting_guard["reasons"]
+
+    read_calls = []
+    actual_reader = J.fetch_jd_meta
+
+    def observed_reader(url, purpose):
+        read_calls.append((url, purpose))
+        return actual_reader(url, purpose)
+
+    monkeypatch.setattr(J, "fetch_jd_meta", observed_reader)
+    monkeypatch.setattr(J, "_get", lambda *a, **k:
+                        pytest.fail("long matched ATS HTML should win"))
+    row = {"jd_url": URL, "jd_text": feed.jd_text,
+           "posting_guard": feed.posting_guard, "job_id": feed.job_id,
+           "ats": "ashby", "company": "example-co"}
+    selected = asyncio.run(R._jd_meta(row))
+    assert read_calls == [(URL, "jd_sweep")]
+    assert selected["source_kind"] == "ats_html"
+    assert selected["source_url"] == URL
+    assert selected["posting_guard"]["source_verified"] is True
+    assert "source_html_unavailable" not in selected["posting_guard"]["reasons"]
+    assert pg.valid(selected["text"], selected["posting_guard"])
+    assert classify_location_fit(selected["text"]) == classify_location_fit(feed.jd_text)
+
+
 def test_metadata_survives_guard_truncation_in_ats(monkeypatch):
     j = posting("Remote — APAC. " + "service " * 20000,
                 location="Vietnam", workplaceType="Remote", isRemote=True)

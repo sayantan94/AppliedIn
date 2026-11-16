@@ -26,6 +26,8 @@ _LOCATION_NAMES = {
     "us": "us", "usa": "us", "united states": "us",
     "united states of america": "us", "canada": "canada",
     "japan": "japan", "singapore": "singapore", "australia": "australia",
+    "india": "india", "thailand": "thailand", "china": "china",
+    "south korea": "south korea",
     "eu": "europe", "europe": "europe", "european union": "europe",
     "uk": "uk", "united kingdom": "uk", "great britain": "uk",
     "gulf": "gcc", "gcc": "gcc",
@@ -45,6 +47,7 @@ _LOCATION_NAMES = {
 }
 _ONSITE_FIT = set(_LOCATION_NAMES.values()) - {
     "apac", "world", "japan", "singapore", "australia",
+    "india", "thailand", "china", "south korea",
 }
 _REMOTE_FIT = {"vietnam", "apac", "world"}
 _LOCATION_FIELDS = {"location", "secondarylocations", "workplacetype", "isremote"}
@@ -75,7 +78,7 @@ def _remote_scope(value: str) -> str | None:
     if excluded:
         broad = _location_scope(excluded.group(1))
         denied = _location_scope(excluded.group(2))
-        if broad == {"apac"} and denied == {"vietnam"}:
+        if broad in ({"apac"}, {"world"}) and denied == {"vietnam"}:
             return "out_of_class"
         return None
     scopes = _location_scope(raw)
@@ -191,9 +194,13 @@ def classify_location_fit(jd_text: str) -> str:
             if worksite:
                 places = _location_scope(worksite.group(1))
                 if places:
-                    choices = {"in_class" if p in _ONSITE_FIT else "out_of_class"
-                               for p in places}
-                    findings.extend(choices)
+                    # A broad/multi-worksite scope does not prove where work occurs.
+                    if places & {"apac", "world"}:
+                        findings.append("unknown")
+                    else:
+                        choices = {"in_class" if p in _ONSITE_FIT else "out_of_class"
+                                   for p in places}
+                        findings.extend(choices)
     return findings[0] if findings and len(set(findings)) == 1 else "unknown"
 
 

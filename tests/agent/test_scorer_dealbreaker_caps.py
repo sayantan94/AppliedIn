@@ -586,6 +586,37 @@ def test_in_class_or_unknown_ignores_location_quote(
                 if "scorer_dealbreaker_cap_applied" in r.getMessage()]
 
 
+@pytest.mark.parametrize("posting,expected", [
+    ("On-site — APAC", 8),
+    ("Hybrid — worldwide", 8),
+    ("On-site — APAC or Japan", 8),
+    ("Remote — worldwide except Japan", 8),
+    ("Remote — worldwide except Vietnam; Remote worldwide", 8),
+    ("Remote — worldwide except Vietnam", 3),
+    ("On-site — India", 3),
+    ("Hybrid — Thailand", 3),
+    ("On-site — China", 3),
+    ("Hybrid in South Korea", 3),
+])
+def test_bounded_site_and_exclusion_scopes_cap_only_proven_exclusions(
+    harness, monkeypatch, caplog, posting, expected,
+):
+    # The scorer already admitted this row: only JD-side geographic proof
+    # may reduce its intrinsic score, never a broad APAC/world worksite.
+    h = harness
+    _fresh_scorer_state(monkeypatch, JD + "\n" + posting)
+    h.fake.scripted = [_response(_payload(score=8))]
+    with caplog.at_level(logging.WARNING):
+        outcome = _run(h)
+    assert h.stores.tracking.row["match_score"] == expected
+    assert h.next.observed == ([8] if expected == 8 else [])
+    assert (outcome["result"] == "skipped") is (expected == 3)
+    applied = [record.getMessage() for record in caplog.records
+               if "scorer_dealbreaker_cap_applied" in record.getMessage()]
+    assert applied == (["scorer_dealbreaker_cap_applied source=location raw=8 effective=3"]
+                       if expected == 3 else [])
+
+
 def test_other_qualified_quote_logs_one_applied_cap(harness, caplog):
     h = harness
     h.fake.scripted = [_response(_payload(kind="other", quote=GOOD_QUOTE))]
