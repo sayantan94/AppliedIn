@@ -233,19 +233,18 @@ def _handoff_blocks(root: Path, pk: str) -> bool:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise PrecheckUnavailable("unreadable handoff file") from exc
-    named = re.compile(re.escape(pk) + r"(?![0-9a-z])")
+    # A similar or suffixed PK belongs to a different row, not this handoff.
+    named = re.compile(r"(?<![\w#-])" + re.escape(pk) + r"(?![\w#-])")
     lines = [line for line in text.splitlines() if named.search(line)]
     if not lines:
         return False
-    # A release discussed in prose, or negated, is not a terminal handoff.
-    last = lines[-1]
-    marker = re.search(r"(?<!\w)(?:BACK TO AGENTS|DONE)\s*$", last, re.I)
-    if marker is None:
-        return True
-    return bool(re.search(
-        r"\b(?:not|no|never|without)\b|\b[\w-]*n['’]t\b",
-        last[:marker.start()], re.I,
-    ))
+    # A dedicated terminal status is unambiguous; prose ending in DONE is not.
+    return re.fullmatch(
+        r"\s*" + re.escape(pk)
+        + r"(?:\s+|\s*[:|]\s*|\s+-\s+)"
+        + r"(?i:BACK TO AGENTS|DONE)\s*",
+        lines[-1],
+    ) is None
 
 
 def evaluate(
@@ -550,12 +549,24 @@ def main(
                                 "recorded_at": now.isoformat(),
                             })
                     elif op == "release":
+                        matched = _matches_claim(prior, pk, board, pid, "filling")
+                        # Reopen makes the form fillable, not safe to discard the
+                        # earlier Submit attempt when the claim is released.
+                        witnessed = bool(prior.get("submit_clicked")) or any(
+                            field in prior for field in (
+                                "submit_clicked_at", "previous_submit_clicked_at",
+                                "submit_click_attempted_before_reopen",
+                                "reopen_not_sent_confirmed",
+                                "reopen_not_sent_confirmed_at",
+                            )
+                        )
                         decision = Decision(
-                            _matches_claim(prior, pk, board, pid, "filling"),
-                            "released" if _matches_claim(
-                                prior, pk, board, pid, "filling"
-                            ) else "claim_mismatch",
-                            _claim_failure_message(op, prior, board),
+                            matched and not witnessed,
+                            ("released" if matched and not witnessed else
+                             "submit_witness" if matched else "claim_mismatch"),
+                            ("STOP claim retains a Submit attempt; ask the lead "
+                             "for explicit resolution" if matched and witnessed
+                             else _claim_failure_message(op, prior, board)),
                         )
                         if decision.allow:
                             _claim_path(root, pk).unlink()

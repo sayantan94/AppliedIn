@@ -434,6 +434,106 @@ def test_other_row_marker_does_not_release(world):
     assert _events(w.root)[-1]["reason"] == "owner_handoff"
 
 
+@pytest.mark.parametrize(
+    ("last_exact", "other", "allowed"),
+    [
+        ("active", "DONE", False),
+        ("DONE", "active", True),
+    ],
+)
+def test_handoff_prefixed_pk_does_not_change_last_exact_row(
+    world, last_exact, other, allowed,
+):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {last_exact}\nother-{PK} {other}\n", encoding="utf-8",
+    )
+    assert (w.invoke() == 0) is allowed
+    if not allowed:
+        assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+@pytest.mark.parametrize(
+    ("last_exact", "other", "allowed"),
+    [
+        ("active", "DONE", False),
+        ("DONE", "active", True),
+    ],
+)
+def test_handoff_hyphen_suffix_pk_does_not_change_last_exact_row(
+    world, last_exact, other, allowed,
+):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {last_exact}\n{PK}-2 {other}\n", encoding="utf-8",
+    )
+    assert (w.invoke() == 0) is allowed
+    if not allowed:
+        assert _events(w.root)[-1]["reason"] == "owner_handoff"
+
+
+@pytest.mark.parametrize("status", [
+    "cannot be DONE",
+    "cannot be marked DONE",
+    "please mark DONE",
+    "please BACK TO AGENTS",
+    "was marked DONE",
+    "is now DONE",
+])
+def test_handoff_prose_qualified_final_marker_does_not_release(world, status):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        f"{PK} {status}\n", encoding="utf-8",
+    )
+    assert w.invoke() == 1
+    assert _events(w.root)[-1]["reason"] == "owner_handoff"
+    assert _claim(w.root) is None
+
+
+@pytest.mark.parametrize("status", [
+    f"{PK}: DONE",
+    f"{PK} | BACK TO AGENTS",
+    f"{PK} - done",
+    f"  {PK} back to agents  ",
+])
+def test_handoff_exact_terminal_marker_with_separator_releases(world, status):
+    w = world
+    (w.root / "owner-handoff.md").write_text(
+        status + "\n", encoding="utf-8",
+    )
+    assert w.invoke() == 0
+
+
+def test_release_after_confirmed_reopen_retains_submit_witness(
+    world, monkeypatch, capsys,
+):
+    w = world
+    assert w.invoke("start") == 0
+    assert w.invoke("submit") == 0
+    clicked = _claim(w.root)
+    assert w.invoke("reopen", PK, BOARD, "--not-sent-confirmed") == 0
+    reopened = _claim(w.root)
+    assert reopened["previous_submit_clicked_at"] == clicked["submit_clicked_at"]
+    assert reopened["submit_click_attempted_before_reopen"] is True
+    capsys.readouterr()
+
+    assert w.invoke("release") == 1
+    assert capsys.readouterr().out == (
+        "STOP claim retains a Submit attempt; ask the lead "
+        "for explicit resolution\n"
+    )
+    assert _events(w.root)[-1]["reason"] == "submit_witness"
+    assert _claim(w.root) == reopened
+
+    # A second agent cannot bypass the not-sent confirmation by starting over.
+    monkeypatch.setenv("BOARD_AGENT_PID", "9999")
+    assert w.invoke("start") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_exists"
+    assert w.invoke("submit") == 1
+    assert _events(w.root)[-1]["reason"] == "claim_mismatch"
+    assert _claim(w.root) == reopened
+
+
 def test_unconfirmed_reopen_refuses_second_submit_and_keeps_witness(world, capsys):
     w = world
     assert w.invoke("start") == 0
