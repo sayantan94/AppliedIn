@@ -16,6 +16,195 @@ from __future__ import annotations
 
 import json
 
+# Only expressly scoped posting evidence, never résumé or inferred geography.
+# This finite vocabulary deliberately avoids geocoding incidental place mentions.
+_LOCATION_NAMES = {
+    "vietnam": "vietnam", "viet nam": "vietnam",
+    "apac": "apac", "asia pacific": "apac", "asia-pacific": "apac",
+    "worldwide": "world", "global": "world", "globally": "world",
+    "anywhere": "world", "all countries": "world",
+    "us": "us", "usa": "us", "united states": "us",
+    "united states of america": "us", "canada": "canada",
+    "japan": "japan", "singapore": "singapore", "australia": "australia",
+    "india": "india", "thailand": "thailand", "china": "china",
+    "south korea": "south korea",
+    "eu": "europe", "europe": "europe", "european union": "europe",
+    "uk": "uk", "united kingdom": "uk", "great britain": "uk",
+    "gulf": "gcc", "gcc": "gcc",
+    "saudi arabia": "saudi arabia", "united arab emirates": "uae",
+    "uae": "uae", "qatar": "qatar", "oman": "oman",
+    "bahrain": "bahrain", "kuwait": "kuwait",
+    **{country: country for country in (
+        "france", "germany", "italy", "spain", "portugal", "netherlands",
+        "belgium", "austria", "switzerland", "ireland", "norway",
+        "sweden", "denmark", "finland", "poland", "czechia",
+        "czech republic", "greece", "romania", "bulgaria", "hungary",
+        "croatia", "slovenia", "slovakia", "estonia", "latvia",
+        "lithuania", "luxembourg", "malta", "cyprus", "iceland",
+        "serbia", "montenegro", "albania", "north macedonia",
+        "bosnia and herzegovina",
+    )},
+}
+_ONSITE_FIT = set(_LOCATION_NAMES.values()) - {
+    "apac", "world", "japan", "singapore", "australia",
+    "india", "thailand", "china", "south korea",
+}
+_REMOTE_FIT = {"vietnam", "apac", "world"}
+_LOCATION_FIELDS = {"location", "secondarylocations", "workplacetype", "isremote"}
+
+
+def _location_scope(value: str) -> set[str] | None:
+    """A complete bounded list of named regions, not tokens found in prose."""
+    import re
+
+    s = value.strip().casefold().strip(" .;:")
+    s = re.sub(r"^(?:eligible\s+|from\s+|in\s+|the\s+)", "", s)
+    s = re.sub(r"(?:[- ]only| residents? only| applicants? only)$", "", s).strip()
+    parts = re.split(r"\s+(?:or|and)\s+|[,/]", s)
+    if not parts or len(parts) > 6:
+        return None
+    named = {_LOCATION_NAMES.get(p.strip()) for p in parts}
+    return named if None not in named else None
+
+
+def _remote_scope(value: str) -> str | None:
+    import re
+
+    raw = value.strip()
+    excluded = re.fullmatch(
+        r"(.+?)\s+(?:excluding|except)\s+(?:residents?\s+(?:of|in)\s+)?(.+)",
+        raw, re.I,
+    )
+    if excluded:
+        broad = _location_scope(excluded.group(1))
+        denied = _location_scope(excluded.group(2))
+        if broad in ({"apac"}, {"world"}) and denied == {"vietnam"}:
+            return "out_of_class"
+        return None
+    scopes = _location_scope(raw)
+    if scopes is None:
+        return None
+    if scopes <= _REMOTE_FIT:
+        return "in_class"
+    if not scopes.intersection(_REMOTE_FIT):
+        return "out_of_class"
+    return None
+
+
+def classify_location_fit(jd_text: str) -> str:
+    """Classify explicitly stated posting-side geographic access only.
+
+    Offices and a raw Ashby location describe a place, not a remote hiring
+    perimeter. Missing or conflicting scoped evidence remains unknown.
+    """
+    import json
+    import re
+
+    if not isinstance(jd_text, str) or not jd_text.strip():
+        return "unknown"
+    text = jd_text[:100000]
+    segments = []
+    for clause in re.split(r"[;\n]", text):
+        clause = clause.strip()
+        if not clause:
+            continue
+        # Split sentences only after an explicit arrangement prefix. Splitting
+        # Ashby JSON metadata could turn an office label into hiring evidence.
+        if re.match(r"^(?:remote|on[- ]?site|hybrid)(?:\s|[-—–:,]|$)", clause, re.I):
+            segments.extend(p.strip() for p in re.split(r"\.\s+(?=[A-Za-z])", clause)
+                            if p.strip())
+        else:
+            segments.append(clause)
+    metadata = {}
+    for part in segments:
+        match = re.fullmatch(
+            r"(?:Ashby\s+)?(location|secondaryLocations|workplaceType|isRemote):\s*(.+)",
+            part, re.I,
+        )
+        if match and match.group(1).casefold() in _LOCATION_FIELDS:
+            try:
+                value = json.loads(match.group(2))
+            except (TypeError, ValueError):
+                value = match.group(2).strip()
+            metadata[match.group(1).casefold()] = value
+
+    arrangement = metadata.get("workplacetype")
+    arrangement = arrangement.strip().casefold() if isinstance(arrangement, str) else ""
+    arrangement = arrangement.replace("-", "").replace(" ", "")
+    remote_mode = arrangement == "remote"
+    site_mode = arrangement in {"onsite", "hybrid"}
+    for part in segments:
+        if re.match(r"^(?:remote)(?:\s|[-—–:,]|$)", part, re.I):
+            remote_mode = True
+        if re.match(r"^(?:on[- ]?site|hybrid)(?:\s|[-—–:,]|$)", part, re.I):
+            site_mode = True
+
+    flag = metadata.get("isremote")
+    if (remote_mode and site_mode or
+            flag is False and remote_mode or flag is True and site_mode):
+        return "unknown"
+    remote_mode = remote_mode or flag is True
+    if not remote_mode and not site_mode:
+        return "unknown"
+
+    findings = []
+    for part in segments:
+        if remote_mode:
+            # Arrangement-plus-scope is explicit; a separate Location/Office
+            # label is never promoted to a remote residency restriction.
+            access = re.fullmatch(
+                r"remote\s*(?:[-—–:]\s*|,\s*|from\s+|\s+)(.+)",
+                part, re.I,
+            )
+            if access:
+                scope = access.group(1)
+                if scope.casefold() not in {"", "only", "work", "role"}:
+                    verdict = _remote_scope(scope)
+                    if verdict:
+                        findings.append(verdict)
+            restriction = re.search(
+                r"\b(?:remote\s+)?(?:applicants?|candidates?|workers?)\s+"
+                r"(?:must|need to|are required to)\s+"
+                r"(?:be\s+)?(?:based|reside|live)\s+in\s+(.+)$",
+                part, re.I,
+            )
+            if restriction:
+                verdict = _remote_scope(restriction.group(1))
+                if verdict:
+                    findings.append(verdict)
+            eligible = re.search(
+                r"\b(?:eligible|open to|hiring)\s+(?:remote\s+)?"
+                r"(?:candidates?\s+)?(?:from|in|across)\s+(.+)$",
+                part, re.I,
+            )
+            if eligible:
+                verdict = _remote_scope(eligible.group(1))
+                if verdict:
+                    findings.append(verdict)
+        elif site_mode:
+            worksite = re.fullmatch(
+                r"(?:on[- ]?site|hybrid)\s*(?:[-—–:,]\s*|in\s+|at\s+)(.+)",
+                part, re.I,
+            )
+            if not worksite:
+                worksite = re.fullmatch(
+                    r"(?:worksite|on[- ]?site work location|hybrid work location)"
+                    r":\s*(.+)", part, re.I,
+                )
+            if worksite:
+                places = _location_scope(worksite.group(1))
+                if places:
+                    # A broad/multi-worksite scope does not prove where work occurs.
+                    if places & {"apac", "world"}:
+                        findings.append("unknown")
+                    else:
+                        choices = {"in_class" if p in _ONSITE_FIT else "out_of_class"
+                                   for p in places}
+                        findings.extend(choices)
+    return findings[0] if findings and len(set(findings)) == 1 else "unknown"
+
+
+
 from core.logging import get_logger
 from core.steering import messages
 from core.models import JobRecord

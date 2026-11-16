@@ -475,3 +475,114 @@ def test_provider_failures_are_real_errors_even_for_manual_reopen(harness, failu
     assert "Scorer model/request failed" in h.stores.tracking.row["error"]
     assert h.next.observed == []
     assert h.saved == []
+
+
+@pytest.mark.parametrize("placeholder", [
+    "", " none ", "N/A", " n/A ", "  NONE  ",
+])
+def test_no_claim_placeholder_canonicalizes_before_adk_state_save(
+    harness, monkeypatch, placeholder,
+):
+    import json
+
+    h = harness
+    witnessed = []
+    original = G._SafeScorer._run_async_impl
+
+    async def capture(self, ctx):
+        async for event in original(self, ctx):
+            if event.author == "scorer" and event.is_final_response():
+                text = "".join(p.text or "" for p in event.content.parts)
+                witnessed.append((text, deepcopy(
+                    event.actions.state_delta.get("match_score")
+                )))
+            yield event
+
+    monkeypatch.setattr(G._SafeScorer, "_run_async_impl", capture)
+    h.fake.scripted = [_response(json.dumps(
+        {"score": 8, "reasoning": "synthetic fit", "dealbreaker": placeholder}
+    ))]
+    _run(h)
+    assert len(h.fake.requests) == 1
+    assert len(witnessed) == 1
+    text, delta = witnessed[0]
+    assert json.loads(text)["dealbreaker"] is None
+    assert MatchScore.model_validate_json(text) == MatchScore.model_validate(delta)
+    assert h.next.observed == [8]
+
+
+@pytest.mark.parametrize("data", [
+    {"score": 8, "reasoning": "fit"},
+    {"score": 8, "reasoning": "fit", "dealbreaker": None},
+    {"score": 8, "reasoning": "fit", "dealbreaker": {"kind": "location"}},
+])
+def test_valid_dealbreaker_requires_no_mutation_or_reask(harness, monkeypatch, data):
+    import json
+
+    h = harness
+    original = json.dumps(data, indent=2)
+    observed = []
+    impl = G._SafeScorer._run_async_impl
+
+    async def capture(self, ctx):
+        async for event in impl(self, ctx):
+            if event.author == "scorer" and event.is_final_response():
+                observed.append("".join(p.text or "" for p in event.content.parts))
+            yield event
+
+    monkeypatch.setattr(G._SafeScorer, "_run_async_impl", capture)
+    h.fake.scripted = [_response(original)]
+    _run(h)
+    assert observed == [original]
+    assert len(h.fake.requests) == 1
+    assert h.next.observed == [8]
+
+
+@pytest.mark.parametrize("bad", [
+    {"score": 8, "dealbreaker": "unknown"},
+    {"score": 8, "dealbreaker": "APAC only"},
+    {"score": 8, "dealbreaker": False},
+    {"score": 8, "dealbreaker": []},
+    {"score": 8, "dealbreaker": {}},
+    {"score": 8, "dealbreaker": {"kind": "none"}},
+    {"score": 8, "dealbreaker": {"quote": "synthetic JD quote"}},
+    {"score": "8", "dealbreaker": "none"},
+    {"score": True, "dealbreaker": "n/a"},
+    {"score": 8.0, "dealbreaker": ""},
+    {"score": 8, "reasoning": 42, "dealbreaker": "none"},
+])
+def test_bad_placeholder_or_other_fields_need_existing_one_reask(harness, bad):
+    import json
+
+    h = harness
+    h.fake.scripted = [
+        _response(json.dumps(bad)),
+        _response('{"score":8,"reasoning":"corrected synthetic fit"}'),
+    ]
+    _run(h)
+    _assert_same_context(h)
+    assert h.next.observed == [8]
+    assert h.stores.tracking.row["match_score"] == 8
+
+
+def test_callback_mutation_failure_reasks_without_state_patch(harness, monkeypatch):
+    # If callback mutation is unsupported, no ad hoc delta/state repair is safe.
+    original = G._normalize_no_claim_response
+    once = [True]
+
+    def unavailable(*args):
+        if once[0]:
+            once[0] = False
+            raise G._ScorerBadContent("schema_invalid")
+        return original(*args)
+
+    monkeypatch.setattr(G, "_normalize_no_claim_response", unavailable)
+    h = harness
+    h.fake.scripted = [
+        _response('{"score":8,"reasoning":"fit","dealbreaker":"none"}'),
+        _response('{"score":8,"reasoning":"second valid"}'),
+    ]
+    _run(h)
+    assert len(h.fake.requests) == 2
+    assert h.next.observed == [8]
+    assert h.saved[0]["match_score"] == 8
