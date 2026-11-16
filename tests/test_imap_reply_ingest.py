@@ -624,6 +624,47 @@ def test_historical_multi_use_never_disambiguates_using_subject_or_candidate_fil
                                       [dict(alias, used_pks=[row["pk"]])]) == row["pk"]
 
 
+@pytest.mark.parametrize(("delayed_high", "winning_high"), [(900, 1000), (1000, 1001)])
+def test_overlapping_first_scans_respect_committed_uid_floor(
+        tmp_path, monkeypatch, delayed_high, winning_high):
+    # Both passes snapshot scan_pending before either SEARCH completes. The
+    # wider scan wins the floor write; the stale scan must neither fetch
+    # historical UIDs nor commit them from its precomputed last-200 window.
+    winner = FakeClient("90", range(1, winning_high + 1))
+
+    class DelayedSearch(FakeClient):
+        def search_uids(self, query):
+            assert query == "ALL"
+            self.queries.append(query)
+            _, admitted = run_fake_ingest(
+                tmp_path, monkeypatch, winner, classifier=lambda *_: "other")
+            assert admitted == 200
+            return list(range(1, delayed_high + 1))
+
+    delayed = DelayedSearch("90")
+    model_calls = []
+    _, inserted = run_fake_ingest(
+        tmp_path, monkeypatch, delayed,
+        classifier=lambda *_: model_calls.append("stale") or "other")
+    assert inserted == 0 and delayed.fetched == [] and model_calls == []
+    assert winner.fetched == list(range(winning_high - 199, winning_high + 1))
+    path = tmp_path / reply_ingest.STATE_NAME
+    key = reply_ingest._account_key(fake_credentials())
+    account = json.loads(path.read_text())["accounts"][key]
+    floor = winning_high - 200
+    assert account["uid_floor"] == floor
+    assert account["last_uid"] == winning_high
+    assert account["unresolved_uids"] == [] and account["scan_pending"] is False
+    assert len(account["records"]) == 200
+    assert len(account["processed"]) == 200
+
+    # A stale caller could have fetched a UID before the winning floor was
+    # persisted; commit must independently enforce the locked floor reread.
+    old_record = {"record_id": "excluded-uid", "label": "other", "pk": "UNASSIGNED"}
+    assert not reply_ingest._commit_uid(path, key, "90", floor, old_record, "")
+    assert json.loads(path.read_text())["accounts"][key] == account
+
+
 def test_first_scan_floor_and_omitted_uid_hole_survive_without_backfill(tmp_path, monkeypatch):
     class Window(FakeClient):
         def __init__(self, *args, **kwargs):
