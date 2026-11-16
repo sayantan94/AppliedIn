@@ -237,7 +237,15 @@ def _handoff_blocks(root: Path, pk: str) -> bool:
     lines = [line for line in text.splitlines() if named.search(line)]
     if not lines:
         return False
-    return not re.search(r"\bBACK TO AGENTS\b|\bDONE\b", lines[-1].upper())
+    # A release discussed in prose, or negated, is not a terminal handoff.
+    last = lines[-1]
+    marker = re.search(r"(?<!\w)(?:BACK TO AGENTS|DONE)\s*$", last, re.I)
+    if marker is None:
+        return True
+    return bool(re.search(
+        r"\b(?:not|no|never|without)\b|\b[\w-]*n['’]t\b",
+        last[:marker.start()], re.I,
+    ))
 
 
 def evaluate(
@@ -417,16 +425,16 @@ Usage (from the repo root):
   PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py submit <pk> <board>
   PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py done <pk> <board>
   PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py release <pk> <board>
-  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py reopen <pk> <board>
+  PYTHONPATH=src .venv/bin/python -W ignore .local/operator/precheck.py reopen <pk> <board> --not-sent-confirmed
 
 start   checks the row and writes a claim. Prints OK or STOP <reason>.
 submit  re-checks the row right before the Submit click and marks the claim
         "submit-clicked". Run it, and click Submit only after it prints OK.
 done    marks the claim "recorded" after /actions/mark-applied returned ok.
 release removes the claim of a row you stopped before any Submit click.
-reopen  turns a submit-clicked claim back into filling, ONLY when bsk returned
-        effect_state none for the Submit click and a fresh snapshot still shows
-        the unsent form with no confirmation.
+reopen  requires --not-sent-confirmed to return a clicked claim to filling,
+        ONLY when bsk returned effect_state none for the Submit click and a
+        fresh snapshot still shows the unsent form with no confirmation.
 
 A claim in state "submit-clicked" without "recorded" means the form may have
 been sent. Never start that row again; report it to the lead.'''
@@ -462,7 +470,13 @@ def main(
     pk = raw[1] if len(raw) > 1 else None
     board = raw[2] if len(raw) > 2 else None
     pid = _agent_pid()
-    valid = len(raw) == 3 and op in _OPERATIONS and bool(pk) and bool(board)
+    not_sent_confirmed = (
+        op == "reopen" and len(raw) == 4 and raw[3] == "--not-sent-confirmed"
+    )
+    valid = (
+        op in _OPERATIONS and bool(pk) and bool(board)
+        and (len(raw) == 3 or not_sent_confirmed)
+    )
     try:
         root = _root(legacy_dir)
         with _serialized(root):
@@ -546,18 +560,28 @@ def main(
                         if decision.allow:
                             _claim_path(root, pk).unlink()
                     else:
-                        # Only the claiming agent/board can reopen; no newly
-                        # invented approval flag or tracking status is inferred.
-                        decision = Decision(
-                            _matches_claim(prior, pk, board, pid, "submit-clicked"),
-                            "reopened" if _matches_claim(
-                                prior, pk, board, pid, "submit-clicked"
-                            ) else "claim_mismatch",
-                            _claim_failure_message(op, prior, board),
-                        )
-                        if decision.allow:
-                            next_claim = {**prior, "state": "filling",
-                                          "submit_clicked": False}
+                        # A Submit may already have happened. Require an explicit
+                        # not-sent confirmation without erasing the click witness.
+                        if not _matches_claim(prior, pk, board, pid, "submit-clicked"):
+                            decision = Decision(
+                                False, "claim_mismatch",
+                                _claim_failure_message(op, prior, board),
+                            )
+                        elif not not_sent_confirmed:
+                            decision = Decision(
+                                False, "not_sent_confirmation_required",
+                                "STOP Submit click may have happened; confirm not "
+                                "sent with --not-sent-confirmed",
+                            )
+                        else:
+                            decision = Decision(True, "reopened")
+                            next_claim = {
+                                **prior, "state": "filling", "submit_clicked": False,
+                                "previous_submit_clicked_at": prior.get("submit_clicked_at"),
+                                "submit_click_attempted_before_reopen": True,
+                                "reopen_not_sent_confirmed": True,
+                                "reopen_not_sent_confirmed_at": now.isoformat(),
+                            }
                             next_claim.pop("submit_clicked_at", None)
                             _write_claim(root, pk, next_claim)
                     reason = decision.reason
