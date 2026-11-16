@@ -30,6 +30,7 @@ _NODE = r"""
 const vm=require('node:vm');
 let request=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const counts={callbacks:0,submits:0,fetches:0};
+const imageMetrics={canvasCreated:0,draws:0};
 const windows=[],all=[];
 function matches(e,selector){
   return selector.split(',').some(raw=>{
@@ -74,6 +75,11 @@ class Element{
   dispatchEvent(ev){
     if(this.attrs['data-event-clear'])this.value='';
     if(this.attrs['data-event-submit'])this.ownerDocument.emit('submit');
+    if(this.attrs['data-event-replace-callback']){
+      const owner=this.closest('.g-recaptcha,.cf-turnstile');
+      const name=owner&&owner.getAttribute('data-callback');
+      if(name)this.ownerDocument.hostWindow[name]=()=>{counts.callbacks++};
+    }
     return true;
   }
 }
@@ -90,7 +96,9 @@ class Document{
   querySelector(s){return this.querySelectorAll(s)[0]||null}
   createElement(tag){
     if(tag!=='canvas')return new Element(tag,{},this);
+    imageMetrics.canvasCreated++;
     return {width:0,height:0,getContext:()=>({drawImage:()=>{
+      imageMetrics.draws++;
       if(request.fixture.tainted)throw Error('tainted')}}),
       toDataURL:()=>request.fixture.canvasURI||'data:image/png;base64,iVBORw0KGgo='};
   }
@@ -102,7 +110,7 @@ function makeWindow(spec){
   const doc=new Document(),w={document:doc,location:{href:spec.url||'https://example.test/apply'},
     innerHeight:900,getComputedStyle:e=>({display:e.attrs.hidden?'none':'block',
       visibility:'visible',opacity:'1'})};
-  windows.push(w);
+  windows.push(w);doc.hostWindow=w;
   if(spec.password)doc.documentElement.appendChild(new Element('input',{type:'password'},doc));
   if(spec.enterprise)w.grecaptcha={enterprise:{}};
   const addFrame=(desc,parent)=>{
@@ -129,6 +137,7 @@ function makeWindow(spec){
       if(widget.receiverCallback)attrs['data-callback']=widget.receiverCallback;
       if(widget.eventBehavior==='submit')attrs['data-event-submit']=true;
       if(widget.eventBehavior==='clear')attrs['data-event-clear']=true;
+      if(widget.eventBehavior==='replace_callback')attrs['data-event-replace-callback']=true;
       owner.appendChild(new Element(widget.kind==='turnstile'?'input':'textarea',attrs,doc));
     }
     if(widget.receiverCallback)w[widget.receiverCallback]=()=>{counts.callbacks++};
@@ -153,6 +162,7 @@ function makeWindow(spec){
     if(widget.provider){
       addFrame({src:widget.provider,crossOrigin:true},owner);
     }
+    for(const src of widget.providers||[])addFrame({src,crossOrigin:true},owner);
   }
   for(const frame of spec.frames||[])addFrame(frame,doc.documentElement);
   for(const provider of spec.providers||[])addFrame({src:provider.src,title:provider.title||'',
@@ -163,10 +173,13 @@ function makeWindow(spec){
     if(item.hidden)e.attrs.hidden=true;
   }
   for(const im of spec.images||[]){
-    const form=doc.documentElement.appendChild(new Element('form',{},doc));
-    const img=form.appendChild(new Element('img',{
-      class:'captcha',src:im.src||'',complete:im.loaded!==false,
-      naturalWidth:im.loaded===false?0:100,naturalHeight:40},doc));
+    const form=im.noForm?doc.documentElement:
+      doc.documentElement.appendChild(new Element('form',{},doc));
+    const holder=im.wrapper?form.appendChild(new Element('div',{class:'captcha-image'},doc)):form;
+    const img=holder.appendChild(new Element('img',{
+      class:im.unmarked?'':'captcha',src:im.src||'',complete:im.loaded!==false,
+      naturalWidth:im.naturalWidth??(im.loaded===false?0:100),
+      naturalHeight:im.naturalHeight??40},doc));
     if(im.hidden)img.attrs.hidden=true;
     if(im.inputs!==0)for(let i=0;i<(im.inputs||1);i++)
       form.appendChild(new Element('input',{name:'captcha'},doc));
@@ -190,6 +203,10 @@ if(request.inject){
     const e=windows[windows.length-1].document.querySelector('.g-recaptcha');
     if(e)e.setAttribute('data-callback','changed_callback');
   }
+  if(request.drift==='callback_impl'){
+    // Same data-callback label, different callable object during solver polling.
+    windows[windows.length-1].complete=()=>{counts.callbacks++};
+  }
   if(request.drift==='added_frame'){
     const d=top.document;
     const el=d.documentElement.appendChild(new Element('iframe',{src:'https://example.test/protected/login'},d));
@@ -207,7 +224,7 @@ if(request.inject){
 }
 const values=[];
 for(const d of all)for(const e of d.querySelectorAll('input,textarea'))values.push(e.value);
-process.stdout.write(JSON.stringify({detection,injection,counts,values}));
+process.stdout.write(JSON.stringify({detection,injection,counts,values,imageMetrics}));
 """
 
 
@@ -275,7 +292,7 @@ def test_actual_js_two_nested_frames_enterprise_and_one_callback():
     assert page["values"].count("SYNTHETIC_TOKEN") == 1
 
 
-@pytest.mark.parametrize("drift", ["password", "url", "callback", "added_frame"])
+@pytest.mark.parametrize("drift", ["password", "url", "callback", "callback_impl", "added_frame"])
 def test_actual_js_prewrite_drift_has_zero_effects(drift):
     page = _node(_nested(), inject=True, drift=drift)
     assert page["injection"]["reason"] == "binding_changed"
@@ -508,7 +525,10 @@ def test_capsolver_poll_and_missing_solution():
 def test_run_success_uses_exact_expression_and_task(tmp_path, monkeypatch):
     fixture = _nested(enterprise=True, s="S1", action="apply",
                       provider="https://www.google.com/recaptcha/enterprise/anchor?k=K&s=S1&sa=apply")
-    detected = _node(fixture)["detection"]
+    # The fake orchestration uses one VM realm for its detection/injection
+    # evidence; function-reference witnesses cannot survive a new Node process.
+    js_run = _node(fixture, inject=True)
+    detected = js_run["detection"]
     monkeypatch.setenv("CAPSOLVER_API_KEY", "SYNTHETIC_KEY")
     calls = []
 
@@ -516,7 +536,7 @@ def test_run_success_uses_exact_expression_and_task(tmp_path, monkeypatch):
         calls.append(expression)
         if expression == cs.DETECT_JS:
             return detected
-        return _node(fixture, inject=True, direct=expression)["injection"]
+        return js_run["injection"]
 
     captured = []
 
@@ -603,3 +623,82 @@ def test_key_and_balance_utility_compat(tmp_path, monkeypatch):
     assert (tmp_path / "secrets.json").stat().st_mode & 0o777 == 0o600
     calls = []
     assert cs.balance("TEST_KEY", opener=_opener([{"errorId": 0, "balance": 12.5}], calls)) == 12.5
+
+
+
+def test_actual_js_cross_kind_provider_nested_in_recaptcha_is_not_owned():
+    fixture = _widget(providers=["https://newassets.hcaptcha.com/captcha/v1/challenge"])
+    page = _node(fixture)
+    kinds = [c["kind"] for c in page["detection"]["found"] if c["visible"]]
+    assert sorted(kinds) == ["hcaptcha", "recaptcha"]
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert (exc.value.code, exc.value.reason) == (4, "unsupported_widget")
+
+
+def test_actual_js_distinct_same_key_anchors_do_not_collapse():
+    anchor = "https://www.google.com/recaptcha/api2/anchor?k=K"
+    fixture = _widget(providers=[anchor, anchor])
+    page = _node(fixture, inject=True)
+    assert len(page["detection"]["found"]) == 1
+    assert page["detection"]["found"][0]["invalid"]
+    assert len(page["detection"]["found"][0]["providerFrames"]) == 2
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert exc.value.reason == "unsupported_widget"
+    assert page["injection"]["reason"] == "binding_changed"
+    assert page["counts"]["callbacks"] == 0
+    assert "SYNTHETIC_TOKEN" not in page["values"]
+
+
+def test_actual_js_one_anchor_and_bframe_remain_one_instance():
+    fixture = _widget(providers=[
+        "https://www.google.com/recaptcha/api2/anchor?k=K",
+        "https://www.google.com/recaptcha/api2/bframe?k=K",
+    ])
+    page = _node(fixture, inject=True)
+    challenge = cs.pick_challenge(page["detection"]["found"])
+    assert not challenge["invalid"]
+    assert len(challenge["providerFrames"]) == 2
+    assert page["injection"]["result"] == "injected"
+    assert page["counts"]["callbacks"] == 1
+
+
+def test_actual_js_input_event_callback_replacement_is_not_invoked():
+    page = _node(_widget(eventBehavior="replace_callback"), inject=True)
+    assert page["injection"]["reason"] == "possible_commit"
+    assert page["counts"]["callbacks"] == 0
+    assert page["values"].count("SYNTHETIC_TOKEN") == 1
+
+
+def test_actual_js_unmarked_image_inside_wrapper_is_not_absent():
+    fixture = {"url": "https://example.test/apply",
+               "images": [{"src": _URI, "wrapper": True, "unmarked": True}]}
+    page = _node(fixture, inject=True, answer="AB12")
+    challenge = cs.pick_challenge(page["detection"]["found"])
+    assert challenge["kind"] == "image"
+    assert cs.build_task(challenge, fixture["url"]) == {
+        "type": "ImageToTextTask", "body": base64.b64encode(_PNG).decode()}
+    assert page["injection"]["reason"] == "callback_missing"
+    assert "AB12" in page["values"]
+    # A sibling with no provable local input association still hands off.
+    uncertain = _node({"url": fixture["url"], "images": [
+        {"src": _URI, "wrapper": True, "unmarked": True, "noForm": True}]})
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(uncertain["detection"]["found"])
+    assert exc.value.reason == "image_unreadable"
+
+
+@pytest.mark.parametrize(("width", "height"), [
+    (12000, 12000), (5000, 10), (3000, 3000),
+])
+def test_actual_js_large_intrinsic_image_refused_before_canvas(width, height):
+    fixture = {"url": "https://example.test/apply", "images": [{
+        "src": "https://example.test/captcha.png",
+        "naturalWidth": width, "naturalHeight": height,
+    }]}
+    page = _node(fixture)
+    assert page["imageMetrics"] == {"canvasCreated": 0, "draws": 0}
+    with pytest.raises(cs.CaptchaError) as exc:
+        cs.pick_challenge(page["detection"]["found"])
+    assert (exc.value.code, exc.value.reason) == (4, "image_unreadable")
