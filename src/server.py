@@ -1967,6 +1967,24 @@ def create_app() -> FastAPI:
         digest = hashlib.sha1(text.encode()).hexdigest()
         job_id = "text-" + digest
         stores = make_stores(settings)
+
+        def _run() -> None:
+            import logging
+            from agent.run import run_job
+            from core.events import emit
+
+            _RUNNING["process"] = True
+            try:
+                emit("running", agent="workflow", company=company, pk=pk,
+                     detail=f"▶ tailoring a résumé for {title} @ {company}…")
+                run_job(pk, stores)
+                emit("applied", agent="workflow", company=company, pk=pk,
+                     detail=f"{company}: résumé tailored — download it from the card")
+            except Exception:
+                logging.getLogger("server").exception("tailor-text failed")
+            finally:
+                _RUNNING["process"] = False
+
         # Do not use the generic JD hash index: ATS postings may share this
         # text and must never become text-only rows.
         existing = [row for row in stores.tracking.all()
@@ -1997,15 +2015,8 @@ def create_app() -> FastAPI:
                         "found", "skipped", "error", "failed", "tailored"
                     }):
                 return {"ok": False, "error": "tracking_conflict"}
-            # A normal completed text-only card already has its résumé.
-            # Repeating the same sanitized JD only refreshes display metadata;
-            # never downgrade it to found without another tailoring dispatch.
-            # Legacy failed/closed restaging remains on its existing path.
-            if (current["status"] == "tailored"
-                    and not any(current.get(field) for field in (
-                        "skip_reason", "fail_kind", "fail_reason"))):
-                return {"ok": True, "status": "existing", "pk": pk,
-                        "company": company, "title": title}
+            # Repeating a safe text-only role requests actual re-tailoring:
+            # restore FOUND only alongside a new background dispatch.
             reader = {key: current[key] for key in REPAIR_READER_FIELDS
                       if key in current}
             if not stores.tracking.update_if_status(
@@ -2014,7 +2025,8 @@ def create_app() -> FastAPI:
                      "fail_kind": "", "fail_reason": ""},
                     expected_reader=reader):
                 return {"ok": False, "error": "tracking_conflict"}
-            return {"ok": True, "status": "existing", "pk": pk,
+            background.add_task(_run)
+            return {"ok": True, "status": "tailoring", "pk": pk,
                     "company": company, "title": title}
 
         inspected = pg.analyze(text)
@@ -2028,23 +2040,6 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": "tracking_conflict"}
         if not _commit_manual_posting(pk, stores, inspected):
             return {"ok": False, "error": "posting_guard_conflict"}
-
-        def _run() -> None:
-            import logging
-            from agent.run import run_job
-            from core.events import emit
-
-            _RUNNING["process"] = True
-            try:
-                emit("running", agent="workflow", company=company, pk=pk,
-                     detail=f"▶ tailoring a résumé for {title} @ {company}…")
-                run_job(pk, stores)
-                emit("applied", agent="workflow", company=company, pk=pk,
-                     detail=f"{company}: résumé tailored — download it from the card")
-            except Exception:
-                logging.getLogger("server").exception("tailor-text failed")
-            finally:
-                _RUNNING["process"] = False
 
         background.add_task(_run)
         return {"ok": True, "status": "tailoring", "pk": pk,
