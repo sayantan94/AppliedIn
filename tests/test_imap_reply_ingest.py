@@ -303,6 +303,8 @@ def test_new_uid_with_duplicate_message_id_does_not_create_record(tmp_path, monk
     assert inserted == 0
     account = json.loads((tmp_path / reply_ingest.STATE_NAME).read_text())["accounts"][reply_ingest._account_key(credentials)]
     assert len(account["records"]) == 1 and "78:2" in account["processed"] and account["last_uid"] == 2
+    rid = account["records"][0]["record_id"]
+    assert account["record_uids"] == {rid: {"uid": 1, "uidvalidity": "78"}}
 
 
 def test_uidvalidity_reset_scans_only_newest_200_and_retains_known_message_id(tmp_path, monkeypatch):
@@ -754,3 +756,54 @@ def test_unreadable_headers_and_unlinked_empty_prefix_do_not_admit(tmp_path, mon
     assert account["unresolved_uids"] == [1, 2, 3]
     assert account["last_uid"] == 0
     assert all(f"43:{i}" not in account["processed"] for i in (1, 2, 3))
+
+
+
+def test_retry_requires_valid_identical_message_id_and_nonblank_prefix(tmp_path, monkeypatch):
+    credentials = fake_credentials()
+    settings = type("Settings", (), {"mode": "local", "local_dir": str(tmp_path)})()
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    original = b"Message-ID: <verified@example-co.test>\r\nContent-Type: text/plain\r\n\r\n"
+    first = FakeClient("55", [5], {5: original})
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), first,
+                                    classifier=lambda *_: "unclassified") == 1
+    rid = reply_ingest.read_records(settings)[0]["record_id"]
+    # An otherwise identical UID with a malformed or changed Message-ID is
+    # not a proof that it is the same message.
+    for bad in (b"Message-ID: invalid\r\n\r\n",
+                b"Message-ID: <different@example-co.test>\r\n\r\n",
+                b""):
+        client = FakeClient("55", [5], {5: bad})
+        assert reply_ingest.ingest_pass(settings, credentials, fake_stores(), client,
+                                        classifier=lambda *_: "rejection") == 0
+        assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
+
+    class Blank(FakeClient):
+        def fetch_text_prefix(self, uid):
+            return b"   "
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(),
+                                    Blank("55", [5], {5: original}),
+                                    classifier=lambda *_: "rejection") == 0
+    assert reply_ingest.read_records(settings)[0]["label"] == "unclassified"
+    assert reply_ingest.ingest_pass(settings, credentials, fake_stores(),
+                                    FakeClient("55", [5], {5: original}),
+                                    classifier=lambda *_: "rejection") == 0
+    records = reply_ingest.read_records(settings)
+    assert len(records) == 1 and records[0]["record_id"] == rid
+    assert records[0]["label"] == "rejection"
+
+
+def test_unverified_first_scan_prefix_never_trusts_model_or_advances(tmp_path, monkeypatch):
+    class Whitespace(FakeClient):
+        def fetch_text_prefix(self, uid):
+            return b" \t "
+    messages = {9: b"Subject: ordinary update\r\nContent-Type: text/plain\r\n\r\n",
+                10: b"Message-ID: not-rfc-message-id\r\nSubject: ordinary update\r\n\r\n"}
+    calls = []
+    client = Whitespace("61", [9, 10], messages)
+    settings, admitted = run_fake_ingest(tmp_path, monkeypatch, client,
+                                         classifier=lambda *_: calls.append("model") or "rejection")
+    account = json.loads((tmp_path / reply_ingest.STATE_NAME).read_text())["accounts"][reply_ingest._account_key(fake_credentials())]
+    assert admitted == 0 and calls == []
+    assert account["unresolved_uids"] == [9, 10] and account["last_uid"] == 8
+    assert reply_ingest.read_records(settings) == []
