@@ -100,6 +100,16 @@ def _root(legacy_dir: Path | None) -> Path:
         root = Path(override)
     if not root.is_dir() or root.is_symlink():
         raise PrecheckUnavailable("unusable precheck data directory")
+    # A valid root must not hide file or lock effects through symlink children.
+    for name in ("precheck.lock", "precheck-events.log", "precheck-data.json",
+                 "owner-handoff.md", "claims"):
+        child = root / name
+        if child.is_symlink():
+            raise PrecheckUnavailable("unsafe precheck file path")
+        if name == "claims" and child.exists() and not child.is_dir():
+            raise PrecheckUnavailable("invalid claims directory")
+        if name != "claims" and child.exists() and not child.is_file():
+            raise PrecheckUnavailable("invalid precheck file")
     return root
 
 
@@ -213,7 +223,7 @@ def evaluate(
         return Decision(False, "skipped")
     if _submit_evidence(current):
         return Decision(False, "already_submitted")
-    if current.get("status") in ("failed", "error", "capped", "job_gone"):
+    if current.get("status") not in ("tailored", "submitting", "needs_human"):
         return Decision(False, "status_blocked")
     if _handoff_blocks(root):
         return Decision(False, "owner_handoff")
@@ -232,8 +242,20 @@ def evaluate(
         return Decision(False, "identity_missing")
     if job_id in policy.blocked_job_ids:
         return Decision(False, "blocked_job")
-    others = [row for row in (*rows, *policy.historical_applications)
-              if isinstance(row, dict) and row.get("pk") != pk]
+    others = []
+    for row in (*rows, *policy.historical_applications):
+        if not isinstance(row, dict) or row.get("pk") == pk:
+            continue
+        other = dict(row)
+        other_pk = other.get("pk")
+        if isinstance(other_pk, str) and other_pk:
+            past_claim = _read_claim(root, other_pk)
+            if past_claim.get("submit_clicked"):
+                # Account for an unconfirmed click without inventing an
+                # applied status or mutating the tracking row.
+                other["submit_clicked"] = True
+                other["submit_clicked_at"] = past_claim.get("submit_clicked_at")
+        others.append(other)
     for other in others:
         if not _submit_evidence(other):
             continue
@@ -286,6 +308,8 @@ def _record_click(root: Path, pk: str, at: datetime) -> None:
     data = {"pk": pk, "submit_clicked": True,
             "submit_clicked_at": at.astimezone(UTC).isoformat()}
     temporary = target.with_suffix(".tmp")
+    if temporary.is_symlink():
+        raise PrecheckUnavailable("unsafe temporary claim path")
     temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, target)
 
