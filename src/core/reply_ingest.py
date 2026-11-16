@@ -53,11 +53,11 @@ def _normalized(value: str) -> str:
 def _security_code_subject(subject: str) -> bool:
     """An application-specific one-time authentication code, not a coding test."""
     value = _normalized(subject)
-    return bool(
-        re.search(r"\b(?:application|applying)\b", value)
-        and re.search(r"\b(?:security|authentication|verification|one[\s-]?time|otp)\b", value)
-        and re.search(r"\b(?:code|passcode|otp|password)\b", value)
-    )
+    code_phrase = re.search(
+        r"\b(?:security|authentication|verification|one[\s-]?time)\b[\s:._-]+"
+        r"(?:\w+[\s:._-]+){0,2}(?:code|passcode|password)\b", value
+    ) or re.search(r"\b(?:otp|one[\s-]?time[\s-]+password)\b", value)
+    return bool(re.search(r"\b(?:application|applying)\b", value) and code_phrase)
 
 
 def match_message(headers, candidates: list[dict], aliases: list[dict]) -> str:
@@ -162,6 +162,12 @@ def _parse_headers(raw: bytes) -> tuple[dict, bool]:
         sender = ""
     return ({"date": date, "sender": sender, "subject": safe("subject"),
              "message_id": safe("message-id")}, parse_failed)
+
+def _valid_message_id(value: str) -> bool:
+    # A bare or malformed ID cannot authenticate a later exact-UID retry.
+    return bool(isinstance(value, str) and re.fullmatch(
+        r"<[^<>\s@]+@[^<>\s@]+>", value.strip()))
+
 
 def _decode_text_prefix(headers: bytes, fragment: bytes) -> str:
     """Return inline text only; MIME headers and attachment parts stay out of the model input."""
@@ -301,6 +307,9 @@ def _set_first_floor(path: Path, key: str, validity: str, selected: list[int]) -
             floor = min(selected) - 1 if selected else 0
             account["uid_floor"] = floor
             account["last_uid"] = max(int(account.get("last_uid", 0)), floor)
+            # Mark the entire admitted first window before attempting any UID:
+            # a partial scan must not lose an unvisited UID if SEARCH later omits it.
+            account["unresolved_uids"] = sorted(set(account.get("unresolved_uids", [])) | set(selected))
             _write_state(path, state)
 
 
@@ -362,14 +371,21 @@ def _advance_cursor(path: Path, key: str, validity: str, uid: int) -> None:
             and item[len(prefix):].isdecimal()
         ]
         target = max([int(account.get("last_uid", 0)), uid, *processed_uids])
+        witness_removed = False
+        if f"{validity}:{uid}" in account.get("processed", []):
+            before = account.get("unresolved_uids", [])
+            after = [h for h in before if h != uid]
+            if len(after) != len(before):
+                account["unresolved_uids"] = after
+                witness_removed = True
         floor = int(account.get("uid_floor") or 0)
         holes = [h for h in account.get("unresolved_uids", [])
                  if isinstance(h, int) and h > floor]
         if holes:
             target = min(target, min(holes) - 1)
         target = max(floor, target)
-        if target > int(account.get("last_uid", 0)):
-            account["last_uid"] = target
+        if target > int(account.get("last_uid", 0)) or witness_removed:
+            account["last_uid"] = max(int(account.get("last_uid", 0)), target)
             _write_state(path, state)
 
 
@@ -393,7 +409,7 @@ def _retry_candidates(path: Path, key: str, validity: str) -> list[tuple[str, in
         links = account.get("record_uids", {})
         result = []
         for row in account.get("records", []):
-            if row.get("label") != "unclassified" or not row.get("message_id"):
+            if row.get("label") != "unclassified" or not _valid_message_id(row.get("message_id")):
                 continue
             link = links.get(row.get("record_id")) if isinstance(links, dict) else None
             if not isinstance(link, dict):
@@ -430,7 +446,7 @@ def _classify(fields: dict, fragment: str, classifier) -> str:
     from core.reply_classifier import validated_label
     if _security_code_subject(fields["subject"]):
         return "other"
-    if not fragment or classifier is None:
+    if not fragment.strip() or classifier is None:
         return "unclassified"
     try:
         return validated_label(classifier(fields, fragment))
@@ -504,7 +520,7 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                 except Exception:
                     prefix = b""
                 decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
-                if not decoded and not fields["message_id"].strip():
+                if not decoded.strip() and not _valid_message_id(fields["message_id"]):
                     _mark_unresolved(path, key, validity, uid)
                     continue
                 label = _classify(fields, decoded, classifier)
@@ -521,11 +537,11 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
             try:
                 raw = client.fetch_headers(uid)
                 fields, invalid = _parse_headers(raw)
-                if invalid or not fields["message_id"] or fields["message_id"] != expected_mid:
+                if invalid or not _valid_message_id(fields["message_id"]) or fields["message_id"] != expected_mid:
                     continue
                 prefix = client.fetch_text_prefix(uid)
                 decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
-                if not decoded:
+                if not decoded.strip():
                     continue
                 label = _classify(fields, decoded, classifier)
                 _promote_label(path, key, validity, record_id, uid, expected_mid, label)
