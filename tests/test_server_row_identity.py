@@ -455,3 +455,141 @@ def test_new_apply_role_guard_conflict_keeps_unverified_placeholder(env, monkeyp
     assert pg.valid(row["jd_text"], row["posting_guard"])
     assert env.reader.calls == [url]
     assert env.runs == []
+
+
+def test_forged_linkedin_query_does_not_merge_distinct_ats_vendors(env):
+    """A query number has no independent authority to merge two ATS tenants."""
+    greenhouse = (
+        "https://boards.greenhouse.io/example-co/jobs/4242"
+        "?linkedin_job_id=1234567890"
+    )
+    ashby = (
+        "https://jobs.ashbyhq.com/other-co/role-17"
+        "?linkedin_job_id=1234567890"
+    )
+    first = _apply(env, greenhouse)
+    second = _apply(env, ashby)
+    assert first.json()["ok"] is True and second.json()["ok"] is True
+    assert first.json()["pk"] != second.json()["pk"]
+    assert len(env.tracking.rows) == 2
+    assert {row["ats"] for row in env.tracking.rows.values()} == {
+        "greenhouse", "ashby"
+    }
+    assert env.reader.calls == [greenhouse, ashby]
+    assert len(env.runs) == 2
+
+
+def test_unverified_query_alias_cannot_select_linkedin_existing_row(env, monkeypatch):
+    """Even legacy conflict placeholders cannot supply an alias candidate."""
+    monkeypatch.setattr(env.tracking, "update_posting_guard",
+                        lambda *args, **kwargs: False)
+    url = (
+        "https://boards.greenhouse.io/example-co/jobs/4242"
+        "?linkedin_job_id=1234567890"
+    )
+    created = _apply(env, url)
+    assert created.json()["ok"] is True  # existing legacy caller contract
+    linked = _apply(env, "https://www.linkedin.com/jobs/view/1234567890")
+    assert linked.json() == {
+        "ok": False, "error": "employer_identity_unverified"
+    }
+    assert len(env.tracking.rows) == 1
+    assert env.reader.calls == [url]
+    assert env.runs == []
+
+
+def test_legacy_apply_role_exact_url_reuses_protected_original_pk(env):
+    """Pre-#372 sha1(full URL) rows must not be recreated as new ATS rows."""
+    import hashlib
+
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    old_job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
+    old = JobRecord(
+        company="Legacy Example Co", job_id=old_job_id,
+        title="Previously submitted synthetic role", jd_url=url,
+        jd_text=JD_TEXT, ats="custom",
+    )
+    assert env.tracking.put_new(old)
+    original = env.tracking.rows[old.pk]
+    original.update(status="applied", confirmation_id="synthetic-receipt")
+    saved = deepcopy(original)
+
+    result = _apply(env, url)
+    assert result.json()["ok"] is False
+    assert len(env.tracking.rows) == 1
+    assert env.tracking.rows[old.pk] == saved
+    assert env.reader.calls == []
+    assert env.runs == []
+    assert env.tracking.status_calls == []
+
+
+def test_workday_canonical_pk_is_safe_for_single_segment_actions(env):
+    """Every ordinary pk route must be able to address an admitted Workday row."""
+    url = "https://example-co.wd5.myworkdayjobs.com/External/job/Remote/R123"
+    result = _apply(env, url)
+    assert result.json()["ok"] is True
+    pk = result.json()["pk"]
+    assert "/" not in pk
+    assert env.tracking.rows[pk]["job_id"].endswith(":Remote.R123")
+    for template in (
+        "/actions/queue-apply/{pk}",
+        "/actions/apply-now/{pk}",
+        "/actions/retry/{pk}",
+    ):
+        route = next(route for route in env.client.app.routes
+                     if route.path == template)
+        assert route.path_regex.fullmatch(template.replace("{pk}", pk))
+
+
+def test_tailor_completed_repeat_only_refreshes_display(env):
+    """A completed résumé is still tailored when its title is edited."""
+    original = env.client.post("/actions/tailor-text", json={
+        "text": JD_TEXT, "company": "Example Co", "title": "Synthetic Role"
+    })
+    pk = original.json()["pk"]
+    env.tracking.rows[pk].update(
+        status="tailored", resume_s3_key="synthetic-resume"
+    )
+    replay = env.client.post("/actions/tailor-text", json={
+        "text": JD_TEXT, "company": "Updated Example Co",
+        "title": "Updated Synthetic Role"
+    })
+    assert replay.json()["ok"] is True and replay.json()["pk"] == pk
+    row = env.tracking.rows[pk]
+    assert row["status"] == "tailored"
+    assert row["title"] == "Updated Synthetic Role"
+    assert row["display_company"] == "Updated Example Co"
+    assert row["resume_s3_key"] == "synthetic-resume"
+    assert len(env.tracking.rows) == 1
+    assert env.runs == [pk]
+    assert env.tracking.status_calls == []
+
+
+def test_tailor_completed_repeat_never_attempts_late_hold_status_reset(
+        env, monkeypatch):
+    """Avoid the final status-only compare that cannot witness a new hold."""
+    original = env.client.post("/actions/tailor-text", json={
+        "text": JD_TEXT, "company": "Example Co", "title": "Synthetic Role"
+    })
+    pk = original.json()["pk"]
+    env.tracking.rows[pk]["status"] = "tailored"
+    ordinary_update = env.tracking.update_if_status
+    vulnerable_resets = []
+
+    def inject_hold_at_status_commit(pk_arg, status, updates, *, expected_reader):
+        if getattr(updates.get("status"), "value", updates.get("status")) == "found":
+            vulnerable_resets.append(pk_arg)
+            env.tracking.rows[pk_arg]["submit_hold"] = True
+        return ordinary_update(pk_arg, status, updates,
+                               expected_reader=expected_reader)
+
+    monkeypatch.setattr(env.tracking, "update_if_status",
+                        inject_hold_at_status_commit)
+    replay = env.client.post("/actions/tailor-text", json={
+        "text": JD_TEXT, "company": "Other Example Co", "title": "Revised Role"
+    })
+    assert replay.json()["ok"] is True and replay.json()["pk"] == pk
+    assert vulnerable_resets == []
+    assert env.tracking.rows[pk]["status"] == "tailored"
+    assert not env.tracking.rows[pk].get("submit_hold")
+    assert env.runs == [pk]
