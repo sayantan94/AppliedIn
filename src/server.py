@@ -610,7 +610,7 @@ def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tup
                                                row.get("job_id") or "")):
                 continue
             matches[row["pk"]] = row
-    elif source_url and not direct:
+    elif source_url:
         # Pre-#372 apply-role hashed the entire *stored* source URL. Prove
         # that historic URL/hash pair before comparing parsed ATS posting IDs:
         # decorative query/slash differences must not evade a protected row.

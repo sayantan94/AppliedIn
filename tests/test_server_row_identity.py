@@ -626,6 +626,47 @@ def test_legacy_apply_role_variant_refuses_ambiguous_old_keys(env):
     assert env.tracking.status_calls == []
 
 
+
+def test_legacy_applied_and_canonical_found_twins_refuse_without_mutation(env):
+    """A canonical card cannot hide an older submitted copy of its posting."""
+    import hashlib
+
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    legacy = JobRecord(
+        company="Legacy Example Co",
+        job_id=hashlib.sha1(url.encode()).hexdigest()[:12],
+        title="Previously submitted synthetic role", jd_url=url,
+        jd_text=JD_TEXT, ats="custom",
+    )
+    canonical_identity = server._manual_role_identity(url)
+    canonical = JobRecord(
+        company=canonical_identity["company"],
+        job_id=canonical_identity["job_id"],
+        title="Newly discovered synthetic role", jd_url=url,
+        jd_text=JD_TEXT, ats=canonical_identity["ats"],
+    )
+    assert legacy.pk != canonical.pk
+    assert env.tracking.put_new(legacy)
+    assert env.tracking.put_new(canonical)
+    env.tracking.rows[legacy.pk].update(
+        status="applied", confirmation_id="synthetic-receipt",
+        attempts=3, approved=True,
+    )
+    assert env.tracking.rows[canonical.pk]["status"] == "found"
+    before = deepcopy(env.tracking.rows)
+
+    result = _apply(env, url)
+    assert result.json() == {"ok": False, "error": "ambiguous_posting_identity"}
+    assert len(env.tracking.rows) == 2
+    assert env.tracking.rows == before
+    assert env.reader.calls == []
+    assert env.runs == []
+    assert env.tracking.guard_calls == []
+    assert env.tracking.metadata_calls == []
+    assert env.tracking.status_calls == []
+
+
+
 def test_workday_canonical_pk_is_safe_for_single_segment_actions(env):
     """Every ordinary pk route must be able to address an admitted Workday row."""
     url = "https://example-co.wd5.myworkdayjobs.com/External/job/Remote/R123"
