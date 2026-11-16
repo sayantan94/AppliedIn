@@ -140,10 +140,20 @@ def stop() -> dict:
     # finish in that interval, so acknowledge only while this reservation can
     # still persist the STOP, not after its terminal write.
     with co._LOCK:
-        acknowledged = bool(
-            co._SCAN.locked() and co._RUNNING
-            and co._ACTIVE is active and active.get("kind") == "network"
-        )
+        if (co._SCAN.locked() and co._RUNNING
+                and co._ACTIVE is active and active.get("kind") == "network"):
+            acknowledged = True
+        else:
+            # The worker may have honored STOP and deactivated while we waited
+            # for the lock. Match this reservation's progress run ID, not the
+            # logical search start time (which persists across resumed scans).
+            last = co._read().get("last_network") or {}
+            progress = last.get("progress") or {}
+            acknowledged = bool(
+                last.get("kind") == "network" and last.get("stopped")
+                and last.get("finished_at")
+                and progress.get("run_id") == active.get("started_at")
+            )
     if acknowledged:
         co.report_progress(
             "Stopping scan; completed results are saved. You can continue later."
