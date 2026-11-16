@@ -288,10 +288,25 @@ import runpy
 import sys
 from pathlib import Path
 repo, shim = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+# An editable-install .pth can independently put src into sys.path even
+# after PYTHONPATH is cleared; remove it explicitly without disabling the
+# offline sitecustomize network audit hook.
+sys.path[:] = [
+    entry for entry in sys.path
+    if Path(entry or ".").resolve() not in (repo, repo / "src")
+]
 assert str(repo) not in sys.path
 assert str(repo / "src") not in sys.path
 sys.argv = [str(shim), "--help"]
-runpy.run_path(str(shim), run_name="__main__")
+try:
+    runpy.run_path(str(shim), run_name="__main__")
+except SystemExit as exc:
+    assert exc.code == 0
+else:
+    raise AssertionError("shim help did not terminate as expected")
+assert Path(sys.modules["tools.submit_precheck"].__file__).resolve() == (
+    repo / "src" / "tools" / "submit_precheck.py"
+)
 """
     env = dict(os.environ)
     # tests/offline/sitecustomize.py necessarily reinjects its own startup
