@@ -1,18 +1,11 @@
-"""Offline-characterizable submit precheck.
+"""Source-owned pre-Submit guard and historical claim transitions.
 
-This module does not submit applications. The installed legacy entrypoint is
-an operator-owned, ignored file; until post-merge adoption it remains unchanged.
-All operator-specific data lives exclusively in precheck-data.json under the
-precheck data root, never in tracked source.
-
-Important: the historical ignored CLI's exact argument and event contract is
-not available in the public repository. Adoption requires operator-side
-compatibility verification before this template may replace that CLI.
+No application Submit click occurs here. Operator-specific policy values are
+loaded from the ignored precheck-data.json file, never public source.
 """
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import hashlib
 import json
@@ -27,15 +20,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-# These five buckets are intentionally empty in public source. The operator
-# must create the ignored JSON from the existing local constants *before*
-# installing the shim. An absent/malformed JSON file fails closed.
+# Values are never embedded in public code. Keep the historical five categories.
 PUBLIC_DEFAULTS: dict[str, object] = {
-    "company_caps": {},
-    "company_aliases": {},
-    "title_aliases": {},
-    "historical_applications": [],
-    "blocked_job_ids": [],
+    "CAPS": {},
+    "COUNT_CAPS": {},
+    "NEVER": [],
+    "PARKED": [],
+    "DISTINCT_PAIRS": [],
 }
 DEFAULT_COMPANY_CAP = 5
 CAP_WINDOW = timedelta(days=180)
@@ -57,11 +48,11 @@ class PrecheckUnavailable(Exception):
 
 @dataclass(frozen=True)
 class Policy:
-    company_caps: dict[str, int]
-    company_aliases: dict[str, str]
-    title_aliases: dict[str, str]
-    historical_applications: tuple[dict, ...]
-    blocked_job_ids: frozenset[str]
+    CAPS: dict[str, datetime]
+    COUNT_CAPS: dict[str, int]
+    NEVER: frozenset[str]
+    PARKED: tuple[str, ...]
+    DISTINCT_PAIRS: frozenset[frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -78,13 +69,11 @@ def _key(value: object) -> str:
 
 
 def _company_key(value: object, policy: Policy) -> str:
-    key = _key(value)
-    return _key(policy.company_aliases.get(key, key))
+    return _key(value)
 
 
 def _title_key(value: object, policy: Policy) -> str:
-    key = _key(value)
-    return _key(policy.title_aliases.get(key, key))
+    return _key(value)
 
 
 def _root(legacy_dir: Path | None) -> Path:
@@ -123,32 +112,44 @@ def load_policy(root: Path) -> Policy:
         raise PrecheckUnavailable("precheck configuration unreadable") from exc
     if not isinstance(obj, dict) or set(obj) != set(PUBLIC_DEFAULTS):
         raise PrecheckUnavailable("precheck configuration schema mismatch")
-    caps = obj["company_caps"]
-    company_aliases, title_aliases = obj["company_aliases"], obj["title_aliases"]
-    history, blocked = obj["historical_applications"], obj["blocked_job_ids"]
+    caps, count_caps = obj["CAPS"], obj["COUNT_CAPS"]
+    never, parked, pairs = obj["NEVER"], obj["PARKED"], obj["DISTINCT_PAIRS"]
     if not isinstance(caps, dict) or any(
-        not isinstance(k, str) or type(v) is not int or v < 0
+        not isinstance(k, str) or not isinstance(v, str)
         for k, v in caps.items()
     ):
-        raise PrecheckUnavailable("invalid company caps")
-    if any(
-        not isinstance(m, dict) or any(
-            not isinstance(k, str) or not isinstance(v, str)
-            for k, v in m.items()
-        )
-        for m in (company_aliases, title_aliases)
+        raise PrecheckUnavailable("invalid date caps")
+    dates = {}
+    try:
+        for company, value in caps.items():
+            date = datetime.fromisoformat(value)
+            if date.tzinfo is not None or date.time().isoformat() != "00:00:00":
+                raise ValueError("date cap must be a calendar date")
+            dates[_key(company)] = date.replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise PrecheckUnavailable("invalid date cap") from exc
+    if not isinstance(count_caps, dict) or any(
+        not isinstance(k, str) or type(v) is not int or v < 0
+        for k, v in count_caps.items()
     ):
-        raise PrecheckUnavailable("invalid alias mapping")
-    if not isinstance(history, list) or not all(isinstance(r, dict) for r in history):
-        raise PrecheckUnavailable("invalid history")
-    if not isinstance(blocked, list) or not all(isinstance(x, str) for x in blocked):
-        raise PrecheckUnavailable("invalid job identifiers")
+        raise PrecheckUnavailable("invalid count caps")
+    if not isinstance(never, list) or not all(isinstance(v, str) and v for v in never):
+        raise PrecheckUnavailable("invalid never identifiers")
+    if not isinstance(parked, list) or not all(isinstance(v, str) and v for v in parked):
+        raise PrecheckUnavailable("invalid parked identifiers")
+    if not isinstance(pairs, list) or any(
+        not isinstance(pair, list) or len(pair) != 2
+        or not all(isinstance(v, str) and v for v in pair)
+        or pair[0] == pair[1]
+        for pair in pairs
+    ):
+        raise PrecheckUnavailable("invalid distinct pair exceptions")
     return Policy(
-        company_caps={_key(k): v for k, v in caps.items()},
-        company_aliases={_key(k): v for k, v in company_aliases.items()},
-        title_aliases={_key(k): v for k, v in title_aliases.items()},
-        historical_applications=tuple(history),
-        blocked_job_ids=frozenset(blocked),
+        CAPS=dates,
+        COUNT_CAPS={_key(k): v for k, v in count_caps.items()},
+        NEVER=frozenset(never),
+        PARKED=tuple(parked),
+        DISTINCT_PAIRS=frozenset(frozenset(pair) for pair in pairs),
     )
 
 
@@ -213,11 +214,7 @@ def evaluate(
     pk: str, current: dict | None, rows: Iterable[dict], policy: Policy,
     root: Path, *, at: datetime | None = None, board: str | None = None,
 ) -> Decision:
-    """Pure decision logic except for reading the current disposable claim/handoff.
-
-    A read failure is not a positive eligibility witness. The caller owns the
-    fcntl critical section, tracking read, and event append.
-    """
+    """Read-only guard. Called under the existing per-root fcntl lock."""
     at = (at or datetime.now(UTC)).astimezone(UTC)
     if not isinstance(current, dict) or current.get("pk") != pk:
         return Decision(False, "row_missing")
@@ -230,7 +227,7 @@ def evaluate(
     if _handoff_blocks(root):
         return Decision(False, "owner_handoff")
     claim = _read_claim(root, pk)
-    if claim.get("submit_clicked"):
+    if claim.get("submit_clicked") or claim.get("state") in ("submit-clicked", "recorded"):
         return Decision(False, "submit_once")
     if board is not None and board != str(
         current.get("greenhouse_board") or current.get("board") or ""
@@ -242,24 +239,31 @@ def evaluate(
     title = _title_key(current.get("title"), policy)
     if not isinstance(job_id, str) or not job_id or not company:
         return Decision(False, "identity_missing")
-    if job_id in policy.blocked_job_ids:
-        return Decision(False, "blocked_job")
+    if pk in policy.NEVER:
+        return Decision(False, "blocked_row")
+    if any(pk == token or pk.startswith(token) for token in policy.PARKED):
+        return Decision(False, "parked")
+    if company in policy.CAPS and at <= policy.CAPS[company]:
+        return Decision(False, "company_date_cap")
     others = []
-    for row in (*rows, *policy.historical_applications):
+    for row in rows:
         if not isinstance(row, dict) or row.get("pk") == pk:
             continue
         other = dict(row)
         other_pk = other.get("pk")
         if isinstance(other_pk, str) and other_pk:
             past_claim = _read_claim(root, other_pk)
-            if past_claim.get("submit_clicked"):
-                # Account for an unconfirmed click without inventing an
-                # applied status or mutating the tracking row.
+            if past_claim.get("submit_clicked") or past_claim.get("state") in (
+                "submit-clicked", "recorded"
+            ):
                 other["submit_clicked"] = True
                 other["submit_clicked_at"] = past_claim.get("submit_clicked_at")
         others.append(other)
     for other in others:
         if not _submit_evidence(other):
+            continue
+        pair = other.get("pk")
+        if isinstance(pair, str) and frozenset((pk, pair)) in policy.DISTINCT_PAIRS:
             continue
         if other.get("job_id") == job_id:
             return Decision(False, "duplicate_job_id")
@@ -268,14 +272,12 @@ def evaluate(
                 and company == _company_key(other.get("company"), policy)):
             return Decision(False, "duplicate_title_company")
 
-    # An applied record with an unknown timestamp is counted rather than
-    # interpreted as expired: missing evidence must not loosen a submit cap.
     prior = sum(
         1 for row in others
         if _submit_evidence(row) and _company_key(row.get("company"), policy) == company
         and (_when(row) is None or _when(row) >= at - CAP_WINDOW)
     )
-    cap = policy.company_caps.get(company, DEFAULT_COMPANY_CAP)
+    cap = policy.COUNT_CAPS.get(company, DEFAULT_COMPANY_CAP)
     if prior >= cap:
         return Decision(False, "company_cap")
     return Decision(True, "eligible")
@@ -292,66 +294,176 @@ def _serialized(root: Path):
             fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
-def _append_event(root: Path, *, pk: str, operation: str,
-                  decision: Decision, at: datetime) -> None:
+def _append_event(
+    root: Path, *, pk: str | None, operation: str | None, at: datetime,
+    argv: list[str], return_code: int, output: str, reason: str,
+    prior_claim_state: str | None, agent_pid: str,
+) -> None:
     event = {
-        "at": at.astimezone(UTC).isoformat(), "pk": pk,
-        "operation": operation, "allow": decision.allow,
-        "reason": decision.reason,
+        "at": at.astimezone(UTC).isoformat(),
+        "pk": pk, "operation": operation, "argv": argv,
+        "return_code": return_code, "output": output,
+        "prior_claim_state": prior_claim_state, "agent_pid": agent_pid,
+        "allow": return_code == 0, "reason": reason,
     }
-    with (root / "precheck-events.log").open("a", encoding="utf-8") as file:
+    target = root / "precheck-events.log"
+    if target.is_symlink():
+        raise PrecheckUnavailable("unsafe event log")
+    with target.open("a", encoding="utf-8") as file:
         file.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _record_click(root: Path, pk: str, at: datetime) -> None:
+def _write_claim(root: Path, pk: str, claim: dict) -> None:
     target = _claim_path(root, pk)
     target.parent.mkdir(exist_ok=True)
-    # Write the fact of the click, never an unconfirmed applied status.
-    data = {"pk": pk, "submit_clicked": True,
-            "submit_clicked_at": at.astimezone(UTC).isoformat()}
+    if target.is_symlink():
+        raise PrecheckUnavailable("unsafe claim file")
     temporary = target.with_suffix(".tmp")
     if temporary.is_symlink():
         raise PrecheckUnavailable("unsafe temporary claim path")
-    temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(claim, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temporary, target)
+
+
+def _agent_pid() -> str:
+    # A stable board-agent PID may be supplied across separate CLI invocations.
+    return os.environ.get("BOARD_AGENT_PID") or str(os.getppid())
+
+
+def _matches_claim(claim: dict, pk: str, board: str, pid: str, state: str) -> bool:
+    return bool(
+        claim.get("pk") == pk and claim.get("board") == board
+        and claim.get("state") == state
+        and str(claim.get("agent_pid")) == pid
+    )
+
+
+_OPERATIONS = ("start", "submit", "done", "release", "reopen")
+_USAGE = "usage: precheck {start,submit,done,release,reopen} pk board\n"
 
 
 def main(
     argv: list[str] | None = None, *, legacy_dir: Path | None = None,
     tracking: Any = None, at: datetime | None = None,
 ) -> int:
-    """Fail-closed CLI. Exact legacy argv equivalence still needs local signoff."""
-    parser = argparse.ArgumentParser(prog="precheck")
-    parser.add_argument("operation", choices=("check", "record-click"))
-    parser.add_argument("pk")
-    args = parser.parse_args(argv)
+    """Never click Submit; record only a permitted claim transition."""
+    raw = list(sys.argv[1:] if argv is None else argv)
     now = (at or datetime.now(UTC)).astimezone(UTC)
+    op = raw[0] if raw else None
+    pk = raw[1] if len(raw) > 1 else None
+    board = raw[2] if len(raw) > 2 else None
+    pid = _agent_pid()
+    valid = len(raw) == 3 and op in _OPERATIONS and bool(pk) and bool(board)
+    help_requested = raw in (["--help"], ["-h"])
     try:
         root = _root(legacy_dir)
-        policy = load_policy(root)
-        if tracking is None:
-            from core.stores import make_stores
-            tracking = make_stores().tracking
         with _serialized(root):
-            current = tracking.get(args.pk)
-            decision = evaluate(
-                args.pk, current, tracking.all(), policy, root,
-                at=now, board=os.environ.get("BOARD_AGENT_BOARD"),
-            )
-            if decision.allow and args.operation == "record-click":
-                _record_click(root, args.pk, now)
+            prior = _read_claim(root, pk) if pk else {}
+            prior_state = prior.get("state")
+            error_stream = False
+            if help_requested:
+                reason, output, code = "help", _USAGE, 0
+            elif not valid:
+                reason, output, code = "invalid_arguments", _USAGE, 2
+                error_stream = True
+            elif os.environ.get("BOARD_AGENT_BOARD") not in (None, board):
+                reason, output, code = "board_pin", "STOP: board_pin\n", 2
+            else:
+                try:
+                    if op in ("start", "submit"):
+                        policy = load_policy(root)
+                        if tracking is None:
+                            from core.stores import make_stores
+                            tracking = make_stores().tracking
+                    if op == "start":
+                        if prior:
+                            decision = Decision(False, "claim_exists")
+                        else:
+                            current = tracking.get(pk)
+                            decision = evaluate(
+                                pk, current, tracking.all(), policy, root,
+                                at=now, board=board,
+                            )
+                        if decision.allow:
+                            _write_claim(root, pk, {
+                                "pk": pk, "board": board, "agent_pid": pid,
+                                "state": "filling", "started_at": now.isoformat(),
+                                "submit_clicked": False,
+                            })
+                    elif op == "submit":
+                        if not _matches_claim(prior, pk, board, pid, "filling"):
+                            decision = Decision(False, "claim_mismatch")
+                        else:
+                            # The eligibility check happens after claim validation,
+                            # immediately before recording the external click intent.
+                            current = tracking.get(pk)
+                            decision = evaluate(
+                                pk, current, tracking.all(), policy, root,
+                                at=now, board=board,
+                            )
+                            if decision.allow:
+                                next_claim = {
+                                    **prior, "state": "submit-clicked",
+                                    "submit_clicked": True,
+                                    "submit_clicked_at": now.isoformat(),
+                                }
+                                _write_claim(root, pk, next_claim)
+                    elif op == "done":
+                        decision = Decision(
+                            _matches_claim(prior, pk, board, pid, "submit-clicked"),
+                            "recorded" if _matches_claim(
+                                prior, pk, board, pid, "submit-clicked"
+                            ) else "claim_mismatch",
+                        )
+                        if decision.allow:
+                            _write_claim(root, pk, {
+                                **prior, "state": "recorded",
+                                "recorded_at": now.isoformat(),
+                            })
+                    elif op == "release":
+                        decision = Decision(
+                            _matches_claim(prior, pk, board, pid, "filling"),
+                            "released" if _matches_claim(
+                                prior, pk, board, pid, "filling"
+                            ) else "claim_mismatch",
+                        )
+                        if decision.allow:
+                            _claim_path(root, pk).unlink()
+                    else:
+                        # Only the claiming agent/board can reopen; no newly
+                        # invented approval flag or tracking status is inferred.
+                        decision = Decision(
+                            _matches_claim(prior, pk, board, pid, "submit-clicked"),
+                            "reopened" if _matches_claim(
+                                prior, pk, board, pid, "submit-clicked"
+                            ) else "claim_mismatch",
+                        )
+                        if decision.allow:
+                            next_claim = {**prior, "state": "filling",
+                                          "submit_clicked": False}
+                            next_claim.pop("submit_clicked_at", None)
+                            _write_claim(root, pk, next_claim)
+                    reason = decision.reason
+                    code = 0 if decision.allow else 2
+                    output = "OK\n" if decision.allow else "STOP: " + reason + "\n"
+                except (PrecheckUnavailable, OSError, ValueError, RuntimeError, TypeError):
+                    reason, output, code = (
+                        "precheck_unavailable", "STOP: precheck unavailable\n", 2,
+                    )
+                    error_stream = True
             _append_event(
-                root, pk=args.pk, operation=args.operation,
-                decision=decision, at=now,
+                root, pk=pk, operation=op, at=now, argv=raw,
+                return_code=code, output=output, reason=reason,
+                prior_claim_state=prior_state, agent_pid=pid,
             )
     except (PrecheckUnavailable, OSError, ValueError, RuntimeError, TypeError):
         print("STOP: precheck unavailable", file=sys.stderr)
         return 2
-    if not decision.allow:
-        print("STOP: " + decision.reason)
-        return 2
-    print("OK")
-    return 0
+    print(output, end="", file=sys.stderr if error_stream else sys.stdout)
+    return code
 
 
 if __name__ == "__main__":
