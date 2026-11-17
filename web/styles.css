@@ -1910,6 +1910,10 @@ a.rowlk, button.rowlk { display: inline-block; }
   .deck-vitals .vital { min-width: 0; }
 }
 @media (max-width: 560px) {
+  /* Four vitals cannot share the narrow brand row without clipping labels. */
+  .deck-right { flex-basis: 100%; margin-left: 0; justify-content: space-between; }
+  .deck-vitals { flex: 1; justify-content: space-between; gap: 8px; }
+  .deck-vitals .vital { padding-left: 8px; }
   .deck-breakdown { display: none; }
   .deck-help { font-size: 12px; }
   .act-arrow { display: none; }

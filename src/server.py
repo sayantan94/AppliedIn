@@ -32,6 +32,47 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 _RUNNING = {"discover": False, "process": False}
 
 
+# A /stats poll runs every three seconds. Keep each JSON read batch bounded:
+# the all-time count is already on the status index, so only the date filter
+# needs to look at submitted rows.
+_SUBMITTED_BATCH_SIZE = 256
+
+
+def _count_submitted_today(tracking) -> int:
+    """Count submitted rows dated today in the daemon host's local calendar."""
+    local_today = datetime.now(timezone.utc).astimezone().date()
+    redis = tracking.r
+    members = redis.pipeline()
+    members.smembers("status:applied")
+    members.smembers("status:applied_manual")
+    pks = list({
+        pk.decode("utf-8") if isinstance(pk, bytes) else pk
+        for group in members.execute() for pk in group
+    })
+
+    today = 0
+    for start in range(0, len(pks), _SUBMITTED_BATCH_SIZE):
+        batch = redis.pipeline()
+        for pk in pks[start:start + _SUBMITTED_BATCH_SIZE]:
+            batch.get(f"app:{pk}")
+        for raw in batch.execute():
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+                stamp = row.get("applied_at") if isinstance(row, dict) else None
+                if not isinstance(stamp, str) or not stamp.strip():
+                    continue
+                applied_at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if applied_at.tzinfo is not None and applied_at.astimezone().date() == local_today:
+                    today += 1
+            except (TypeError, ValueError):
+                # Legacy/invalid timestamps are never today, but the status
+                # index still includes their rows in the all-time total.
+                continue
+    return today
+
+
 def _discovery_running() -> bool:
     """True while ANY discovery is in flight, not just one this module started.
 
@@ -960,11 +1001,10 @@ def create_app() -> FastAPI:
         from discovery import handler as _handler
 
         stores = make_stores(settings)
-        # Counted from the status index, not by reading every row. The row walk
-        # took 34 seconds at 1737 rows, on an endpoint the dashboard polls every
-        # three seconds, which is why the whole board felt unresponsive.
+        # Keep the all-time total on the status index, not a full-store walk.
         counts = stores.tracking.status_counts()
-        applied = counts.get("applied", 0) + counts.get("applied_manual", 0)
+        total_submitted = counts.get("applied", 0) + counts.get("applied_manual", 0)
+        today_submitted = _count_submitted_today(stores.tracking)
         from core import flags
         preparation_runs = preparation.snapshot()
         from tools.browser_runtime import browser_status
@@ -986,7 +1026,8 @@ def create_app() -> FastAPI:
                 queue_age_seconds = max(0, int(time.time() - oldest)) if oldest is not None else 0
         except Exception:  # noqa: BLE001 - a stat must never break the dashboard
             pass
-        return {"today_submitted": applied,
+        return {"today_submitted": today_submitted,
+                "total_submitted": total_submitted,
                 "llm_error": flags.llm_error(),
                 "browser_status": browser_status(settings),
                 "queue_age_seconds": queue_age_seconds, "paused": flags.paused(),

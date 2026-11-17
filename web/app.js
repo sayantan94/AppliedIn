@@ -895,6 +895,7 @@ function renderDeck() {
 
   tick($("#v-wait"), waiting);
   tick($("#v-cap"), s.today_submitted ?? 0);
+  tick($("#v-total"), s.total_submitted ?? ((c.applied || 0) + (c.applied_manual || 0)));
   const needs = c.needs_human || 0;
   tick($("#v-needs"), needs);
   $("#vital-needs").classList.toggle("hot", needs > 0);
