@@ -128,7 +128,8 @@ def stats_client(monkeypatch):
     tracking = _Tracking()
     monkeypatch.setattr(server, "make_stores",
                         lambda settings: SimpleNamespace(tracking=tracking))
-    monkeypatch.setattr(server.submit_hold, "recover_orphans", lambda: None)
+    from tools import submit_review
+    monkeypatch.setattr(submit_review, "recover_orphans", lambda: None)
     monkeypatch.setattr(server, "_discovery_running", lambda: False)
     monkeypatch.setattr(server, "_applying_now", lambda: 0)
     monkeypatch.setattr(server, "_throttle_state", lambda: {})
