@@ -1004,7 +1004,12 @@ def create_app() -> FastAPI:
         # Keep the all-time total on the status index, not a full-store walk.
         counts = stores.tracking.status_counts()
         total_submitted = counts.get("applied", 0) + counts.get("applied_manual", 0)
-        today_submitted = _count_submitted_today(stores.tracking)
+        try:
+            today_submitted = _count_submitted_today(stores.tracking)
+        except Exception:  # noqa: BLE001 - a stat must never break the dashboard
+            # Some status-only backends have no Redis client; an unavailable
+            # submitted-row read must not hide the all-time status-index count.
+            today_submitted = 0
         from core import flags
         preparation_runs = preparation.snapshot()
         from tools.browser_runtime import browser_status
