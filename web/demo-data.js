@@ -155,7 +155,8 @@ export const bank = {
 
 export const stats = {
   daily_cap: 5,
-  today_submitted: 3,
+  today_submitted: 2,
+  total_submitted: 3,
   queue_age_seconds: 142,
   paused,
   counts_by_status: applications.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {}),
