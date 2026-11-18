@@ -34,8 +34,8 @@ const state = {
   requests: new Set(), launch: null,
   stats: {},
   events: [],
-  tab: ["#steering", "#career-ops", "#cosign", "#a16z", "#fresh"].includes(location.hash) ? location.hash.slice(1) : "pipeline",
-  findView: ["#career-ops", "#cosign", "#a16z"].includes(location.hash) ? location.hash.slice(1) : "fresh",
+  tab: ["#steering", "#career-ops", "#cosign", "#a16z", "#treg", "#fresh"].includes(location.hash) ? location.hash.slice(1) : "pipeline",
+  findView: ["#career-ops", "#cosign", "#a16z", "#treg"].includes(location.hash) ? location.hash.slice(1) : "fresh",
   filter: "all",      // status chip on the Applications table
   logKind: "all",     // kind chip on the Logs view
   liveState: "off",   // SSE connection state (off | connecting | live | demo)
@@ -933,6 +933,7 @@ function renderPreparation() {
 
 function renderTabs() {
   const finding = FIND_VIEWS.includes(state.tab);
+  document.title = state.tab === "treg" ? "Treg Jobs · AppliedIn" : DEMO ? "AppliedIn (sample data)" : "AppliedIn";
   const searching = INDEX_VIEWS.includes(state.tab) || state.tab === "career-ops";
   if (finding) state.findView = state.tab;
   $("#find-jobs-views").hidden = !finding;
@@ -3253,7 +3254,7 @@ function placeTabPill() {
 
 // Entrances play when the owner changes view, never on background repaints.
 // Job indexes, each a <cosign-board> with id "<view>-board".
-const INDEX_VIEWS = ["cosign", "a16z"];
+const INDEX_VIEWS = ["cosign", "a16z", "treg"];
 const FIND_VIEWS = ["fresh", "career-ops", ...INDEX_VIEWS];
 const VIEW_ORDER = ["pipeline", ...FIND_VIEWS, "apps", "needs", "steering", "stuck", "activity", "profiles", "logs"];
 function enterFindView(prev, next) {
@@ -5537,9 +5538,25 @@ function wire() {
     if (more) { more.open = false; if (more.contains(t)) more.querySelector("summary").focus(); }
     selectView(t.dataset.tab === "find-jobs" ? state.findView : t.dataset.tab);
   });
+  let tregWindow;
+  window.addEventListener("hashchange", () => {
+    if (location.hash === "#treg" && state.tab !== "treg") selectView("treg");
+  });
   $("#find-jobs-views").addEventListener("click", e => {
     const button = e.target.closest("[data-find-view]");
-    if (button) selectView(button.dataset.findView);
+    if (!button) return;
+    if (button.dataset.findView === "treg" && window.name !== "appliedin-treg" && state.tab !== "treg") {
+      const url = new URL(location.href);
+      url.searchParams.delete("job");
+      url.hash = "treg";
+      if (!tregWindow || tregWindow.closed) {
+        tregWindow = window.open(url.href, "appliedin-treg", "popup,width=1280,height=900");
+      } else {
+        tregWindow.location.hash = "treg";
+      }
+      if (tregWindow) { tregWindow.focus(); return; }
+    }
+    selectView(button.dataset.findView);
   });
 
   const rp = $("#rolepicker"), rpBtn = $("#btn-role");

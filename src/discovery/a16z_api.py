@@ -2,10 +2,11 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from discovery import a16z, career_ops, cosign
+from discovery.index_actions import selection_router
 
 router = APIRouter(prefix="/a16z")
 
@@ -18,10 +19,6 @@ class Search(BaseModel):
     remote: bool = False
     min_salary: int = Field(default=0, ge=0, le=2_000_000)
     cursor: str | None = Field(default=None, max_length=12)
-
-
-class Picked(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=a16z.STAGE_MAX)
 
 
 @router.get("")
@@ -48,30 +45,4 @@ def search(body: Search):
         raise HTTPException(502, str(exc)) from exc
 
 
-@router.post("/prepare")
-def prepare(body: Picked):
-    try:
-        return a16z.stage(body.ids)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.post("/apply")
-def apply_selected(body: Picked, background: BackgroundTasks):
-    from discovery.career_apply import run_selected
-
-    try:
-        result = a16z.stage(body.ids, apply_requested=True)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    background.add_task(run_selected, result["pks"])
-    return {**result, "started": result["prepared"]}
-
-
-class Tracked(BaseModel):
-    pks: list[str] = Field(min_length=1, max_length=a16z.STAGE_MAX * 3)
-
-
-@router.post("/progress")
-def progress(body: Tracked):
-    return cosign.progress(body.pks)
+router.include_router(selection_router(a16z.stage))

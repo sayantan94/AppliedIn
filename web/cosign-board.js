@@ -55,7 +55,7 @@ const SKELETON = n => Array.from({length: n}, (_, i) =>
 const STEP_NAMES = ['Score', 'Tailor', 'Check', 'Apply', 'Submitted'];
 const clock = at => { const d = new Date(at); return Number.isFinite(+d) ? d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : ''; };
 const FINAL = new Set(['applied', 'attention']);
-const NETWORKS = {cosign: 'Cosign network', a16z: 'a16z portfolio'};
+const NETWORKS = {cosign: 'Cosign network', a16z: 'a16z portfolio', treg: 'Treg Jobs'};
 // What was sent from this board, per viewer, so the pane survives a reload.
 // Browser storage is a convenience here; the pipeline holds the real record.
 const sentKey = network => network === 'cosign' ? 'appliedin.cosign.sent' : `appliedin.${network}.sent`;
@@ -104,6 +104,7 @@ class CosignBoard extends HTMLElement {
     if (this.ready) return;
     this.ready = true;
     this.network = NETWORKS[this.getAttribute('network')] ? this.getAttribute('network') : 'cosign';
+    this.manualSearch = this.network === 'treg';
     this.jobs = []; this.selected = new Set(); this.cursors = {}; this.done = true;
     this.cities = []; this.progress = {}; this.region = 'us'; this.preferred = [];
     this.sent = loadSent(this.network); this.live = {}; this.paneView = 'role';
@@ -113,6 +114,16 @@ class CosignBoard extends HTMLElement {
         <p class="co-eyebrow">${NETWORKS[this.network]}</p>
         <h2>Search <span class="co-count">open</span> roles</h2>
         <p class="co-sub">Starts from your preferences. Anything you pick is scored and tailored first, then waits for your approval.</p>
+        ${this.manualSearch ? `<section class="co-treg-setup" aria-labelledby="treg-setup-title" hidden>
+          <h3 id="treg-setup-title">Add your API key to search Treg Jobs</h3>
+          <ol>
+            <li>Copy your team API key from <a href="https://treg.to/app#start" target="_blank" rel="noopener noreferrer">Treg setup ↗</a>.</li>
+            <li>Open <code>.env</code> in the AppliedIn project folder. Add <code>TREG_TOKEN=your-key</code>, replacing <code>your-key</code> with your team key.</li>
+            <li>Save the file, then select <button type="button" class="co-link co-check-key">Check again</button>.</li>
+          </ol>
+          <p>Git ignores the local <code>.env</code> file.</p>
+          <p class="co-key-message" role="status"></p>
+        </section>` : ''}
         <form class="co-composer" role="search">
           <div class="co-compose-top">
           <label class="co-query">
@@ -157,11 +168,11 @@ class CosignBoard extends HTMLElement {
     this.$('.co-remote').onclick = event => {
       const on = event.currentTarget.getAttribute('aria-pressed') !== 'true';
       event.currentTarget.setAttribute('aria-pressed', String(on));
-      this.search();
+      this.filtersChanged();
     };
-    for (const name of ['.co-role', '.co-salary']) this.$(name).onchange = () => { this.paintFilters(); this.search(); };
+    for (const name of ['.co-role', '.co-salary']) this.$(name).onchange = () => { this.paintFilters(); this.filtersChanged(); };
     this.wireCities();
-    this.$('.co-term').oninput = () => this.paintExample();
+    this.$('.co-term').oninput = () => { this.paintExample(); if (this.manualSearch) this.filtersChanged(); };
     this.$('.co-more').onclick = () => { this.target = this.visible().length + TARGET; this.search(true); };
     this.$('.co-all input').onchange = event => {
       const pickable = this.visible().filter(j => j.state === 'new').slice(0, STAGE_MAX);
@@ -172,7 +183,7 @@ class CosignBoard extends HTMLElement {
     this.$('.co-clear').onclick = () => { this.selected.clear(); this.renderList(); };
     this.$('.co-prepare').onclick = () => this.stage([...this.selected], false);
     this.$('.co-apply').onclick = () => this.stage([...this.selected], true);
-    this.$('.co-prefs').onclick = event => { if (event.target.closest('.co-reset')) { this.seed(this.defaults); this.search(); } };
+    this.$('.co-prefs').onclick = event => { if (!this.searchPending && event.target.closest('.co-reset') && !this.$('.co-go').disabled) { this.seed(this.defaults); this.filtersChanged(); } };
     this.$('.co-list').onclick = event => {
       const row = event.target.closest('.co-row');
       if (!row) return;
@@ -228,6 +239,11 @@ class CosignBoard extends HTMLElement {
     }, true);
     // Filters stay locked until preferences arrive; otherwise seeding them would
     // silently undo whatever the owner changed in the meantime.
+    if (this.manualSearch) {
+      this.$('.co-role').closest('label').hidden = true;
+      this.$('.co-check-key').onclick = () => this.checkTregKey();
+      this.$('.co-sub').textContent = 'Search employer postings across companies with Treg.';
+    }
     this.lock(true);
     if (!this.hidden) this.load();
   }
@@ -272,7 +288,12 @@ class CosignBoard extends HTMLElement {
       this.lock(false);
       this.startRolodex();
       this.poll();
-      this.search();
+      if (this.manualSearch) {
+        this.$('.co-sub').textContent = `Search across companies with Treg. Each page returns up to ${options.page_size} roles and is billed per result.`;
+        this.showTregSetup(!options.configured);
+      } else {
+        this.search();
+      }
     } catch (error) {
       this.status(error.message, true);
     } finally {
@@ -291,6 +312,36 @@ class CosignBoard extends HTMLElement {
     this.$('.co-remote').setAttribute('aria-pressed', String(!!d.remote));
     this.paintFilters();
     this.paintExample();
+  }
+  showTregSetup(missing) {
+    this.options.configured = !missing;
+    this.$('.co-treg-setup').hidden = !missing;
+    this.$('.co-key-message').textContent = '';
+    this.lock(missing);
+    this.status(missing ? '' : 'Choose your filters and press Search.');
+  }
+
+  async checkTregKey() {
+    const button = this.$('.co-check-key');
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      const options = await this.request('');
+      this.showTregSetup(!options.configured);
+      if (!options.configured) this.$('.co-key-message').textContent = 'AppliedIn still needs a value for TREG_TOKEN.';
+    } catch (error) {
+      this.$('.co-key-message').textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  filtersChanged() {
+    if (!this.manualSearch) return this.search();
+    this.done = true;
+    this.cursors = {};
+    this.$('.co-more').hidden = true;
+    this.status('Press Search to use these filters.');
   }
   filters() {
     return {term: this.$('.co-term').value.trim(), role: this.$('.co-role').value,
@@ -332,6 +383,7 @@ class CosignBoard extends HTMLElement {
   // Each city resolves on its own: its pill settles and its roles land as soon as
   // it answers, rather than everything waiting on the slowest city.
   async search(more = false, auto = false) {
+    if (this.manualSearch && (this.searchPending || !this.options || !this.options.configured)) return;
     const seq = this.seq = (this.seq || 0) + 1;
     if (!auto) this.fills = 0;
     if (!more) this.target = TARGET;
@@ -345,6 +397,10 @@ class CosignBoard extends HTMLElement {
       this.jobs = []; this.cursors = {}; this.progress = {}; this.selected.clear(); this.done = false;
       this.$('.co-progress').replaceChildren();
       this.$('.co-toggle-excluded').hidden = true;
+      if (this.manualSearch) {
+        this.active = null;
+        this.$('.co-detail').innerHTML = '<div class="co-empty-detail">Pick a role to read it here.</div>';
+      }
       this.skeleton();
       this.status('Searching…');
     }
@@ -381,7 +437,7 @@ class CosignBoard extends HTMLElement {
     this.done = Object.values(this.cursors).every(c => !c);
     // Keep reading pages until about a hundred roles show. A bounded number of
     // rounds, so a narrow search that genuinely has few roles still finishes.
-    if (!this.done && this.visible().length < this.target && (this.fills = (this.fills || 0) + 1) <= 8) {
+    if (!this.manualSearch && !this.done && this.visible().length < this.target && (this.fills = (this.fills || 0) + 1) <= 8) {
       this.filling = true;
       if (this.jobs.length) this.renderList(new Set());
       return this.search(true, true);
@@ -392,10 +448,14 @@ class CosignBoard extends HTMLElement {
     if (this.jobs.length) this.renderList(new Set());
     else {
       this.$('.co-list').replaceChildren();
-      this.$('.co-more').hidden = true;
-      this.$('.co-detail').innerHTML = '<div class="co-empty-detail">No roles match. Loosen a filter or add a city.</div>';
+      this.$('.co-more').hidden = !this.manualSearch || this.done;
+      this.$('.co-detail').innerHTML = failed.length ? '' : '<div class="co-empty-detail">No roles match. Try a broader search.</div>';
     }
-    if (failed.length === targets.length) this.status(this.progress[failed[0]].error, true);
+    if (failed.length === targets.length) {
+      const error = this.progress[failed[0]].error;
+      if (this.manualSearch && error === this.options.setup) this.showTregSetup(true);
+      else this.status(error, true);
+    }
     else if (!this.jobs.length) this.status('No roles found');
     else if (failed.length) this.status(`${this.$('.co-status').textContent} · ${failed.map(c => this.cityName(c)).join(', ')} unavailable`, true);
   }
@@ -404,6 +464,7 @@ class CosignBoard extends HTMLElement {
   // then a check that draws itself before the label returns.
   busy_(on) {
     const go = this.$('.co-go');
+    if (this.manualSearch) { this.searchPending = on; this.lock(on); }
     clearTimeout(this.goTimer);
     this.classList.toggle('co-loading', on);
     this.$('.co-more').disabled = on;
@@ -453,7 +514,7 @@ class CosignBoard extends HTMLElement {
       if (pop.hidden) return;
       pop.hidden = true; btn.setAttribute('aria-expanded', 'false');
       clearTimeout(this.cityTimer);
-      if (this.citiesDirty) { this.citiesDirty = false; this.search(); }
+      if (this.citiesDirty) { this.citiesDirty = false; this.filtersChanged(); }
     };
     this.closeCities = close;
     btn.onclick = () => {
@@ -478,7 +539,7 @@ class CosignBoard extends HTMLElement {
       this.citiesDirty = true;
       // Ticking several cities in a row should be one search, not one per tick.
       clearTimeout(this.cityTimer);
-      this.cityTimer = setTimeout(() => { if (this.citiesDirty) { this.citiesDirty = false; this.search(); } }, 700);
+      this.cityTimer = setTimeout(() => { if (this.citiesDirty) { this.citiesDirty = false; this.filtersChanged(); } }, 700);
     };
     this.addEventListener('keydown', event => { if (event.key === 'Escape' && !pop.hidden) { close(); btn.focus(); } });
     document.addEventListener('pointerdown', event => { if (!this.$('.co-cities').contains(event.target)) close(); });

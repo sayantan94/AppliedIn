@@ -162,7 +162,11 @@ def _settings(data: dict, sources: list[dict]) -> dict:
 
 
 # Job indexes whose roles are staged through this board, by provider name.
-INDEXES = {"cosign": "Cosign network", "a16z": "a16z portfolio"}
+INDEXES = {
+    "cosign": "Cosign network", "a16z": "a16z portfolio", "treg": "Treg Jobs",
+    # Older saved rows use this source when resolving their employer ATS.
+    "greenhouse_board": "Greenhouse public board",
+}
 
 
 def canonical(url: str) -> str:

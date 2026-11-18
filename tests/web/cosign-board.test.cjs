@@ -20,7 +20,7 @@ test('one press of Apply sends the selection; the score gate lives on the server
   const sent = [];
   const {Board} = load(async (url, opts) => { sent.push([url, JSON.parse(opts.body)]); return {ok: true, json: async () => ({started: 2, prepared: 2, duplicates: 0})}; });
   const board = new Board();
-  Object.assign(board, {jobs: [{id: 'a', state: 'new'}, {id: 'b', state: 'new'}], selected: new Set(['a', 'b']),
+  Object.assign(board, {network: 'cosign', jobs: [{id: 'a', state: 'new'}, {id: 'b', state: 'new'}], selected: new Set(['a', 'b']),
     renderList() {}, open() {}, status(text) { this.said = text; }});
   await board.stage([...board.selected], true);
   assert.deepEqual(sent, [['/cosign/apply', {ids: ['a', 'b']}]]);
@@ -31,7 +31,7 @@ test('Score & tailor acts at once because it stops for review', async () => {
   const sent = [];
   const {Board} = load(async url => { sent.push(url); return {ok: true, json: async () => ({prepared: 1, duplicates: 0})}; });
   const board = new Board();
-  Object.assign(board, {jobs: [{id: 'a', state: 'new'}], selected: new Set(), armed: null, renderList() {}, open() {}, status() {}});
+  Object.assign(board, {network: 'cosign', jobs: [{id: 'a', state: 'new'}], selected: new Set(), armed: null, renderList() {}, open() {}, status() {}});
   await board.stage(['a'], false);
   assert.deepEqual(sent, ['/cosign/prepare']);
 });
@@ -69,7 +69,7 @@ function stubbed(Board) {
   const board = new Board();
   const el = () => ({hidden: false, disabled: false, innerHTML: '', textContent: '', dataset: {}, scrollTop: 0,
     replaceChildren() {}, querySelector: () => el(), classList: {add() {}, remove() {}, toggle() {}}});
-  Object.assign(board, {jobs: [], selected: new Set(), cursors: {}, progress: {}, region: 'us', examples: [],
+  Object.assign(board, {network: 'cosign', jobs: [], selected: new Set(), cursors: {}, progress: {}, region: 'us', examples: [],
     classList: {add() {}, remove() {}, toggle() {}}, $: () => el(), filters: () => ({term: 'x'}),
     paintExample() {}, paintProgress() {}, renderList() {}, open() {}, skeleton() {}, status(t, e) { this.said = [t, !!e]; }});
   return board;
@@ -132,7 +132,7 @@ test('sending roles follows every one of them in the side pane', async () => {
   const {Board} = load(async () => ({ok: true, json: async () => ({prepared: 1, duplicates: 1, started: 1, tracked: {a: 'acme#1', b: 'beta#2'}})}));
   const board = new Board();
   let shown = 0, polled = 0;
-  Object.assign(board, {jobs: [{id: 'a', state: 'new', title: 'A'}, {id: 'b', state: 'new', title: 'B'}], selected: new Set(), sent: new Map(),
+  Object.assign(board, {network: 'cosign', jobs: [{id: 'a', state: 'new', title: 'A'}, {id: 'b', state: 'new', title: 'B'}], selected: new Set(), sent: new Map(),
     renderList() {}, status() {}, showApps() { shown++; }, poll() { polled++; }});
   await board.stage(['a', 'b'], true);
   // The duplicate is followed too: it is a role the owner wants applied.
@@ -158,4 +158,37 @@ test('every posting names the board it lives on', () => {
   assert.equal(sourceOf('https://bostondynamics.wd1.myworkdayjobs.com/x'), 'Workday');
   assert.equal(sourceOf('https://careers.acme.com/job/1'), 'acme.com');
   assert.equal(sourceOf('not a url'), '');
+});
+
+test('a metered search waits for Search, then fetches just one page per press', async () => {
+  const requests = [];
+  const {Board} = load(async (url, options) => {
+    requests.push([url, JSON.parse(options.body).cursor]);
+    return {ok: true, json: async () => ({jobs: [{id: 'treg:a'}], cursor: '2', done: false})};
+  });
+  const board = stubbed(Board);
+  Object.assign(board, {network: 'treg', manualSearch: true, options: {configured: true}, cities: [], lock() {}});
+  board.filtersChanged();
+  assert.deepEqual(requests, []);
+  await board.search();
+  assert.deepEqual(requests, [['/treg/search', null]]);
+  await board.search(true);
+  assert.deepEqual(requests, [['/treg/search', null], ['/treg/search', '2']]);
+});
+
+test('checking a saved key unlocks Treg search without a billable request', async () => {
+  const requests = [];
+  const {Board} = load(async (url, {method}) => {
+    requests.push([url, method]);
+    return {ok: true, json: async () => ({configured: true})};
+  });
+  const board = stubbed(Board);
+  const fields = new Map();
+  Object.assign(board, {network: 'treg', options: {configured: false}, lock(on) { this.locked = on; },
+    $(selector) { if (!fields.has(selector)) fields.set(selector, {}); return fields.get(selector); }});
+  await board.checkTregKey();
+  assert.deepEqual(requests, [['/treg', 'GET']]);
+  assert.equal(board.options.configured, true);
+  assert.equal(board.locked, false);
+  assert.equal(board.$('.co-treg-setup').hidden, true);
 });

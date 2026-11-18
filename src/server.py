@@ -430,6 +430,8 @@ def create_app() -> FastAPI:
     app.include_router(cosign_router)
     from discovery.a16z_api import router as a16z_router
     app.include_router(a16z_router)
+    from discovery.treg_api import router as treg_router
+    app.include_router(treg_router)
     settings = get_settings()
 
     @app.get("/steering")

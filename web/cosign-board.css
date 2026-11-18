@@ -314,3 +314,13 @@ cosign-board.co-loading .co-list { opacity: .55; }
 }
 /* The board a posting lives on, always visible but never loud. */
 .co-src { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+
+.co-treg-setup { max-width: 860px; margin: 0 auto 16px; padding: 14px 18px; text-align: left;
+  border: 1px solid var(--border); border-left: 3px solid var(--run); border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--run) 6%, var(--panel)); color: var(--fg); font-size: 13px; line-height: 1.55; }
+.co-treg-setup h3 { margin: 0; font-size: 15px; }
+.co-treg-setup ol { list-style: decimal; margin: 8px 0; padding-left: 22px; }
+.co-treg-setup li + li { margin-top: 4px; }
+.co-treg-setup a, .co-treg-setup .co-link { color: inherit; text-decoration: underline; }
+.co-treg-setup p { margin: 6px 0 0; color: var(--muted); }
+.co-treg-setup .co-key-message:empty { margin: 0; }

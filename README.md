@@ -250,6 +250,15 @@ them start from your job preferences.
 | **Career Ops search** | Company job boards across a large directory of employers | Greenhouse, Lever, Ashby, Workday, iCIMS | Find companies you don't track yet |
 | **Cosign network** | About 70,000 open roles indexed across company job boards | Cosign network; postings on Ashby, Greenhouse, Workday and others | Search broadly by title, city and salary in seconds |
 
+### Search in a Treg Jobs window
+
+Open **Find jobs → Treg Jobs ↗** to search across companies. Add your Treg team
+API key as `TREG_TOKEN` in AppliedIn’s private `.env`. If the window is already
+open and asks for a key, select **Check again**. Each press of **Search** or
+**Load more roles** fetches up to ten Hirebase results. Treg bills per result.
+Select a role to **Score & tailor** or **Apply**.
+[Treg setup](https://treg.to/app#start) · [Pricing](https://treg.to/jobs-api)
+
 ### Search the Cosign network
 
 1. Open **Find jobs → Cosign network**. The first search uses your preferences:

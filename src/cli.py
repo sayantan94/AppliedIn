@@ -51,7 +51,7 @@ import os
 import signal
 from pathlib import Path
 
-from core.config import get_settings
+from core.config import TREG_ENV_TOKEN, get_settings
 from core.logging import get_logger
 from core.models import Status
 from core.stores import make_stores
@@ -254,6 +254,9 @@ def start(no_discover: bool = False) -> dict:
     local.mkdir(parents=True, exist_ok=True)
     logfile = local / "daemon.log"
     env = {**os.environ, "APPLIEDIN_MODE": os.environ.get("APPLIEDIN_MODE", "local")}
+    # Only an explicitly exported Treg key should override the live .env in the child.
+    if TREG_ENV_TOKEN is None:
+        env.pop("TREG_TOKEN", None)
     if no_discover:
         env["APPLIEDIN_DISCOVERY"] = "off"
     with open(logfile, "a") as fh:

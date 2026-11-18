@@ -15,6 +15,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env into the environment so both APPLIEDIN_* settings and the raw
 # provider keys (read by LiteLLM) are available from one file.
+# Remember a shell override before dotenv and model clients copy file values into
+# os.environ. Treg reads the file on each request so a saved or removed key is live.
+TREG_ENV_TOKEN = os.environ.get("TREG_TOKEN")
 load_dotenv()
 
 # This product runs on the owner's machine and says so. Any library that reads
