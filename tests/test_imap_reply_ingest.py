@@ -1002,3 +1002,38 @@ def test_cold_x_autorespond_header_cannot_count_as_human(tmp_path):
     reply_ingest._cold_outreach_message(ledger, s, headers, b"Automatic response.", "7", 16)
     report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
     assert report["company_stop"] is None
+
+
+def test_invalid_imap_generation_revokes_previous_watermark(tmp_path, monkeypatch):
+    """A later unusable UIDVALIDITY may not authorize SMTP from an older poll."""
+    from types import SimpleNamespace
+    from core.outreach_contacts import LinkedInSnapshot, VerifiedRecipient
+    from core.outreach_ledger import OutreachHold
+    from core.outreach_sources import FundedNoOpening
+    from datetime import UTC, datetime
+
+    s, ledger, _, _ = _synthetic_outreach_ticket(tmp_path)
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    stores = SimpleNamespace(tracking=SimpleNamespace(query_status=lambda _status: []))
+    class BadGeneration:
+        uidvalidity = None
+        logged_out = False
+        def logout(self):
+            self.logged_out = True
+    bad = BadGeneration()
+    creds = {"host":"imap.example-co.test", "username":"operator",
+             "mailbox":"INBOX", "password":"synthetic"}
+    assert reply_ingest.ingest_pass(s, credentials=creds, stores=stores,
+                                    transport=bad) == 0
+    assert bad.logged_out
+    now = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    new_company = FundedNoOpening("b"*32, "Second Co", "example-co.com",
+                                  "https://example-co.com", (), "synthetic",
+                                  now, "no_openings")
+    person = VerifiedRecipient("user@example-co.com", "name:second user",
+                               "Second User", "person", "https://example-co.com/team")
+    with pytest.raises(OutreachHold, match="inbound_poll_required"):
+        ledger.reserve_email(
+            new_company, person, LinkedInSnapshot(frozenset(), frozenset()),
+            no_application=True, resume_seed_proved=True, sender_proved=True,
+            variant="approved-v1", digest="b"*64, now=now)
