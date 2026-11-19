@@ -31,11 +31,11 @@ def list_companies(tool_context: ToolContext) -> dict:
     """List the watchlist companies to discover, with their career URLs."""
     from pathlib import Path
 
-    from discovery.watchlist import load_watchlist
+    from discovery.watchlist import load_effective_watchlist
 
     path = Path(get_settings().config_dir) / "watchlist.yaml"
     return {"companies": [{"name": c.name, "careers_url": c.careers_url,
-                           "discovery": c.discovery.value} for c in load_watchlist(path)]}
+                           "discovery": c.discovery.value} for c in load_effective_watchlist(path)]}
 
 
 def discover_company(name: str, tool_context: ToolContext) -> dict:
@@ -51,11 +51,11 @@ def discover_company(name: str, tool_context: ToolContext) -> dict:
     from discovery.crawler import crawl_company
     from discovery.handler import discover_company as _feed_discover
     from discovery.handler import resolve_company
-    from discovery.watchlist import load_preferences, load_watchlist
+    from discovery.watchlist import load_preferences, load_effective_watchlist
 
     cfg_dir = Path(get_settings().config_dir)
     prefs = load_preferences(cfg_dir / "preferences.yaml")
-    companies = {c.name: c for c in load_watchlist(cfg_dir / "watchlist.yaml")}
+    companies = {c.name: c for c in load_effective_watchlist(cfg_dir / "watchlist.yaml")}
     company = companies.get(name)
     if company is None:
         return {"error": f"unknown company {name!r}"}

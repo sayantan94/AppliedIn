@@ -27,7 +27,8 @@ from .canonical_job_url import admit_feed
 from . import progress
 from .relevance import relevant
 from .resolver import BROWSER_HEADERS, resolve
-from .watchlist import CompanyConfig, Preferences, load_preferences, load_watchlist
+from .watchlist import (CompanyConfig, Preferences, load_preferences,
+                        load_watchlist, load_effective_watchlist)
 
 log = get_logger(__name__)
 
@@ -242,7 +243,7 @@ def list_watchlist_companies() -> list[str]:
     """The company names in the watchlist, in file order — so the UI can offer a
     'run discovery for just these' picker instead of always sweeping all."""
     config_dir = Path(get_settings().config_dir)
-    return [c.name for c in load_watchlist(config_dir / "watchlist.yaml")]
+    return [c.name for c in load_effective_watchlist(config_dir / "watchlist.yaml")]
 
 
 def company_for_url(url: str) -> str:
@@ -253,7 +254,7 @@ def company_for_url(url: str) -> str:
     u = urlparse(url)
     host, seg = (u.hostname or "").lower(), [p for p in u.path.split("/") if p]
     org = (seg[0].lower() if seg else "")
-    for c in load_watchlist(Path(get_settings().config_dir) / "watchlist.yaml"):
+    for c in load_effective_watchlist(Path(get_settings().config_dir) / "watchlist.yaml"):
         cu = urlparse(c.careers_url or "")
         ch, cseg = (cu.hostname or "").lower(), [p for p in cu.path.split("/") if p]
         corg = (cseg[0].lower() if cseg else "")
@@ -452,7 +453,7 @@ def _targets(only: list[str] | None) -> set[str]:
     """
     settings = get_settings()
     names = {c.name.strip().lower()
-             for c in load_watchlist(Path(settings.config_dir) / "watchlist.yaml")}
+             for c in load_effective_watchlist(Path(settings.config_dir) / "watchlist.yaml")}
     if only:
         wanted = {n.strip().lower() for n in only if n and n.strip()}
         return names & wanted
@@ -495,7 +496,7 @@ def _run_discovery(only: list[str] | None, profile_id: str,
     stores = make_stores(settings)
     config_dir = Path(settings.config_dir)
     prefs = load_preferences(config_dir / "preferences.yaml")
-    companies = load_watchlist(config_dir / "watchlist.yaml")
+    companies = load_effective_watchlist(config_dir / "watchlist.yaml")
     if only:
         wanted = {n.strip().lower() for n in only if n and n.strip()}
         companies = [c for c in companies if c.name.strip().lower() in wanted]
