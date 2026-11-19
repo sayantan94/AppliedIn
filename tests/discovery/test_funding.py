@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from discovery import funding
-from discovery.watchlist import load_effective_watchlist
+from discovery.funding import load_effective_watchlist
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "funding"
 NOW = datetime(2026, 11, 19, 12, tzinfo=UTC)
@@ -135,6 +135,27 @@ def test_source_and_poller_are_default_off(tmp_path, monkeypatch):
         (tmp_path / "funding-feeds.yaml").read_text().replace(
             "enabled: true", "enabled: false"))
     assert not funding.ready(config)
+
+
+def test_missing_auto_overlay_preserves_injected_manual_loader(tmp_path):
+    cfg = settings(tmp_path, enabled=False)
+    path = tmp_path / "missing-manual.yaml"
+    from discovery.watchlist import CompanyConfig
+
+    manual = [CompanyConfig(name="TestCo", careers_url="https://example.com/jobs")]
+    seen = []
+
+    def manual_loader(candidate):
+        seen.append(candidate)
+        return manual
+
+    # The caller's injected loader owns manual reads, whether funding is off
+    # or is on with no private overlay file.
+    assert load_effective_watchlist(path, settings=cfg, manual_loader=manual_loader) == manual
+    cfg.funding_enabled = True
+    assert load_effective_watchlist(path, settings=cfg, manual_loader=manual_loader) == manual
+    assert seen == [path, path]
+    assert not (tmp_path / "local").exists()
 
 
 def test_live_status_is_opt_in_but_all_candidate_fixtures_are_offline(tmp_path):

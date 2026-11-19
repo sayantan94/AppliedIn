@@ -285,6 +285,63 @@ def active_watchlist(settings=None) -> list[dict]:
     state = State(Path(settings.local_dir) / "funded-watchlist.yaml")
     return list(state.data["active"].values())
 
+def load_effective_watchlist(path: str | Path, *, settings=None,
+                             manual_loader=None) -> list:
+    """Manual entries first; ONLY verified active funding rows extend local reads.
+
+    This is a read-only overlay, not the tracked manual watchlist editor.
+    A remote funding item cannot set application mode, secrets, proxy, discovery
+    strategy, or authorization. Manual identities always take precedence.
+    """
+    from core.models import ApplyMode, DiscoveryMode
+    from .watchlist import CompanyConfig, load_watchlist
+
+    manual = (manual_loader or load_watchlist)(path)
+    settings = settings if settings is not None else get_settings()
+    if getattr(settings, "mode", None) != "local" or not getattr(settings, "funding_enabled", False):
+        return manual
+
+    try:
+        active = active_watchlist(settings)
+    except (FundingRefusal, OSError, ValueError):
+        # A broken local funding ledger cannot make auto companies eligible.
+        # The importer independently refuses to overwrite that ledger.
+        return manual
+
+    claimed_names = {c.name.strip().casefold() for c in manual}
+    claimed_domains: set[str] = set()
+    # A shared ATS hostname is not an employer identity, but the *exact*
+    # tenant/source already selected by a manual row belongs to that row.
+    claimed_sources = {c.careers_url.rstrip("/") for c in manual if c.careers_url}
+    claimed_boards = {(c.ats, c.board) for c in manual if c.ats and c.board}
+    merged = list(manual)
+    for record in active:
+        # These fields were revalidated by the strict private-state loader.
+        # Aliases are evidence metadata only, never CompanyConfig authority.
+        aliases = {a.strip().casefold() for a in record.get("aliases", [])}
+        identities = {record["name"].strip().casefold()} | aliases
+        domain = record["employer_domain"]
+        if not identities or not identities.isdisjoint(claimed_names):
+            continue
+        if (domain in claimed_domains or record["careers_url"] in claimed_sources
+                or (record["ats"], record["board"]) in claimed_boards):
+            continue
+        # Do not derive a manual employer domain from the shared ATS host in
+        # careers_url. Without an independently proven manual homepage there
+        # is no justified manual-domain collision to infer.
+        merged.append(CompanyConfig(
+            name=record["name"], careers_url=record["careers_url"],
+            ats=record["ats"], board=record["board"],
+            mode=ApplyMode.GATED, discovery=DiscoveryMode.FEED,
+            login_secret="", residential_proxy=False,
+            requires_cover_letter=False,
+        ))
+        claimed_names.update(identities)
+        claimed_domains.add(domain)
+        claimed_sources.add(record["careers_url"])
+        claimed_boards.add((record["ats"], record["board"]))
+    return merged
+
 
 def _safe_url(url: str) -> tuple[str, str]:
     if not isinstance(url, str) or len(url) > 2048 or not url.isascii():

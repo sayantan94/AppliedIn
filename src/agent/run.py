@@ -275,7 +275,7 @@ def _reader_url(row: dict) -> str:
     """Source-bound operational read target; never write it back to a row."""
     from urllib.parse import unquote, urljoin, urlsplit
 
-    from discovery.watchlist import load_effective_watchlist
+    from discovery.funding import load_effective_watchlist
     from tools.jd import _valid_reader_url
 
     raw = row.get("jd_url")
@@ -1116,7 +1116,7 @@ def _watchlist_browser_companies() -> set[str]:
     from pathlib import Path as _P
 
     from core.models import DiscoveryMode
-    from discovery.watchlist import load_effective_watchlist
+    from discovery.funding import load_effective_watchlist
 
     try:
         cfg = _P(get_settings().config_dir) / "watchlist.yaml"

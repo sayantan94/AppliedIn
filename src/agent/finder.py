@@ -31,7 +31,7 @@ def list_companies(tool_context: ToolContext) -> dict:
     """List the watchlist companies to discover, with their career URLs."""
     from pathlib import Path
 
-    from discovery.watchlist import load_effective_watchlist
+    from discovery.funding import load_effective_watchlist
 
     path = Path(get_settings().config_dir) / "watchlist.yaml"
     return {"companies": [{"name": c.name, "careers_url": c.careers_url,
@@ -51,7 +51,8 @@ def discover_company(name: str, tool_context: ToolContext) -> dict:
     from discovery.crawler import crawl_company
     from discovery.handler import discover_company as _feed_discover
     from discovery.handler import resolve_company
-    from discovery.watchlist import load_preferences, load_effective_watchlist
+    from discovery.funding import load_effective_watchlist
+    from discovery.watchlist import load_preferences
 
     cfg_dir = Path(get_settings().config_dir)
     prefs = load_preferences(cfg_dir / "preferences.yaml")
