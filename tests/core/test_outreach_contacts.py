@@ -51,3 +51,27 @@ def test_private_linkedin_reader_never_guesses_and_never_writes(tmp_path):
     with pytest.raises(ContactHold, match="state_unmapped"):
         read_linkedin(s, company_id="a"*32, company_name="Example Co",
                       company_domain="example-co.com")
+
+
+def test_named_mailto_requires_same_small_employer_published_container():
+    """Nearby unrelated names and other mailto links cannot bind a person."""
+    common = dict(company_domain="example-co.com",
+                  source_url="https://example-co.com/team",
+                  address="test@example-co.com", name="Test User")
+    ambiguous = (
+        "<div>Test User <a href='mailto:other@example-co.com'>Other Person</a>"
+        "<a href='mailto:test@example-co.com'>Contact</a></div>"
+    )
+    with pytest.raises(ContactHold, match="binding_missing"):
+        verify_published_contact(html=ambiguous, **common)
+    sibling = (
+        "<div>Test User</div>"
+        "<div>Other Person <a href='mailto:test@example-co.com'>Contact</a></div>"
+    )
+    with pytest.raises(ContactHold, match="binding_missing"):
+        verify_published_contact(html=sibling, **common)
+    exact = (
+        "<div>Other Person <a href='mailto:other@example-co.com'>Other</a></div>"
+        "<div>Test User <a href='mailto:test@example-co.com'>Contact</a></div>"
+    )
+    assert verify_published_contact(html=exact, **common).person_key == "name:test user"
