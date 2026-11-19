@@ -170,3 +170,11 @@ def test_failed_imap_pass_revokes_earlier_fresh_poll(tmp_path):
     poll(db)
     ticket = reserve(db, lead("a"), contact("Test User"))
     assert ticket["stage"] == 0
+
+def test_reply_ingest_python_syntax_without_import_side_effects():
+    """Catch invalid cold-reply branches even if IMAP module import is broken."""
+    import ast
+    from pathlib import Path
+
+    source_path = Path(__file__).resolve().parents[2] / "src/core/reply_ingest.py"
+    ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
