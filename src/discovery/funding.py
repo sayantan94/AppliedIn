@@ -1038,7 +1038,11 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                         "seen_at": now.isoformat()}
                     state.save()
                     state.count(sid, "article_unavailable", now)
-        except (FundingRefusal, httpx.HTTPError, OSError, ValueError):
+        except FundingRefusal as exc:
+            # Reason codes are fixed by this module; never log source payload,
+            # the private SEC User-Agent, or arbitrary exception details.
+            state.count(sid, str(exc), now)
+        except (httpx.HTTPError, OSError, ValueError):
             state.count(sid, "source_error", now)
     for index in range(0, len(candidates), 4):
         batch = candidates[index:index + 4]
