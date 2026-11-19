@@ -268,7 +268,8 @@ class Ledger:
                         or not all(row[2] == contact.address for row in existing)):
                     raise OutreachHold("followup_thread_not_definitively_accepted")
                 opens = self._qualified_opens(db, existing[-1][5])
-                if stage > 2 and (not expanded_followups or len(opens) < 3):
+                if stage > 2 and (not expanded_followups or not
+                        self._ever_qualified_three(db, lead.company_id, contact.person_key)):
                     raise OutreachHold("followup_expansion_requires_three_qualified_opens")
                 previous_at = datetime.fromtimestamp(existing[-1][4], UTC)
                 if now - previous_at < timedelta(hours=48):
@@ -399,8 +400,10 @@ class Ledger:
         for company, person, recipient, url, name, stage, accepted_at, attempt_id, mode in rows:
             with self._tx() as db:
                 opens = self._qualified_opens(db, attempt_id)
-            if stage >= 2 and len(opens) < 3:
-                continue
+            if stage >= 2:
+                with self._tx() as db:
+                    if not self._ever_qualified_three(db, company, person):
+                        continue
             accepted = datetime.fromtimestamp(accepted_at, UTC)
             earned = self.earn_due(
                 company, person, stage+1,
@@ -524,6 +527,20 @@ class Ledger:
                 self._set_meta(db, "global_email_pause", "1")
         return True
 
+
+    @staticmethod
+    def _ever_qualified_three(db, company_id, person_key):
+        """An earlier earned 3-open expansion survives later low-open sends."""
+        row = db.execute("""
+            SELECT 1 FROM pixel_events e
+              JOIN pixel_tokens t ON t.token_sha=e.token_sha
+              JOIN attempts a ON a.id=t.attempt_id
+            WHERE a.company_id=? AND a.person_key=?
+              AND a.state='confirmed_smtp_accepted'
+              AND e.classification='qualified'
+            GROUP BY a.id HAVING COUNT(*)>=3 LIMIT 1
+        """, (company_id, person_key)).fetchone()
+        return row is not None
 
     @staticmethod
     def _qualified_opens(db, attempt_id):
