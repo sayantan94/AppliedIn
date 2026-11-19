@@ -1852,3 +1852,63 @@ def test_public_network_stop_signals_while_tracking_create_holds_board_lock(
     network.STOP.clear()
     assert network.stop() == {"stopping": False}
     assert not network.STOP.is_set()
+
+
+def test_funded_application_handoff_reuses_existing_post_and_refuses_indexes(tmp_path):
+    """Synthetic #386 admission through Career Ops, no browser or HTTP effects."""
+    from datetime import UTC, datetime, timedelta
+    from core.outreach_sources import SourceHold
+    from discovery.funding import State
+    from discovery.handler import funded_apply_role_payload
+
+    current = datetime.now(UTC)
+    key = "a" * 32
+    settings = SimpleNamespace(
+        mode="local", local_dir=str(tmp_path), funding_enabled=True,
+        outreach_enabled=True, outreach_application_handoff_enabled=True)
+    funded = State(tmp_path / "funded-watchlist.yaml")
+    funded.data["pending"][key] = {
+        "name": "Example Co", "homepage": "https://example-co.com",
+        "employer_domain": "example-co.com", "aliases": [],
+        "reason": "no_openings", "source": "synthetic",
+        "seen_at": current.isoformat(),
+        "next_check": (current + timedelta(days=1)).isoformat(),
+        "expires": (current + timedelta(days=30)).isoformat(),
+    }
+    funded.data["deals"][key] = {
+        "status": "pending", "reason": "no_openings",
+        "source": "synthetic", "seen_at": current.isoformat(),
+    }
+    funded.save()
+    identity = {"ats": "ashby", "company": "Example Co",
+                "job_id": "ashby:example-co:general-123"}
+    url = "https://jobs.ashbyhq.com/example-co/general-123"
+    meta = {"title": "General Application", "text": "Official synthetic role"}
+    proposal = co.funded_apply_role_handoff(settings, key, identity, url, meta, now=current)
+    assert proposal["method"] == "POST"
+    assert proposal["path"] == "/actions/apply-role"
+    assert proposal["body"] == {
+        "url": url, "funded_company_id": key,
+        "discovery_source": "funded_no_opening",
+    }
+    assert proposal == funded_apply_role_payload(
+        settings, key, identity, url, meta, now=current)
+    with pytest.raises(SourceHold, match="posting_identity_missing"):
+        co.funded_apply_role_handoff(
+            settings, key, identity,
+            "https://jobs.ashbyhq.com/example-co", meta, now=current)
+    with pytest.raises(SourceHold, match="general_posting_not_proven"):
+        co.funded_apply_role_handoff(
+            settings, key, identity, url,
+            {"title": "Senior Engineer", "text": meta["text"]}, now=current)
+    official = co.funded_apply_role_handoff(
+        settings, key, {"ats": "custom", "company": "Example Co"},
+        "https://example-co.com/careers/cv",
+        {"title": "Talent Pool", "text": "Submit your CV through this official form."},
+        now=current)
+    assert official["body"]["discovery_source"] == "funded_no_opening"
+    with pytest.raises(SourceHold, match="custom_cv_form_unverified"):
+        co.funded_apply_role_handoff(
+            settings, key, {"ats": "custom", "company": "Example Co"},
+            "https://foreign.example/jobs/cv",
+            {"title": "Talent Pool", "text": "Submit your CV."}, now=current)
