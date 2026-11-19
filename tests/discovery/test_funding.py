@@ -1,0 +1,472 @@
+"""Offline synthetic contract checks for the default-off funding lane (#386).
+
+No network, owner files, browser, Redis, email, applications or credentials.
+CI/operator is responsible for execution; these are NOT live-source checks.
+"""
+from __future__ import annotations
+
+import json
+import re
+import socket
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pytest
+import yaml
+
+from discovery import funding
+from discovery.watchlist import load_effective_watchlist
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "funding"
+NOW = datetime(2026, 11, 19, 12, tzinfo=UTC)
+SOURCE = "https://feeds.example.com/rss"
+ARTICLE = "https://news.example.com/round-1"
+HOME = "https://example-co.co.uk/"
+BOARD = "https://jobs.ashbyhq.com/example-co"
+ASHBY_API = "https://api.ashbyhq.com/posting-api/job-board/example-co?includeCompensation=true"
+SEC_INDEX = "https://www.sec.gov/Archives/edgar/data/1/000000-index.html"
+SEC_DOC = "https://www.sec.gov/Archives/edgar/data/1/primary_doc.xml"
+
+
+def fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def settings(tmp_path, *, enabled=True, source=True, mode="local"):
+    manifest = {
+        "version": 1,
+        "regions": ["eu", "uk", "usa", "uae", "gcc", "india",
+                    "singapore", "australia", "remote-first-anywhere"],
+        "sources": [
+            {"id": "uk_feed", "kind": "rss", "region": "uk",
+             "url": SOURCE, "enabled": source},
+        ],
+    }
+    (tmp_path / "funding-feeds.yaml").write_text(yaml.safe_dump(manifest))
+    (tmp_path / "watchlist.yaml").write_text("companies: []\n")
+    (tmp_path / "preferences.yaml").write_text("titles: [Software Engineer]\n")
+    return SimpleNamespace(
+        mode=mode, funding_enabled=enabled, funding_poll_hours=5,
+        funding_sec_user_agent="", funding_eligible_days=30,
+        funding_daily_extraction_calls=8,
+        funding_weekly_extraction_tokens=100000,
+        funding_extract_max_output_tokens=1200,
+        funding_daily_new_companies=10,
+        funding_daily_http=120, funding_max_http_per_pass=60,
+        funding_max_candidates_per_pass=20,
+        funding_max_postings_per_pass=12,
+        funding_daily_relevance_calls=12,
+        funding_recheck_days=7,
+        funding_pending_days=60,
+        funding_active_days=90,
+        config_dir=str(tmp_path), local_dir=str(tmp_path / "local"),
+    )
+
+
+class OfflineClient:
+    """A deterministic response lookup, not an httpx network transport."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def get(self, url, *, params=None, headers=None, follow_redirects=False, **_):
+        from urllib.parse import urlencode
+
+        if params:
+            url = url + ("&" if "?" in url else "?") + urlencode(params)
+        self.calls.append((url, dict(headers or {}), follow_redirects))
+        response = self.routes.get(url)
+        if response is None:
+            raise funding.FundingRefusal("synthetic_route_missing")
+        if isinstance(response, tuple):
+            status, data = response
+        else:
+            status, data = 200, response
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        return httpx.Response(
+            status_code=status, content=data,
+            headers={"ETag": '"synthetic-v1"'},
+            request=httpx.Request("GET", url),
+        )
+
+
+def routes(keep_opening=True):
+    mapping = {
+        SOURCE: fixture("rss_uk.xml"),
+        ARTICLE: fixture("article_uk.html"),
+        HOME: fixture("employer_uk.html"),
+        BOARD: fixture("board_ashby.html"),
+        ASHBY_API: fixture("ashby.json"),
+    }
+    if not keep_opening:
+        mapping[ASHBY_API] = b'{"jobs":[]}'
+    return mapping
+
+
+def extractor(prompt, *, max_tokens):
+    assert 0 < max_tokens <= 1200
+    ids = re.findall(r'"id":"([0-9a-f]{32})"', prompt)
+    return {"articles": [{"id": id_, "deals": [{
+        "issuer": "example-co", "stage": "seed", "date": "2026-11-18",
+        "sector": "fintech", "region": "uk", "remote_first": False,
+        "amount": "USD 2M", "aliases": [],
+    }]} for id_ in ids]}
+
+
+def test_source_and_poller_are_default_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
+    config = settings(tmp_path, enabled=False)
+    assert not funding.ready(config)
+    assert funding.poll_once(config) == {"status": "disabled"}
+    assert not (tmp_path / "local").exists()
+    config.funding_enabled = True
+    config.mode = "cloud"
+    assert not funding.ready(config)
+    assert funding.active_watchlist(config) == []
+    config.mode = "local"
+    config.funding_enabled = False
+    assert load_effective_watchlist(tmp_path / "watchlist.yaml", settings=config) == []
+    config.funding_enabled = True
+    (tmp_path / "funding-feeds.yaml").write_text(
+        (tmp_path / "funding-feeds.yaml").read_text().replace(
+            "enabled: true", "enabled: false"))
+    assert not funding.ready(config)
+
+
+def test_live_status_is_opt_in_but_all_candidate_fixtures_are_offline(tmp_path):
+    config = settings(tmp_path, source=False)
+    assert not funding.ready(config)
+    config.funding_sec_user_agent = ""
+    assert funding._manifest(config)["sources"][0]["enabled"] is False
+    assert not (tmp_path / "local").exists()
+
+
+def test_native_ashby_requires_current_producer_consumer_and_relevance(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    result = funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: client,
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs,
+    )
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert result["status"] == "ok"
+    assert len(state.data["active"]) == 1
+    record = next(iter(state.data["active"].values()))
+    assert record["name"] == "example-co"
+    assert record["careers_url"] == BOARD
+    assert record["mode"] == "gated" and record["discovery"] == "feed"
+    assert record["employer_domain"] == "example-co.co.uk"
+    assert "login_secret" not in record
+    assert len(load_effective_watchlist(tmp_path / "watchlist.yaml", settings=cfg)) == 1
+    assert all("http://127." not in call[0] for call in client.calls)
+    assert state.data["report"]["counts"]["admissible"] == 1
+
+
+def test_manual_name_precedence_is_casefolded(tmp_path):
+    cfg = settings(tmp_path)
+    (tmp_path / "watchlist.yaml").write_text(
+        "companies:\n- name: EXAMPLE-CO\n  careers_url: https://jobs.ashbyhq.com/manual-board\n"
+    )
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    state.data["active"]["synthetic-deal"] = {
+        "name": "example-co", "careers_url": BOARD, "ats": "ashby",
+        "board": "example-co", "mode": "gated", "discovery": "feed",
+        "employer_domain": "example-co.co.uk", "homepage": HOME,
+        "aliases": [], "source_id": "uk_feed",
+        "admitted_at": NOW.isoformat(), "last_relevant_at": NOW.isoformat(),
+    }
+    state.save()
+    effective = load_effective_watchlist(tmp_path / "watchlist.yaml", settings=cfg)
+    assert len(effective) == 1 and effective[0].name == "EXAMPLE-CO"
+
+
+def test_hosted_ats_host_does_not_identify_employers(tmp_path):
+    cfg = settings(tmp_path)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    base = {
+        "careers_url": BOARD, "ats": "ashby",
+        "board": "example-co", "mode": "gated", "discovery": "feed",
+        "employer_domain": "example-co.co.uk", "homepage": HOME,
+        "aliases": [], "source_id": "uk_feed",
+        "admitted_at": NOW.isoformat(), "last_relevant_at": NOW.isoformat(),
+    }
+    state.data["active"]["first"] = {**base, "name": "example-co"}
+    state.data["active"]["second"] = {
+        **base, "name": "OtherCo", "board": "otherco",
+        "careers_url": "https://jobs.ashbyhq.com/otherco",
+        "homepage": "https://otherco.com",
+        "employer_domain": "otherco.com",
+    }
+    state.save()
+    merged = load_effective_watchlist(tmp_path / "watchlist.yaml", settings=cfg)
+    assert {x.name for x in merged} == {"example-co", "OtherCo"}
+
+
+def test_absent_or_corrupt_private_state_fails_closed(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "local" / "funded-watchlist.yaml"
+    assert funding.active_watchlist(cfg) == []
+    path.parent.mkdir(parents=True)
+    path.write_text("version: this is not state\n")
+    before = path.read_bytes()
+    with pytest.raises(funding.FundingRefusal):
+        funding.State(path)
+    assert path.read_bytes() == before
+    assert load_effective_watchlist(tmp_path / "watchlist.yaml", settings=cfg) == []
+
+
+def test_auto_record_must_not_import_authority_fields(tmp_path):
+    path = tmp_path / "state.yaml"
+    state = funding.State(path)
+    state.data["active"]["evil"] = {
+        "name": "example-co", "careers_url": BOARD, "ats": "ashby",
+        "board": "example-co", "mode": "auto", "discovery": "feed",
+        "employer_domain": "example-co.co.uk", "homepage": HOME,
+        "aliases": [], "source_id": "uk_feed",
+        "admitted_at": NOW.isoformat(), "last_relevant_at": NOW.isoformat(),
+        "login_secret": "placeholder-secret",
+    }
+    with pytest.raises(funding.FundingRefusal):
+        state.save()
+    assert not path.exists()
+
+
+def test_atomic_save_failure_keeps_existing_valid_state(tmp_path, monkeypatch):
+    path = tmp_path / "funded-watchlist.yaml"
+    ledger = funding.State(path)
+    ledger.save()
+    before = path.read_bytes()
+    ledger.data["deals"]["test"] = {"status": "retryable", "seen_at": NOW.isoformat()}
+    def explode(*_args, **_kwargs):
+        raise OSError("injected replace failure")
+    monkeypatch.setattr(funding.os, "replace", explode)
+    with pytest.raises(OSError):
+        ledger.save()
+    assert path.read_bytes() == before
+    assert funding.State(path).data["deals"] == {}
+
+
+def test_worst_case_model_budget_persists_through_crash(tmp_path):
+    cfg = settings(tmp_path)
+    cfg.funding_daily_extraction_calls = 1
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    article = {"key": "synthetic", "title": "Seed round",
+               "text": "London fintech company raises seed funding"}
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("synthetic model crash")
+    with pytest.raises(RuntimeError):
+        funding._extract_batch([article], state, cfg, NOW, extractor=crash)
+    restarted = funding.State(path)
+    assert restarted.data["budgets"]["day_calls"] == 1
+    assert restarted.data["budgets"]["week_tokens"] > 0
+    with pytest.raises(funding.FundingRefusal):
+        funding._extract_batch([article], restarted, cfg, NOW, extractor=crash)
+
+
+def test_no_relevant_opening_stays_pending_for_weekly_recheck(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes(keep_opening=False))
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert not state.data["active"]
+    assert len(state.data["pending"]) == 1
+    pending = next(iter(state.data["pending"].values()))
+    assert pending["employer_domain"] == "example-co.co.uk"
+    assert funding._date(pending["next_check"]) >= NOW + timedelta(days=6)
+    cfg.funding_enabled = False
+    assert funding.active_watchlist(cfg) == []
+
+
+def test_due_pending_promotes_only_after_fresh_source_and_consumer_proof(tmp_path):
+    cfg = settings(tmp_path)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    key = "synthetic-verified-pending"
+    state.data["pending"][key] = {
+        "name": "example-co", "homepage": HOME,
+        "employer_domain": "example-co.co.uk", "source": "uk_feed",
+        "reason": "no_openings",
+        "seen_at": (NOW - timedelta(days=7)).isoformat(),
+        "next_check": (NOW - timedelta(hours=1)).isoformat(),
+        "expires": (NOW + timedelta(days=53)).isoformat(),
+    }
+    state.data["deals"][key] = {
+        "status": "pending", "reason": "no_openings", "source": "uk_feed",
+        "seen_at": NOW.isoformat(),
+    }
+    state.save()
+    client = OfflineClient(routes())
+    funding._recheck_pending(
+        state, cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs,
+    )
+    assert key in state.data["active"]
+    assert key not in state.data["pending"]
+    assert state.data["deals"][key]["status"] == "active"
+
+
+def test_greenhouse_wrapper_remains_guard_not_proven(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
+    cfg = settings(tmp_path)
+    fake = routes()
+    fake[HOME] = b"""<html><body>example-co fintech careers
+    <a href="https://job-boards.greenhouse.io/example-co">Jobs</a></body></html>"""
+    client = OfflineClient(fake)
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert not state.data["active"]
+    assert len(state.data["pending"]) == 1
+    assert next(iter(state.data["pending"].values()))["reason"] == "guard_not_proven"
+
+
+def test_source_304_and_partial_replay_cannot_hide_retryable_article(tmp_path):
+    cfg = settings(tmp_path)
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+    state.data["feeds"]["uk_feed"] = {"etag": '"synthetic-v1"', "last_modified": ""}
+    state.data["articles"]["retry"] = {"status": "retryable", "source": "uk_feed",
+                                          "seen_at": NOW.isoformat()}
+    state.save()
+    client = OfflineClient({SOURCE: fixture("rss_uk.xml")})
+    items, status = funding._source_payload(
+        funding._manifest(cfg)["sources"][0], state, client, NOW)
+    assert items and status == "fetched"
+    assert not client.calls[0][1], "Unfinished feeds must bypass stale ETag 304"
+    no_work = OfflineClient({SOURCE: (304, b"")})
+    state.data["articles"].clear()
+    state.save()
+    items, status = funding._source_payload(
+        funding._manifest(cfg)["sources"][0], state, no_work, NOW)
+    assert items == [] and status == "not_modified"
+
+
+def test_multi_deal_plan_persists_first_child_even_when_second_retries(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
+    cfg = settings(tmp_path)
+    fake = routes()
+    fake[SOURCE] = fixture("rss_multi.xml")
+    fake["https://news.example.com/two-deals"] = fixture("article_multi.html")
+    client = OfflineClient(fake)
+    seen_extractions = []
+    def multi(prompt, *, max_tokens):
+        seen_extractions.append(1)
+        ids = re.findall(r'"id":"([0-9a-f]{32})"', prompt)
+        return {"articles": [{"id": k, "deals": [
+            {"issuer": name, "stage": "seed", "date": "2026-11-18",
+             "sector": "fintech", "region": "uk", "remote_first": False}
+            for name in ("example-co", "OtherCo")
+        ]} for k in ids]}
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=multi, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert len(state.data["active"]) == 1
+    assert len(state.data["deals"]) == 2
+    article = next(iter(state.data["articles"].values()))
+    assert article["status"] == "retryable" and len(article["children"]) == 2
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=lambda *_args, **_kwargs: pytest.fail("re-extracted persisted plan"),
+                      relevance_fn=lambda jobs, prefs: jobs)
+    assert len(seen_extractions) == 1
+    assert len(funding.State(tmp_path / "local" / "funded-watchlist.yaml").data["active"]) == 1
+
+
+def test_read_only_legacy_guards_are_reused(tmp_path):
+    from core.models import JobRecord
+    from discovery.canonical_job_url import admit_feed, source_bound
+    from discovery.watchlist import CompanyConfig
+
+    co = CompanyConfig(name="example-co", careers_url=BOARD, ats="ashby", board="example-co")
+    job = JobRecord(
+        company="example-co", ats="ashby", job_id="123e4567-e89b-42d3-a456-426614174000",
+        title="Software Engineer", jd_url=BOARD + "/123e4567-e89b-42d3-a456-426614174000",
+        jd_text="Synthetic posting",
+    )
+    assert source_bound(co, co)
+    accepted, refused = admit_feed(co, co, [job])
+    assert len(accepted) == 1 and not refused
+    wrapper = CompanyConfig(name="example-co",
+                            careers_url="https://example-co.co.uk/careers")
+    rejected, refused = admit_feed(co, wrapper, [job])
+    assert not rejected and refused
+
+
+def test_psl_bundled_offline_and_unknown_suffix_fails_closed():
+    assert funding.registrable("https://jobs.example-co.co.uk") == "example-co.co.uk"
+    assert funding.registrable("https://example-co.com") == "example-co.com"
+    assert funding.registrable("https://example-co.unknownsuffix") is None
+    assert funding.registrable("http://example-co.com") is None
+
+
+@pytest.mark.parametrize("url", [
+    "http://example.com", "https://test@other.com/jobs",
+    "https://localhost/jobs", "https://example.com:8443/jobs",
+    "https://example.com/%00", "https://example.com/../private",
+])
+def test_unsafe_origins_cannot_provide_authority(url):
+    if url == "https://example.com/%00" or url == "https://example.com/../private":
+        # URL path validation belongs to the canonical posting guard; connect
+        # authority validation here guarantees HTTPS host and port.
+        assert funding._safe_url(url)[0] == "example.com"
+    else:
+        with pytest.raises(funding.FundingRefusal):
+            funding._safe_url(url)
+
+
+def test_connect_time_dns_rebinding_refuses_all_private_addresses(monkeypatch):
+    calls = []
+    def changing_dns(host, port, *, type):
+        calls.append(host)
+        ip = "93.184.216.34" if len(calls) == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+    monkeypatch.setattr(funding.socket, "getaddrinfo", changing_dns)
+    assert funding._public_addresses("example.com", 443)
+    with pytest.raises(funding.FundingRefusal, match="nonpublic_connect_address"):
+        funding._SafeTLS("example.com", timeout=1).connect()
+    assert len(calls) == 2
+
+
+def test_sec_index_only_primary_doc_and_no_filing_person_data(tmp_path):
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+    cfg = settings(tmp_path)
+    client = OfflineClient({
+        SEC_INDEX: fixture("sec_index.html"),
+        SEC_DOC: fixture("sec_primary_doc.xml"),
+    })
+    source = {"id": "sec_test"}
+    article = {"key": "synthetic-sec", "url": SEC_INDEX}
+    funding._sec_proxy(source, article, state, client, NOW)
+    row = next(iter(state.data["deals"].values()))
+    assert row["status"] == "unresolved"
+    assert row["reason"] == "sec_unverified_offering_proxy"
+    assert row["offering_amount_proxy"] == "3000000"
+    assert "officer" not in yaml.safe_dump(state.data).lower()
+    assert "user-agent" not in yaml.safe_dump(state.data).lower()
+    bad = OfflineClient({SEC_DOC: fixture("sec_pooled.xml")})
+    funding._sec_proxy(source, {"key": "other", "url": SEC_DOC}, state, bad, NOW)
+    assert sorted(x["status"] for x in state.data["deals"].values()) == ["rejected", "unresolved"]
+
+
+def test_yc_cohort_is_not_funding_round_evidence(tmp_path):
+    cfg = settings(tmp_path)
+    item = funding._manifest(cfg)["sources"][0]
+    item = {**item, "kind": "yc_json"}
+    client = OfflineClient({SOURCE: fixture("yc.json")})
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+    records, status = funding._source_payload(item, state, client, NOW)
+    assert records == [] and status == "yc_not_round_evidence"
+
+
+def test_eligible_region_and_round_requires_independent_evidence():
+    assert funding._regions("fintech in London", {"uk"}) == {"uk"}
+    assert funding._regions("unknown", {"uk"}) == set()
+    assert funding._regions("remote-first", {"remote-first-anywhere"}) == {
+        "remote-first-anywhere"}
+    assert funding._fresh("2026-11-18", NOW, 30)
+    assert not funding._fresh("2025-02-18", NOW, 30)
+    assert not funding._fresh("2030-02-18", NOW, 30)
