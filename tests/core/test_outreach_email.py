@@ -216,3 +216,49 @@ def test_pixel_ingress_unverified_still_sends_without_tracking(tmp_path, monkeyp
     message = [x[1] for x in calls if x[0] == "message"][0]
     assert message.get_body(preferencelist=("html",)) is None
     assert "pixel" not in message.get_body(preferencelist=("plain",)).get_content().lower()
+
+
+def test_private_approved_funding_quote_requires_exact_public_witness(tmp_path, monkeypatch):
+    """No live article fetch: the verified source and forged source are fakes."""
+    from core import outreach_email as mail
+    lead = FundedNoOpening(
+        "a" * 32, "Example Co", "example-co.com",
+        "https://example-co.com", (), "synthetic",
+        datetime(2026, 11, 20, tzinfo=UTC), "no_openings")
+    contact = VerifiedRecipient("test@example-co.com", "name:test user",
+                                "Test User", "person", "https://example-co.com/team")
+    quote = "Example Co raised a seed round."
+    source_url = "https://news.example.test/example-co-seed"
+    proof = {"company_id": lead.company_id, "source_url": source_url, "quote": quote}
+    proof["sha256"] = hashlib.sha256(json.dumps(
+        proof, sort_keys=True, ensure_ascii=True,
+        separators=(",", ":")).encode()).hexdigest()
+    private = tmp_path / "fact.json"
+    private.write_text(json.dumps(proof))
+    private.chmod(0o600)
+    settings = SimpleNamespace(local_dir=str(tmp_path),
+                               outreach_funding_fact_manifest=private.name)
+    calls = []
+    monkeypatch.setattr(mail, "_official_page", lambda *_args: (
+        calls.append("article") or source_url,
+        "<article>Example Co raised a seed round.</article>"))
+    verified = mail.verified_funding_fact(
+        settings, lead, datetime(2026, 11, 20, tzinfo=UTC))
+    item = {"subject": "Hello {first_name}",
+            "body": "Our interest follows this announcement: {funding_fact} "
+                    "I work in {role_family} at {company_name}.",
+            "role_family": "product management"}
+    assert quote in mail.render_approved(item, lead, contact, funding_fact=verified)[1]
+    assert calls == ["article"]
+    with pytest.raises(OutreachHold, match="verified_funding_fact_or_approved_generic"):
+        mail.render_approved(item, lead, contact)
+    generic = {**item, "body": "Hello {first_name}, I work in {role_family}."}
+    assert "I work in" in mail.render_approved(generic, lead, contact)[1]
+    # A forged fact on a different page is not independently corroborated.
+    monkeypatch.setattr(mail, "_official_page", lambda *_args: (
+        source_url, "<article>Unrelated synthetic announcement.</article>"))
+    with pytest.raises(OutreachHold, match="verified_private_funding_fact_required"):
+        mail.verified_funding_fact(settings, lead, datetime(2026, 11, 20, tzinfo=UTC))
+    private.write_text(json.dumps({**proof, "quote": "Example Co raised $999 billion."}))
+    with pytest.raises(OutreachHold, match="verified_private_funding_fact_required"):
+        mail.verified_funding_fact(settings, lead, datetime(2026, 11, 20, tzinfo=UTC))
