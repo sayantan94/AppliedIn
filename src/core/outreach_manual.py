@@ -116,7 +116,7 @@ def queue_target(*, settings, company_id: str, channel: str, target_url: str,
             # to that person. Only text of the exact published target anchor
             # proves the identity; icon-only links remain provisional slots.
             labels = links.labels.get(target_url, [])
-            if any(re.search(r"(?<!\\w)" + re.escape(key[5:]) + r"(?!\\w)",
+            if any(re.search(r"(?<!\w)" + re.escape(key[5:]) + r"(?!\w)",
                              label) for label in labels):
                 identity, verified_name = key, person_name.strip()
         except ContactHold:
