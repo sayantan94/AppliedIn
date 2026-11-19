@@ -158,3 +158,15 @@ def test_company_day_one_ramp_5_including_pending(tmp_path):
         reserve(db, lead(chr(97+i)), contact("Test User"))
     with pytest.raises(OutreachHold, match="daily_ramp"):
         reserve(db, lead("f"), contact("Test User"))
+
+
+def test_failed_imap_pass_revokes_earlier_fresh_poll(tmp_path):
+    """A recent successful poll is not enough after a later failed pass."""
+    db = Ledger(settings(tmp_path))
+    poll(db)
+    db.invalidate_poll()
+    with pytest.raises(OutreachHold, match="inbound_poll_required"):
+        reserve(db, lead("a"), contact("Test User"))
+    poll(db)
+    ticket = reserve(db, lead("a"), contact("Test User"))
+    assert ticket["stage"] == 0
