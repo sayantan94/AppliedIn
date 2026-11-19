@@ -257,6 +257,21 @@ class Settings(BaseSettings):
     funding_pending_days: int = 60
     funding_active_days: int = 90
 
+    # #387 slice A: private, local, opt-in email only. No pixel/manual/ATS lane.
+    outreach_enabled: bool = False
+    outreach_timezone: str = "UTC"
+    outreach_sender: str = ""
+    outreach_sender_authorized: bool = False
+    outreach_inbound_verified: bool = False
+    outreach_linkedin_path: str = ""
+    outreach_linkedin_fields: str = ""
+    outreach_approvals_file: str = "outreach-approved-templates.json"
+    outreach_smtp_host: str = ""
+    outreach_smtp_port: int = 465
+    outreach_smtp_username: str = ""
+    outreach_smtp_password: str = ""
+    outreach_dsn_sender_addresses: str = ""
+
     aws_region: str = "us-east-1"
 
 

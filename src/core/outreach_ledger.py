@@ -50,7 +50,7 @@ class Ledger:
         if self.path.is_symlink():
             raise OutreachHold("unsafe_private_ledger_path")
         with self._tx() as db:
-            db.executescript("""
+            for statement in """
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS people (
                     company_id TEXT NOT NULL, person_key TEXT NOT NULL,
@@ -84,7 +84,9 @@ class Ledger:
                     company_id TEXT NOT NULL, person_key TEXT NOT NULL,
                     stage INTEGER NOT NULL, due_at REAL NOT NULL,
                     PRIMARY KEY(company_id, person_key, stage));
-            """)
+            """.split(";"):
+                if statement.strip():
+                    db.execute(statement)
         os.chmod(self.path, 0o600)
 
     @contextmanager
