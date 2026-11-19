@@ -546,9 +546,17 @@ def ready(settings=None) -> bool:
 def _source_payload(source: dict, state: State, client: GuardedClient, now) -> tuple[list[dict], str]:
     sid = source["id"]
     meta = state.data["feeds"].get(sid, {})
-    headers = {key: value for key, value in
-               (("If-None-Match", meta.get("etag", "")),
-                ("If-Modified-Since", meta.get("last_modified", ""))) if value}
+    # When a previous pass stopped mid-article, a 304 must not hide that
+    # unfinished work on the next pass. Fetch an ordinary body for replay.
+    needs_replay = any(isinstance(v, dict) and v.get("source") == sid
+                       and v.get("status") in ("retryable", "processing")
+                       for v in state.data["articles"].values())
+    headers = {} if needs_replay else {
+        key: value for key, value in (
+            ("If-None-Match", meta.get("etag", "")),
+            ("If-Modified-Since", meta.get("last_modified", ""))
+        ) if value
+    }
     if source["kind"] == "sec_atom" and not client.settings.funding_sec_user_agent:
         raise FundingRefusal("sec_user_agent_missing")
     resp = client.get(source["url"], headers=headers, follow_redirects=True)
@@ -837,36 +845,51 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                                        "html": html, "url": item["url"]})
                 except (FundingRefusal, httpx.HTTPError):
                     state.data["articles"][item["key"]] = {
-                        "status": "retryable", "seen_at": now.isoformat()}
+                        "status": "retryable", "source": sid,
+                        "seen_at": now.isoformat()}
                     state.save()
                     state.count(sid, "article_unavailable", now)
         except (FundingRefusal, httpx.HTTPError, OSError, ValueError):
             state.count(sid, "source_error", now)
     for index in range(0, len(candidates), 4):
         batch = candidates[index:index + 4]
+        unplanned = [a for a in batch if not isinstance(
+            state.data["articles"].get(a["key"], {}).get("children"), list)]
         try:
-            extracted = _extract_batch(batch, state, settings, now, extractor=extractor)
+            extracted = (_extract_batch(unplanned, state, settings, now,
+                                        extractor=extractor) if unplanned else {})
         except Exception:  # LLM failures consume the pre-call reservation
-            for item in batch:
+            for item in unplanned:
                 state.data["articles"][item["key"]] = {
-                    "status": "retryable", "seen_at": now.isoformat()}
+                    "status": "retryable", "source": item["source"],
+                    "seen_at": now.isoformat()}
             state.save()
             state.count(batch[0]["source"], "extraction_deferred", now)
             continue
         for article in batch:
-            children = extracted.get(article["key"])
+            saved = state.data["articles"].get(article["key"], {})
+            children = saved.get("children") if isinstance(saved.get("children"), list) else (
+                extracted.get(article["key"]))
             if children is None:
                 state.data["articles"][article["key"]] = {
-                    "status": "retryable", "seen_at": now.isoformat()}
+                    "status": "retryable", "source": article["source"],
+                    "seen_at": now.isoformat()}
                 state.save()
                 continue
+            # Preserve the exact extracted child plan before processing ANY
+            # child. Restart replays this plan rather than model drift.
+            state.data["articles"][article["key"]] = {
+                "status": "processing", "source": article["source"],
+                "seen_at": now.isoformat(), "children": children}
+            state.save()
             every_persisted = True
             for deal in children:
                 issuer = deal.get("issuer", "") if isinstance(deal, dict) else ""
                 stage = deal.get("stage", "") if isinstance(deal, dict) else ""
                 announced = deal.get("date", "") if isinstance(deal, dict) else ""
                 if not all(isinstance(x, str) and x.strip() for x in (issuer, stage, announced)):
-                    key = _key(article["source"], article["key"], "ambiguous", len(state.data["unresolved"]))
+                    key = _key(article["source"], article["key"], "ambiguous",
+                               json.dumps(deal, sort_keys=True, default=str)[:512])
                     state.data["unresolved"][key] = {
                         "status": "retryable", "reason": "ambiguous_child_id",
                         "seen_at": now.isoformat()}
@@ -912,7 +935,8 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     every_persisted = False
             state.data["articles"][article["key"]] = {
                 "status": "complete" if every_persisted else "retryable",
-                "seen_at": now.isoformat()}
+                "source": article["source"], "seen_at": now.isoformat(),
+                **({} if every_persisted else {"children": children})}
             state.save()
     # Unproductive entries can age out, but manual watchlist is never touched.
     for key, row in list(state.data["active"].items()):
