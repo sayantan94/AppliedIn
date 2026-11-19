@@ -237,6 +237,26 @@ class Settings(BaseSettings):
     # Filesystem: where bundled config (watchlist/preferences) lives at runtime.
     config_dir: str = "config"
 
+    # #386: a separate, explicitly local and default-off funding discovery lane.
+    # The SEC identity is provided in private APPLIEDIN_FUNDING_SEC_USER_AGENT,
+    # never committed to config or serialized into the funding state.
+    funding_enabled: bool = False
+    funding_poll_hours: int = 5
+    funding_sec_user_agent: str = ""
+    funding_eligible_days: int = 30
+    funding_daily_extraction_calls: int = 8
+    funding_weekly_extraction_tokens: int = 100_000
+    funding_extract_max_output_tokens: int = 1200
+    funding_daily_new_companies: int = 10
+    funding_daily_http: int = 120
+    funding_max_http_per_pass: int = 60
+    funding_max_candidates_per_pass: int = 20
+    funding_max_postings_per_pass: int = 12
+    funding_daily_relevance_calls: int = 12
+    funding_recheck_days: int = 7
+    funding_pending_days: int = 60
+    funding_active_days: int = 90
+
     aws_region: str = "us-east-1"
 
 
