@@ -574,7 +574,7 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
     # When a previous pass stopped mid-article, a 304 must not hide that
     # unfinished work on the next pass. Fetch an ordinary body for replay.
     needs_replay = any(isinstance(v, dict) and v.get("source") == sid
-                       and v.get("status") in ("retryable", "processing")
+                       and v.get("status") in ("queued", "retryable", "processing")
                        for v in state.data["articles"].values())
     headers = {} if needs_replay else {
         key: value for key, value in (
@@ -588,12 +588,11 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
     if resp.status_code == 304:
         return [], "not_modified"
     resp.raise_for_status()
-    state.data["feeds"][sid] = {
+    next_cursor = {
         "etag": resp.headers.get("etag", "")[:256],
         "last_modified": resp.headers.get("last-modified", "")[:128],
         "last_fetch": now.isoformat(),
     }
-    state.save()
     if source["kind"] == "yc_json":
         # YC cohort membership, recent changes and hiring are enrichment only.
         try:
@@ -602,11 +601,21 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
                 raise ValueError("wrong shape")
         except ValueError as exc:
             raise FundingRefusal("invalid_yc_json") from exc
+        state.data["feeds"][sid] = next_cursor
+        state.save()
         return [], "yc_not_round_evidence"
     kind = "atom" if source["kind"] in {"atom", "sec_atom"} else "rss"
     items = _rss_items(resp.content, kind)
     for item in items:
         item["key"] = _key(sid, item["key"])
+        if item["key"] not in state.data["articles"]:
+            state.data["articles"][item["key"]] = {
+                "status": "queued", "source": sid, "seen_at": now.isoformat()}
+    # Cursor and unacknowledged article keys must become durable in ONE
+    # replacement. A crash cannot advance an ETag while leaving no replay
+    # witness for an article not yet evaluated.
+    state.data["feeds"][sid] = next_cursor
+    state.save()
     return items, "fetched"
 
 
@@ -641,9 +650,16 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
     # The Atom list has no issuer site and no round label. Only the filing
     # metadata relevant to sector/amount is touched, never officer/contact nodes.
     key = _key(source["id"], article["key"])
-    if key in state.data["deals"]:
+    previous = state.data["deals"].get(key, {})
+    if previous.get("status") in ("unresolved", "rejected"):
+        state.data["articles"][article["key"]] = {
+            "status": "complete", "source": source["id"],
+            "seen_at": now.isoformat()}
+        state.save()
         state.count(source["id"], "duplicate", now)
         return
+    # A previous SEC document fetch may have failed transiently. A durable
+    # retryable child is not a terminal duplicate and must be attempted again.
     try:
         # SEC Atom links commonly point to a filing index. Select the exact
         # primary_doc.xml link in that filing's own document listing.
@@ -674,6 +690,10 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
         state.data["deals"][key] = {
             "status": "retryable", "reason": "sec_document_unavailable",
             "seen_at": now.isoformat(), "source": source["id"]}
+    state.data["articles"][article["key"]] = {
+        "status": ("retryable" if state.data["deals"][key]["status"] == "retryable"
+                   else "complete"), "source": source["id"],
+        "seen_at": now.isoformat()}
     state.save()
     state.count(source["id"], state.data["deals"][key]["reason"], now)
     state.count(source["id"], "deal_" + state.data["deals"][key]["status"], now)
@@ -1011,6 +1031,13 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
             state.count(sid, status, now)
             for item in items:
                 if source["kind"] == "sec_atom":
+                    if not _fresh(item["date"], now, settings.funding_eligible_days):
+                        state.data["articles"][item["key"]] = {
+                            "status": "complete", "source": sid,
+                            "seen_at": now.isoformat()}
+                        state.save()
+                        state.count(sid, "stale", now)
+                        continue
                     _sec_proxy(source, item, state, client, now)
                     continue
                 if item["key"] in state.data["articles"] and state.data["articles"][item["key"]].get(
@@ -1018,12 +1045,24 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.count(sid, "duplicate", now)
                     continue
                 if not _fresh(item["date"], now, settings.funding_eligible_days):
+                    state.data["articles"][item["key"]] = {
+                        "status": "complete", "source": sid,
+                        "seen_at": now.isoformat()}
+                    state.save()
                     state.count(sid, "stale", now)
                     continue
                 if not _FUNDING.search(item["title"]) or _BLOCKED_SECTOR.search(item["title"]):
+                    state.data["articles"][item["key"]] = {
+                        "status": "complete", "source": sid,
+                        "seen_at": now.isoformat()}
+                    state.save()
                     state.count(sid, "cheap_filtered", now)
                     continue
                 if len(candidates) >= settings.funding_max_candidates_per_pass:
+                    state.data["articles"][item["key"]] = {
+                        "status": "retryable", "source": sid,
+                        "seen_at": now.isoformat()}
+                    state.save()
                     state.count(sid, "candidate_deferred", now)
                     continue
                 try:
