@@ -1,5 +1,5 @@
-# Public candidate sources for #386. ALL DISABLED: no source has been
-# authorized by live 1-2-item schema/freshness/terms reconnaissance yet.
+# Public candidate sources for #386, audited in #389. All remain disabled:
+# no source passed capture, rights and unchanged-reader replay requirements.
 # Region here is a source hint, not proof of a company's actual location.
 # Remote-first requires independent employer evidence; unknown != remote.
 version: 1
@@ -9,109 +9,131 @@ sources:
     kind: rss
     region: eu
     url: "https://www.eu-startups.com/category/fundin/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: tech_funding_news
     kind: rss
     region: uk
     url: "https://techfundingnews.com/category/funding/feed/"
+    # disabled: terms disallow automated access; feed XML unavailable and replay unverified
     enabled: false
   - id: uktn
     kind: rss
     region: uk
     url: "https://www.uktech.news/vc-funding/feed"
+    # disabled: configured feed inaccessible to inspection transport; schema, rights and replay unverified
     enabled: false
   - id: tech_eu
     kind: rss
     region: eu
     url: "https://tech.eu/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: inc42
     kind: rss
     region: india
     url: "https://inc42.com/feed/"
+    # disabled: configured feed inaccessible to inspection transport; schema, rights and replay unverified
     enabled: false
   - id: startup_daily
     kind: rss
     region: australia
     url: "https://www.startupdaily.net/feed"
+    # disabled: feed XML unavailable; published terms do not establish automated ingestion rights
     enabled: false
   - id: smart_company
     kind: rss
     region: australia
     url: "https://www.smartcompany.com.au/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: business_wire
     kind: rss
     region: usa
     url: "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeEFtRXw=="
+    # disabled: configured feed inaccessible to inspection transport; schema, rights and replay unverified
     enabled: false
   - id: saas_news
     kind: rss
     region: usa
     url: "https://thesaasnews.com/feed"
+    # disabled: published terms restrict scraping and automation without consent; no permission shown
     enabled: false
   - id: finsmes
     kind: rss
     region: usa
     url: "https://finsmes.com/feed"
+    # disabled: configured feed returned 403 to inspection transport; schema, rights and replay unverified
     enabled: false
   - id: tech_startups
     kind: rss
     region: usa
     url: "https://techstartups.com/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: techcrunch
     kind: rss
     region: usa
     url: "https://techcrunch.com/category/startups/feed/"
+    # disabled: RSS terms allow attributed display only; article ingestion rights and replay unverified
     enabled: false
   - id: pr_news_wire
     kind: rss
     region: usa
     url: "https://www.prnewswire.com/rss/financial-services-latest-news/venture-capital-list.rss"
+    # disabled: feed XML unavailable to inspection transport (XML type rejected); rights and replay unverified
     enabled: false
   - id: mena_startup_digest
     kind: rss
     region: gcc
     url: "https://menastartupdigest.com/category/funding/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: wamda
     kind: rss
     region: gcc
     url: "https://www.wamda.com/feed/"
+    # disabled: configured feed inaccessible to inspection transport; schema, rights and replay unverified
     enabled: false
   - id: fintech_news_me
     kind: rss
     region: uae
     url: "https://fintechnews.ae/feed"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: anecdoted
     kind: rss
     region: gcc
     url: "https://www.anecdoted.com/rss.xml"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: techscoop
     kind: rss
     region: gcc
     url: "https://techscoop.io/rss.xml"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: menabytes
     kind: rss
     region: gcc
     url: "https://www.menabytes.com/feed/"
+    # disabled: feed XML unavailable to inspection transport (RSS type rejected); rights and replay unverified
     enabled: false
   - id: yc_oss_all
     kind: yc_json
     region: usa
     url: "https://yc-oss.github.io/api/companies/all.json"
+    # disabled: yc_not_round_evidence
     enabled: false
   - id: yc_oss_changes
     kind: yc_json
     region: usa
     url: "https://yc-oss.github.io/api/companies/changes/latest.json"
+    # disabled: yc_not_round_evidence
     enabled: false
   - id: sec_form_d
     kind: sec_atom
     region: usa
     url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=D&company=&dateb=&owner=include&start=0&count=40&output=atom"
+    # disabled: private compliant SEC User-Agent unavailable; Atom/primary filing replay unverified
     enabled: false
