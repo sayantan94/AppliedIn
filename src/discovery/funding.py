@@ -651,7 +651,11 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
         xml = _xml(client.get(url, follow_redirects=True).content)
         industry = _node_text(xml, "industryGroupType")
         fund = any(e.tag.rsplit("}", 1)[-1] == "investmentFundInfo" for e in xml.iter())
-        issuer = _node_text(xml, "entityName")
+        # Only the primary issuer can supply the company identity. Never
+        # accept a similarly named related-person or third-party field.
+        primary = next((e for e in xml.iter()
+                        if e.tag.rsplit("}", 1)[-1] == "primaryIssuer"), None)
+        issuer = _node_text(primary, "entityName") if primary is not None else ""
         amount = _node_text(xml, "totalOfferingAmount")
         if fund or industry.casefold() == "pooled investment fund" or "real estate" in industry.casefold():
             reason = "sec_excluded_fund_or_real_estate"
@@ -672,6 +676,7 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
             "seen_at": now.isoformat(), "source": source["id"]}
     state.save()
     state.count(source["id"], state.data["deals"][key]["reason"], now)
+    state.count(source["id"], "deal_" + state.data["deals"][key]["status"], now)
 
 
 def _extract_batch(articles: list[dict], state: State, settings, now, *, extractor=None) -> dict:
@@ -842,6 +847,7 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
         return "consumer_guard_refused", None
     if not approved:
         return "no_openings", None
+    state.count(source_id, "source_and_consumer_proved", now)
     if not state.reserve(now, "day_relevance", 1, settings.funding_daily_relevance_calls):
         return "relevance_budget", None
     if relevance_fn is None:
@@ -928,6 +934,7 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     # A news writer calling a business remote-first is not independent proof.
     if remote_exception and not _REMOTE.search(homepage_text):
         return "remote_first_not_employer_evidenced", None, None
+    state.count(article["source"], "verified_homepage", now)
     evidence = {"name": issuer, "homepage": homepage, "employer_domain": domain,
                 "source": article["source"], "aliases": proven_aliases}
     reason, active = _preview_verified(
@@ -974,6 +981,7 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
             state.data["deals"][key]["status"] = "active"
             state.data["deals"][key]["reason"] = "recheck_admitted"
             state.count(row["source"], "recheck_admitted", now)
+            state.count(row["source"], "added", now)
         else:
             row["reason"] = reason
             row["next_check"] = (now + timedelta(
@@ -1063,6 +1071,9 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 "status": "processing", "source": article["source"],
                 "seen_at": now.isoformat(), "children": children}
             state.save()
+            if not isinstance(saved.get("children"), list):
+                for _ in children:
+                    state.count(article["source"], "extracted_deal", now)
             every_persisted = True
             for deal in children:
                 issuer = deal.get("issuer", "") if isinstance(deal, dict) else ""
@@ -1117,6 +1128,9 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     "seen_at": now.isoformat()}
                 state.save()  # child A durably acknowledged before child B
                 state.count(article["source"], reason, now)
+                state.count(article["source"], "deal_" + status, now)
+                if status == "active":
+                    state.count(article["source"], "added", now)
                 if status == "retryable":
                     every_persisted = False
             state.data["articles"][article["key"]] = {
@@ -1131,6 +1145,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
         if last and now - last > timedelta(days=settings.funding_active_days):
             del state.data["active"][key]
             state.count(row["source_id"], "auto_expired", now)
+            state.count(row["source_id"], "expired", now)
     for key, row in list(state.data["pending"].items()):
         expiry = _date(row.get("expires", ""))
         if expiry and now >= expiry:
