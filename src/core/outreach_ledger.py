@@ -107,6 +107,9 @@ class Ledger:
                     company_id TEXT NOT NULL, person_key TEXT NOT NULL,
                     stage INTEGER NOT NULL, due_at REAL NOT NULL,
                     PRIMARY KEY(company_id, person_key, stage));
+                CREATE TABLE IF NOT EXISTS expanded_followups (
+                    company_id TEXT NOT NULL, person_key TEXT NOT NULL,
+                    earned_at REAL NOT NULL, PRIMARY KEY(company_id, person_key));
             """.split(";"):
                 if statement.strip():
                     db.execute(statement)
@@ -530,7 +533,11 @@ class Ledger:
 
     @staticmethod
     def _ever_qualified_three(db, company_id, person_key):
-        """An earlier earned 3-open expansion survives later low-open sends."""
+        """Persisted expansion never resets when old diagnostic opens expire."""
+        if db.execute(
+                "SELECT 1 FROM expanded_followups WHERE company_id=? AND person_key=?",
+                (company_id, person_key)).fetchone():
+            return True
         row = db.execute("""
             SELECT 1 FROM pixel_events e
               JOIN pixel_tokens t ON t.token_sha=e.token_sha
@@ -540,6 +547,9 @@ class Ledger:
               AND e.classification='qualified'
             GROUP BY a.id HAVING COUNT(*)>=3 LIMIT 1
         """, (company_id, person_key)).fetchone()
+        if row is not None:
+            db.execute("INSERT OR IGNORE INTO expanded_followups VALUES (?,?,?)",
+                       (company_id, person_key, datetime.now(UTC).timestamp()))
         return row is not None
 
     @staticmethod
@@ -599,6 +609,20 @@ class Ledger:
             db.execute("INSERT OR IGNORE INTO pixel_events VALUES (?,?,?,?)",
                        (digest, now.timestamp(), int(now.timestamp() // 86400),
                         classification))
+            if classification == "qualified":
+                qualified = db.execute(
+                    "SELECT COUNT(*) FROM pixel_events WHERE token_sha=? "
+                    "AND classification='qualified'", (digest,)).fetchone()[0]
+                if qualified >= 3:
+                    accepted = db.execute("""
+                        SELECT a.company_id,a.person_key FROM attempts a
+                        JOIN pixel_tokens t ON t.attempt_id=a.id
+                        WHERE t.token_sha=? AND a.state='confirmed_smtp_accepted'
+                    """, (digest,)).fetchone()
+                    if accepted is not None:
+                        db.execute(
+                            "INSERT OR IGNORE INTO expanded_followups VALUES (?,?,?)",
+                            (*accepted, now.timestamp()))
             # Bound diagnostics while retaining enough for follow-up schedules.
             db.execute("DELETE FROM pixel_events WHERE observed_at<?",
                        ((now - timedelta(days=90)).timestamp(),))
