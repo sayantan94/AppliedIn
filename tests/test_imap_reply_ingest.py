@@ -100,7 +100,8 @@ def test_source_has_only_the_readonly_imap_import():
         if "import smtplib" in text or "from smtplib" in text:
             smtp_imports.append(path.relative_to(root).as_posix())
     assert imap_imports == ["core/imap_readonly.py"]
-    assert smtp_imports == []
+    # #387 slice A adds the sole reviewed SMTP boundary, not another IMAP reader.
+    assert smtp_imports == ["core/outreach_email.py"]
 
 
 def test_cloud_mode_never_constructs_transport_or_secrets_backend(monkeypatch):
@@ -881,3 +882,87 @@ def test_legacy_unknown_uidvalidity_has_no_commit_or_cursor_authority(tmp_path, 
                                     classifier=lambda *_: "other") == 0
     assert unknown.queries == [] and unknown.fetched == []
     assert json.loads(path.read_text()) == original
+
+
+def _synthetic_outreach_ticket(tmp_path):
+    """Private local synthetic setup; no IMAP or SMTP connection is constructed."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from core.outreach_contacts import LinkedInSnapshot, VerifiedRecipient
+    from core.outreach_sources import FundedNoOpening
+    from core.outreach_ledger import Ledger
+
+    now = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    s = SimpleNamespace(mode="local", outreach_enabled=True,
+                        outreach_timezone="UTC", local_dir=str(tmp_path),
+                        outreach_sender="sender@example-co.com",
+                        outreach_provider_dsn_verified=True,
+                        outreach_dsn_sender_addresses="mailer-daemon@example-co.com")
+    ledger = Ledger(s)
+    ledger.record_successful_poll(uidvalidity="7",
+                                  monitored_address=s.outreach_sender, now=now)
+    lead = FundedNoOpening("a"*32, "Example Co", "example-co.com",
+                           "https://example-co.com", (), "synthetic",
+                           now, "no_openings")
+    person = VerifiedRecipient("test@example-co.com", "name:test user", "Test User",
+                               "person", "https://example-co.com/team")
+    ticket = ledger.reserve_email(
+        lead, person, LinkedInSnapshot(frozenset(), frozenset()),
+        no_application=True, resume_seed_proved=True, sender_proved=True,
+        variant="approved-v1", digest="b"*64, now=now)
+    ledger.begin_wire(ticket["id"], source_checked=True, no_application=True,
+                      linkedin_checked=True, now=now)
+    ledger.finish_wire(ticket["id"], accepted=True, now=now)
+    return s, ledger, lead, ticket
+
+
+def test_cold_thread_human_reply_records_company_stop(tmp_path):
+    from core.outreach_ledger import OutreachHold
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    headers = (f"From: Test User <test@example-co.com>\r\n"
+               f"To: sender@example-co.com\r\n"
+               f"Message-ID: <reply-one@example-co.com>\r\n"
+               f"In-Reply-To: {ticket['message_id']}\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(
+        ledger, s, headers, b"Please do not contact me.", "7", 11)
+    assert ledger.report(lead.company_id,
+                         __import__("core.outreach_contacts", fromlist=["LinkedInSnapshot"])
+                         .LinkedInSnapshot(frozenset(), frozenset()))["company_stop"] == "opt_out"
+    # Same IMAP UID is idempotent; the new attempt remains forbidden.
+    assert not ledger.record_inbound_uid("7", 11, "matched_human_stop")
+
+
+def test_cold_thread_auto_reply_not_human_and_provider_dsn_must_be_permanent(tmp_path):
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    auto = (f"From: Test User <test@example-co.com>\r\n"
+            f"To: sender@example-co.com\r\n"
+            f"In-Reply-To: {ticket['message_id']}\r\n"
+            f"Auto-Submitted: auto-replied\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(ledger, s, auto, b"Out of office.", "7", 12)
+    assert ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))["company_stop"] is None
+    dsn = (f"From: mailer-daemon@example-co.com\r\n"
+           f"To: sender@example-co.com\r\n"
+           f"Content-Type: multipart/report; report-type=delivery-status\r\n"
+           f"X-Failed-Recipients: test@example-co.com\r\n"
+           f"In-Reply-To: {ticket['message_id']}\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(ledger, s, dsn, b"Status: 4.2.2", "7", 13)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_email_hold"] == "suspected_dsn_needs_review"
+    assert report["global_email_pause"] is False
+
+
+def test_cold_provider_confirmed_permanent_bounce_is_contact_scoped(tmp_path):
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    dsn = (f"From: mailer-daemon@example-co.com\r\n"
+           f"To: sender@example-co.com\r\n"
+           f"Content-Type: multipart/report; report-type=delivery-status\r\n"
+           f"X-Failed-Recipients: test@example-co.com\r\n"
+           f"In-Reply-To: {ticket['message_id']}\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(
+        ledger, s, dsn, b"Final-Recipient: rfc822; test@example-co.com\r\nStatus: 5.1.1",
+        "7", 14)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_email_hold"] == "confirmed_hard_bounce_review_required"
+    assert report["global_email_pause"] is False

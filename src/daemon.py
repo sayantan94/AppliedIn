@@ -720,11 +720,12 @@ def _start_outreach_followups(settings=None) -> bool:
     from core.outreach_ledger import Ledger
 
     settings = settings or get_settings()
-    if (settings.mode != "local" or not settings.outreach_enabled
-            or not settings.outreach_followups_auto):
+    if settings.mode != "local" or not settings.outreach_enabled:
         return False
-    # Crash after SMTP initiation is unknown, never retry automatically.
+    # Reconcile crash-orphan states even if automatic follow-ups are disabled.
     Ledger(settings).hold_orphaned_attempts()
+    if not settings.outreach_followups_auto:
+        return False
     threading.Thread(target=_outreach_followup_loop, daemon=True,
                      name="outreach-followups").start()
     return True
