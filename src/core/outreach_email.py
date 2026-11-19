@@ -117,9 +117,12 @@ def original_seed_pdf(settings):
         pdf_path = _private_file(settings, manifest["pdf_path"], max_bytes=10_000_000)
         if pdf_path.suffix.lower() != ".pdf":
             raise ValueError
-        from agent.run import seed_fingerprint
+        from agent.run import seed_fingerprint, _base_latex
+        # The fingerprint of an absent base.tex is still a nonempty SHA. Never
+        # accept that empty-content hash as a verified original resume seed.
+        base = _base_latex()
         current = seed_fingerprint()
-        if not current or manifest["resume_seed"] != current:
+        if not base.strip() or not current or manifest["resume_seed"] != current:
             raise ValueError
         data = pdf_path.read_bytes()
         if (not data.startswith(b"%PDF-") or not re.fullmatch(r"[a-f0-9]{64}", manifest["sha256"])
@@ -215,6 +218,13 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
             raise OutreachHold("linkedin_duplicate_or_capacity_changed_before_wire")
         if not company_application_clear(stores, lead):
             raise OutreachHold("existing_company_application")
+        # Approval and resume are mutable private files, even though a
+        # previously approved version/digest is immutable. Do not send a stale
+        # rendered message if either approval or original seed changed during
+        # the guarded contact lookup.
+        if (approved_variant(settings, variant_id, kind)["sha256"] != variant["sha256"]
+                or original_seed_pdf(settings) != pdf):
+            raise OutreachHold("approved_variant_or_resume_changed_before_wire")
         ledger.begin_wire(ticket["id"], source_checked=True, no_application=True,
                           linkedin_checked=True, now=prewire_now)
     except Exception:
