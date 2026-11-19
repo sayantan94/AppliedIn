@@ -245,6 +245,16 @@ class Ledger:
                                  "AND state != 'definite_pre_wire_failure'", (day,)).fetchone()[0]
             if charged >= day_cap:
                 raise OutreachHold("email_daily_ramp_or_hard_cap")
+            # An organizational mailbox may be publicly aliased to a named
+            # contact (or two purported names may share one exact address).
+            # Neither an org slot nor a new person key permits a second first
+            # contact to the same actual mailbox. Hold ambiguous overlap.
+            if stage == 0 and db.execute(
+                    "SELECT 1 FROM attempts WHERE company_id=? AND recipient=? "
+                    "AND person_key!=? AND stage=0 "
+                    "AND state!='definite_pre_wire_failure'",
+                    (lead.company_id, contact.address, contact.person_key)).fetchone():
+                raise OutreachHold("recipient_alias_or_org_overlap_requires_review")
             existing = db.execute(
                 "SELECT stage,state,recipient,message_id,accepted_at,id,tracking_mode FROM attempts "
                 "WHERE company_id=? AND person_key=? AND state != 'definite_pre_wire_failure' "
