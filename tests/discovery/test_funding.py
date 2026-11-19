@@ -336,7 +336,7 @@ def test_greenhouse_wrapper_remains_guard_not_proven(tmp_path, monkeypatch):
     monkeypatch.delenv("APPLIEDIN_DISCOVERY", raising=False)
     cfg = settings(tmp_path)
     fake = routes()
-    fake[HOME] = b"""<html><body>example-co fintech careers
+    fake[HOME] = b"""<html><body><h1>example-co</h1> fintech careers
     <a href="https://job-boards.greenhouse.io/example-co">Jobs</a></body></html>"""
     client = OfflineClient(fake)
     funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
@@ -725,7 +725,15 @@ def test_daily_additions_defer_until_next_pass_and_unproductive_active_expires(t
     cfg.funding_eligible_days = 30
     funding.poll_once(
         cfg, now=NOW + timedelta(days=93),
-        client_factory=lambda *_: OfflineClient(routes()),
+        client_factory=lambda *_: OfflineClient(routes(keep_opening=False)),
+        extractor=lambda *_a, **_kw: pytest.fail("expired announcement was re-extracted"),
+        relevance_fn=lambda jobs, prefs: jobs)
+    first_absence = funding.State(path).data["active"]
+    assert len(first_absence) == 1
+    assert next(iter(first_absence.values()))["unproductive_since"]
+    funding.poll_once(
+        cfg, now=NOW + timedelta(days=184),
+        client_factory=lambda *_: OfflineClient(routes(keep_opening=False)),
         extractor=lambda *_a, **_kw: pytest.fail("expired announcement was re-extracted"),
         relevance_fn=lambda jobs, prefs: jobs)
     assert funding.State(path).data["active"] == {}
@@ -891,6 +899,161 @@ def test_feed_rollover_keeps_unacknowledged_deal_link(tmp_path):
         source, restarted, OfflineClient({SOURCE: (304, b"")}), NOW)
     assert none == [] and status == "not_modified"
 
+
+
+
+@pytest.mark.parametrize("body,expected_reason", [
+    (
+        "example-co raised seed funding in Germany; "
+        "OtherCo raised seed fintech financing in London.",
+        "sector_unproved",
+    ),
+    (
+        "example-co raised seed fintech funding in Germany while "
+        "OtherCo raised seed fintech financing in London.",
+        "region_unproved",
+    ),
+    (
+        "example-co raised seed fintech funding in London; "
+        "example-co raised seed fintech funding in Germany.",
+        "region_unproved",
+    ),
+])
+def test_two_issuer_passages_cannot_cross_authorize_sector_or_region(
+        tmp_path, body, expected_reason):
+    cfg = settings(tmp_path)
+    news = funding._article(
+        f'<h1>{body}</h1><a href="{HOME}">example-co</a>')
+    deal = {
+        "issuer": "example-co", "stage": "seed", "date": "2026-11-18",
+        "sector": "fintech", "region": "uk", "remote_first": False,
+    }
+    reason, active, verified = funding._prove_deal(
+        deal, {"source": "uk_feed", "date": "2026-11-18",
+               "text": news.text, "html": news, "url": ARTICLE},
+        funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, OfflineClient({}), NOW)
+    assert (reason, active, verified) == (expected_reason, None, None)
+
+
+def test_portfolio_page_with_valid_ashby_board_is_not_employer_homepage(tmp_path):
+    cfg = settings(tmp_path)
+    portfolio = "https://portfolio.example.org/companies/example-co"
+    news = funding._article(
+        '<h1>example-co raised seed fintech funding in London</h1>'
+        f'<a href="{portfolio}">example-co</a>')
+    outsider_page = (
+        '<h1>Investments in technology</h1>'
+        '<p>Portfolio company example-co is a fintech employer in London.</p>'
+        f'<a href="{BOARD}">example-co jobs</a>'
+    )
+    client = OfflineClient({
+        portfolio: outsider_page,
+        BOARD: fixture("board_ashby.html"),
+        ASHBY_API: fixture("ashby.json"),
+    })
+    deal = {"issuer": "example-co", "stage": "seed",
+            "date": "2026-11-18", "sector": "fintech", "region": "uk"}
+    reason, active, evidence = funding._prove_deal(
+        deal, {"source": "uk_feed", "date": "2026-11-18",
+               "text": news.text, "html": news, "url": ARTICLE},
+        funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == (
+        "employer_homepage_owner_unproved", None, None)
+    assert [url for url, *_ in client.calls] == [portfolio]
+    assert BOARD in client.routes, "the tenant was valid, only homepage proof failed"
+
+
+def test_saturated_source_replays_durable_backlog_across_restarts(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    source = funding._manifest(cfg)["sources"][0]
+    outstanding = []
+    for i in range(500):
+        key = f"{i:032x}"
+        outstanding.append({
+            "key": key,
+            "title": "example-co raises seed fintech funding in London",
+            "date": "2026-11-18",
+            "url": f"https://news.example.com/older-{i}",
+        })
+        state.data["articles"][key] = {
+            "status": "queued", "source": "uk_feed", "seen_at": NOW.isoformat(),
+        }
+    state.data["feeds"]["uk_feed"] = {
+        "etag": '"previous"', "last_modified": "",
+        "last_fetch": NOW.isoformat(), "inflight": outstanding,
+    }
+    state.save()
+    at_capacity = OfflineClient({})
+    replay, status = funding._source_payload(source, state, at_capacity, NOW)
+    assert status == "backlog_deferred" and len(replay) == 500
+    assert at_capacity.calls == [], "drain before fetching an uncheckpointable page"
+    assert funding.State(path).data["feeds"]["uk_feed"]["etag"] == '"previous"'
+
+    latest = b"""<?xml version="1.0"?><rss><channel>
+    <item><guid>new-one</guid><title>OtherCo raises seed funding</title>
+    <link>https://news.example.com/new-one</link>
+    <pubDate>Wed, 18 Nov 2026 12:00:00 GMT</pubDate></item>
+    <item><guid>new-two</guid><title>ThirdCo raises seed funding</title>
+    <link>https://news.example.com/new-two</link>
+    <pubDate>Wed, 18 Nov 2026 12:00:00 GMT</pubDate></item>
+    </channel></rss>"""
+    state.data["articles"][outstanding[0]["key"]]["status"] = "complete"
+    state.save()
+    restarted = funding.State(path)
+    replay, status = funding._source_payload(
+        source, restarted, OfflineClient({SOURCE: latest}), NOW)
+    assert status == "backlog_deferred" and len(replay) == 499
+    assert restarted.data["feeds"]["uk_feed"]["etag"] == '"previous"'
+    assert len(restarted.data["articles"]) == 500
+    restarted.data["articles"][outstanding[1]["key"]]["status"] = "complete"
+    restarted.save()
+    resumed = funding.State(path)
+    replay, status = funding._source_payload(
+        source, resumed, OfflineClient({SOURCE: latest}), NOW)
+    assert status == "fetched" and len(replay) == 500
+    assert resumed.data["feeds"]["uk_feed"]["etag"] == '"synthetic-v1"'
+    assert {item["url"] for item in replay} >= {
+        "https://news.example.com/new-one",
+        "https://news.example.com/new-two",
+        outstanding[-1]["url"],
+    }
+    assert len(funding.State(path).data["feeds"]["uk_feed"]["inflight"]) == 500
+
+
+def test_productive_active_company_survives_90_day_relevance_recheck(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "local" / "funded-watchlist.yaml"
+    funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    original = funding.State(path).data["active"]
+    assert len(original) == 1
+    key = next(iter(original))
+    future = NOW + timedelta(days=95)
+    funding.poll_once(
+        cfg, now=future, client_factory=lambda *_: OfflineClient(routes()),
+        extractor=lambda *_a, **_kw: pytest.fail("old round was re-extracted"),
+        relevance_fn=lambda jobs, prefs: jobs)
+    refreshed = funding.State(path).data["active"]
+    assert key in refreshed
+    assert refreshed[key]["last_relevant_at"] == future.isoformat()
+    assert refreshed[key]["last_checked_at"] == future.isoformat()
+    assert "unproductive_since" not in refreshed[key]
+    # A transient probe failure cannot be interpreted as proof of no jobs.
+    after = future + timedelta(days=8)
+    funding.poll_once(
+        cfg, now=after,
+        client_factory=lambda *_: OfflineClient({SOURCE: fixture("rss_uk.xml")}),
+        extractor=lambda *_a, **_kw: pytest.fail("old round was re-extracted"),
+        relevance_fn=lambda jobs, prefs: jobs)
+    retained = funding.State(path).data["active"]
+    assert key in retained
+    assert retained[key]["last_relevant_at"] == future.isoformat()
+    assert "unproductive_since" not in retained[key]
 
 def test_sec_reader_refuses_missing_user_agent_before_any_request(tmp_path):
     cfg = settings(tmp_path)
