@@ -966,3 +966,28 @@ def test_cold_provider_confirmed_permanent_bounce_is_contact_scoped(tmp_path):
     report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
     assert report["company_email_hold"] == "confirmed_hard_bounce_review_required"
     assert report["global_email_pause"] is False
+
+
+def test_cold_ambiguous_thread_reference_holds_company(tmp_path):
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    headers = (f"From: Unknown <other@sample.test>\r\n"
+               f"To: sender@example-co.com\r\n"
+               f"In-Reply-To: {ticket['message_id']} <other@sample.test>\r\n"
+               f"Message-ID: <reply-ambiguous@sample.test>\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(ledger, s, headers, b"Please stop.", "7", 15)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_stop"] is None
+    assert report["company_email_hold"] == "unthreaded_or_ambiguous_reply"
+
+
+def test_cold_x_autorespond_header_cannot_count_as_human(tmp_path):
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    headers = (f"From: Test User <test@example-co.com>\r\n"
+               f"To: sender@example-co.com\r\n"
+               f"In-Reply-To: {ticket['message_id']}\r\n"
+               f"X-Autorespond: yes\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(ledger, s, headers, b"Automatic response.", "7", 16)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_stop"] is None
