@@ -117,7 +117,12 @@ def verify_funded_application_route(settings, company_id, identity, url, meta, *
     if not isinstance(identity, dict) or not isinstance(meta, dict):
         raise SourceHold("funded_application_identity_unverified")
     ats, company = identity.get("ats"), identity.get("company")
-    if (not isinstance(company, str) or company.casefold() not in
+    # Custom forms live on the verified employer's *own* domain. The
+    # apply-role URL parser can shorten its display name (e.g. acme.com for
+    # "Acme Inc"); use the #386 employer identity instead of treating that
+    # formatting difference as a new company. Vendor ATS tenant identity
+    # still requires an exact, independently proved employer/alias join.
+    if ats != "custom" and (not isinstance(company, str) or company.casefold() not in
             {lead.name.casefold(), *(a.casefold() for a in lead.aliases)}):
         raise SourceHold("funded_application_employer_mismatch")
     title = meta.get("title")
