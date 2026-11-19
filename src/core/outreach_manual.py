@@ -173,3 +173,109 @@ def owner_linkedin_reserve(*, settings, company_id, person_name, stores, now=Non
         raise OutreachHold("linkedin_verified_person_name_required") from exc
     return Ledger(settings).reserve_linkedin_slot(
         company_id, key, linkedin, no_application=True, now=now)
+
+
+def register_routes(app, settings):
+    """Register first-party local queue/report only, never the pixel app."""
+    import hmac
+    import ipaddress
+    import secrets
+    from fastapi import HTTPException, Request
+    from fastapi.responses import JSONResponse
+    from core.stores import make_stores
+
+    csrf_secret = secrets.token_urlsafe(32)
+
+    def checked(request: Request, *, mutate=False):
+        if (settings.mode != "local" or not settings.outreach_enabled
+                or not getattr(settings, "outreach_manual_enabled", False)):
+            raise HTTPException(404, "Local outreach manual lane is disabled.")
+        try:
+            if not ipaddress.ip_address(request.client.host).is_loopback:
+                raise ValueError
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(403, "Local first-party request required.") from None
+        server = request.scope.get("server")
+        if (not isinstance(server, (list, tuple)) or len(server) < 2
+                or type(server[1]) is not int or not 0 < server[1] <= 65535):
+            raise HTTPException(403, "Local first-party request required.")
+        hosts = request.headers.getlist("host")
+        origins = request.headers.getlist("origin")
+        fetch_sites = request.headers.getlist("sec-fetch-site")
+        allowed = {f"localhost:{server[1]}", f"127.0.0.1:{server[1]}",
+                   f"[::1]:{server[1]}"}
+        if (len(hosts) != 1 or hosts[0] not in allowed or len(origins) > 1
+                or len(fetch_sites) > 1 or request.url.hostname not in
+                {"localhost", "127.0.0.1", "::1"}):
+            raise HTTPException(403, "Local first-party request required.")
+        if origins and origins[0] != "http://" + hosts[0]:
+            raise HTTPException(403, "Local first-party request required.")
+        if fetch_sites and fetch_sites[0] not in {"same-origin", "none"}:
+            raise HTTPException(403, "Local first-party request required.")
+        if mutate and (len(origins) != 1 or len(
+                request.headers.getlist("x-outreach-csrf")) != 1
+                or not hmac.compare_digest(
+                    request.headers.get("x-outreach-csrf", ""), csrf_secret)):
+            raise HTTPException(403, "Outreach Origin and CSRF required.")
+
+    def reply(result):
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    def guarded(call):
+        try:
+            return reply(call())
+        except (OutreachHold, SourceHold, ContactHold) as exc:
+            raise HTTPException(409, str(exc),
+                                headers={"Cache-Control": "no-store"}) from exc
+
+    @app.get("/outreach/csrf")
+    def csrf(request: Request):
+        checked(request)
+        return reply({"csrf": csrf_secret})
+
+    @app.get("/outreach/report")
+    def report(company_id: str, request: Request):
+        checked(request)
+        return guarded(lambda: manual_report(settings=settings, company_id=company_id))
+
+    @app.post("/outreach/manual/queue")
+    def queue(body: dict, request: Request):
+        checked(request, mutate=True)
+        return guarded(lambda: queue_target(
+            settings=settings, company_id=body.get("company_id"),
+            channel=body.get("channel"), target_url=body.get("target_url"),
+            evidence_url=body.get("evidence_url"),
+            person_name=body.get("person_name", ""), variant_id=body.get("variant_id")))
+
+    @app.post("/outreach/manual/copy")
+    def copy(body: dict, request: Request):
+        checked(request, mutate=True)
+        return guarded(lambda: act_on_target(
+            settings=settings, company_id=body.get("company_id"),
+            target_id=body.get("target_id"), version=body.get("version"),
+            action="copy", stores=make_stores(settings)))
+
+    @app.post("/outreach/manual/mark")
+    def mark(body: dict, request: Request):
+        checked(request, mutate=True)
+        return guarded(lambda: act_on_target(
+            settings=settings, company_id=body.get("company_id"),
+            target_id=body.get("target_id"), version=body.get("version"),
+            action="mark", stores=make_stores(settings)))
+
+    @app.post("/outreach/manual/response")
+    def response(body: dict, request: Request):
+        checked(request, mutate=True)
+        if type(body.get("trusted")) is not bool or type(body.get("opt_out", False)) is not bool:
+            raise HTTPException(422, "Owner reply classification required.")
+        return guarded(lambda: owner_response(
+            settings=settings, company_id=body.get("company_id"),
+            target_id=body.get("target_id"), trusted=body["trusted"],
+            opt_out=body.get("opt_out", False)))
+
+    @app.post("/outreach/linkedin/reserve")
+    def linkedin_reserve(body: dict, request: Request):
+        checked(request, mutate=True)
+        return guarded(lambda: owner_linkedin_reserve(
+            settings=settings, company_id=body.get("company_id"),
+            person_name=body.get("person_name"), stores=make_stores(settings)))
