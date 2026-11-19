@@ -200,13 +200,23 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
     try:
         # Always acquire fresh source and independent read-only LinkedIn state
         # immediately before attempting the external commit.
-        read_no_opening(settings, company_id, now=now)
-        read_linkedin(settings, company_id=lead.company_id,
-                      company_name=lead.name, company_domain=lead.domain)
+        # A slow contact-page fetch must not smuggle an old poll/source
+        # timestamp past the immediate pre-SMTP boundary. Injected fake SMTP
+        # keeps the explicitly supplied frozen clock for offline tests only.
+        prewire_now = datetime.now(UTC) if smtp_factory is None else now
+        current = read_no_opening(settings, company_id, now=prewire_now)
+        if current != lead:
+            raise OutreachHold("funding_identity_changed_before_wire")
+        latest_linkedin = read_linkedin(
+            settings, company_id=lead.company_id,
+            company_name=lead.name, company_domain=lead.domain)
+        if (contact.person_key in latest_linkedin.people
+                or ledger.report(lead.company_id, latest_linkedin)["used"] > 3):
+            raise OutreachHold("linkedin_duplicate_or_capacity_changed_before_wire")
         if not company_application_clear(stores, lead):
             raise OutreachHold("existing_company_application")
         ledger.begin_wire(ticket["id"], source_checked=True, no_application=True,
-                          linkedin_checked=True, now=now)
+                          linkedin_checked=True, now=prewire_now)
     except Exception:
         # Only reserved/pre-wire state is provably no-wire here.
         ledger.definite_no_wire(ticket["id"])
