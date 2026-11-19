@@ -150,6 +150,15 @@ class Ledger:
                 normalize_email(getattr(self.settings, "outreach_sender", ""))):
             raise OutreachHold("inbound_poll_stale_or_unverified")
 
+    def invalidate_poll(self):
+        """A failed/incomplete IMAP pass invalidates the prior freshness witness.
+
+        Never reuse an earlier successful pass after an observed failure; only
+        a later complete UIDVALIDITY-scoped pass may permit outbound mail.
+        """
+        with self._tx() as db:
+            self._set_meta(db, "poll", "")
+
     def record_successful_poll(self, *, uidvalidity, monitored_address, now=None):
         """Call only after a complete, exception-free UIDVALIDITY-scoped IMAP pass."""
         now = _time(now)
