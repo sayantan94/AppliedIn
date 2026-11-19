@@ -86,6 +86,10 @@ def load_effective_watchlist(path: str | Path, *, settings=None) -> list[Company
 
     claimed_names = {c.name.strip().casefold() for c in manual}
     claimed_domains: set[str] = set()
+    # A shared ATS hostname is not an employer identity, but the *exact*
+    # tenant/source already selected by a manual row belongs to that row.
+    claimed_sources = {c.careers_url.rstrip("/") for c in manual if c.careers_url}
+    claimed_boards = {(c.ats, c.board) for c in manual if c.ats and c.board}
     merged = list(manual)
     for record in active:
         # These fields were revalidated by the strict private-state loader.
@@ -95,7 +99,8 @@ def load_effective_watchlist(path: str | Path, *, settings=None) -> list[Company
         domain = record["employer_domain"]
         if not identities or not identities.isdisjoint(claimed_names):
             continue
-        if domain in claimed_domains:
+        if (domain in claimed_domains or record["careers_url"] in claimed_sources
+                or (record["ats"], record["board"]) in claimed_boards):
             continue
         # Do not derive a manual employer domain from the shared ATS host in
         # careers_url. Without an independently proven manual homepage there
@@ -109,4 +114,6 @@ def load_effective_watchlist(path: str | Path, *, settings=None) -> list[Company
         ))
         claimed_names.update(identities)
         claimed_domains.add(domain)
+        claimed_sources.add(record["careers_url"])
+        claimed_boards.add((record["ats"], record["board"]))
     return merged
