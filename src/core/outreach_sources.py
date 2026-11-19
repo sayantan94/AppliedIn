@@ -35,7 +35,7 @@ class FundedNoOpening:
     reason: str
 
 
-def read_no_opening(settings, company_id, *, now=None):
+def read_no_opening(settings, company_id, *, now=None, require_fresh=True):
     """#386 has no last-successful-pending-recheck field, so age from seen_at.
 
     Its pending bucket also contains source/consumer failures, which are *not*
@@ -67,7 +67,9 @@ def read_no_opening(settings, company_id, *, now=None):
             or deal.get("reason") != row["reason"]):
         raise SourceHold("not_proved_no_matching_opening")
     seen, expires = _date(row.get("seen_at")), _date(row.get("expires"))
-    if seen > now or now - seen > timedelta(days=7) or expires <= now:
+    if seen > now or expires <= now:
+        raise SourceHold("funded_source_not_current")
+    if require_fresh and now - seen > timedelta(days=7):
         raise SourceHold("fresh_successful_funding_recheck_required")
     name, domain, homepage = row.get("name"), row.get("employer_domain"), row.get("homepage")
     if (not isinstance(name, str) or not 2 <= len(name.strip()) <= 150
