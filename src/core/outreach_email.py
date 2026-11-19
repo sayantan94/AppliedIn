@@ -215,8 +215,14 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         factory = smtp_factory
         if factory is None:
             factory = smtplib.SMTP_SSL if settings.outreach_smtp_port == 465 else smtplib.SMTP
-        with factory(settings.outreach_smtp_host, settings.outreach_smtp_port,
-                     timeout=20, context=ssl.create_default_context()) as connection:
+        if settings.outreach_smtp_port == 465:
+            connection_context = factory(settings.outreach_smtp_host,
+                                         settings.outreach_smtp_port, timeout=20,
+                                         context=ssl.create_default_context())
+        else:
+            connection_context = factory(settings.outreach_smtp_host,
+                                         settings.outreach_smtp_port, timeout=20)
+        with connection_context as connection:
             if settings.outreach_smtp_port == 587:
                 connection.ehlo()
                 connection.starttls(context=ssl.create_default_context())

@@ -272,6 +272,7 @@ class Settings(BaseSettings):
     outreach_smtp_username: str = ""
     outreach_smtp_password: str = ""
     outreach_dsn_sender_addresses: str = ""
+    outreach_provider_dsn_verified: bool = False
 
     aws_region: str = "us-east-1"
 

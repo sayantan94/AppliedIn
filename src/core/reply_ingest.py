@@ -469,6 +469,102 @@ def _classify(fields: dict, fragment: str, classifier) -> str:
         return "unclassified"
 
 
+
+def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
+                           validity: str, uid: int) -> None:
+    """Use full headers and <=4096 body bytes; never silently classify a DSN.
+
+    This separate cold-email witness does not alter existing application-alias
+    matching, reply labels or classifier output. The sender's domain alone
+    never correlates a company.
+    """
+    import email.policy
+    from email.utils import getaddresses
+    from core.outreach_contacts import normalize_email
+
+    msg = email.message_from_bytes(headers, policy=email.policy.default)
+    body = prefix[:4096].decode("utf-8", "replace") if isinstance(prefix, bytes) else ""
+    sender_list = [address.strip().casefold() for _, address in
+                   getaddresses(msg.get_all("from", [])) if address]
+    recipient_list = [address.strip().casefold() for _, address in
+                      getaddresses(msg.get_all("to", []) + msg.get_all("cc", []) +
+                                   msg.get_all("delivered-to", [])) if address]
+    sender = sender_list[0] if len(sender_list) == 1 else ""
+    sender_ok = sender and sender.count("@") == 1
+    references = re.findall(r"<[^<>\s@]+@[^<>\s@]+>", str(msg.get("references", "")))
+    parent = re.findall(r"<[^<>\s@]+@[^<>\s@]+>", str(msg.get("in-reply-to", "")))
+    candidate = None
+    if len(parent) == 1:
+        candidate = ledger.attempt_by_message_id(parent[0])
+    elif not parent and references:
+        candidate = ledger.attempt_by_message_id(references[-1])
+    # DSN bodies can contain a bounded original Message-ID even without a
+    # useful In-Reply-To; only a unique exact persisted attempt is accepted.
+    if candidate is None and not parent:
+        by_body = [ledger.attempt_by_message_id(mid) for mid in set(
+            re.findall(r"<[^<>\s@]+@[^<>\s@]+>", body))]
+        by_body = [item for item in by_body if item is not None]
+        if len(by_body) == 1:
+            candidate = by_body[0]
+
+    automatic = (str(msg.get("auto-submitted", "")).casefold() not in ("", "no")
+                 or bool(msg.get("list-id")) or bool(msg.get("list-unsubscribe"))
+                 or str(msg.get("precedence", "")).casefold() in {"bulk", "list", "junk"}
+                 or "out of office" in str(msg.get("subject", "")).casefold()
+                 or "automatic reply" in str(msg.get("subject", "")).casefold())
+    indicators = (str(msg.get_content_type()).casefold() == "multipart/report"
+                  and "delivery-status" in str(msg.get("content-type", "")).casefold()
+                  or bool(msg.get("x-failed-recipients"))
+                  or sender.split("@")[0] in {"postmaster", "mailer-daemon"})
+    listed_providers = {s.strip().casefold() for s in
+                        getattr(settings, "outreach_dsn_sender_addresses", "").split(",")
+                        if s.strip()}
+    provider_witness = (bool(getattr(settings, "outreach_provider_dsn_verified", False))
+                        and sender in listed_providers)
+    possible_opt_out = bool(re.search(
+        r"\b(?:unsubscribe|do not (?:email|contact|write)|stop emailing)\b", body, re.I))
+
+    if candidate:
+        company = candidate["company_id"]
+        monitored = normalize_email(getattr(settings, "outreach_sender", ""))
+        addressed = monitored in recipient_list
+        if indicators:
+            # Never turn soft/unknown MIME, untrusted sender or generic
+            # multipart/report into a confirmed permanent bounce.
+            failed = [addr.strip().casefold() for _, addr in
+                      getaddresses(msg.get_all("x-failed-recipients", []))]
+            permanent = bool(re.search(r"(?:Status:\s*5\.\d\.\d|"
+                                       r"Diagnostic-Code:\s*smtp;\s*5\d\d)", body, re.I))
+            exact_recipient = candidate["recipient"] in failed or bool(
+                re.search(r"(?<![\w.@])" + re.escape(candidate["recipient"]) +
+                          r"(?![\w.@])", body, re.I))
+            if (provider_witness and permanent and exact_recipient
+                    and candidate["state"] == "confirmed_smtp_accepted"):
+                ledger.confirm_hard_bounce(candidate["id"])
+                classification = "confirmed_hard_bounce"
+            else:
+                ledger.hold_company_email(company, "suspected_dsn_needs_review")
+                classification = "suspected_dsn"
+        elif automatic:
+            classification = "automatic_not_human"
+        elif sender_ok and sender == candidate["recipient"] and addressed:
+            ledger.record_stop(company, kind="opt_out" if possible_opt_out else "human_reply")
+            classification = "matched_human_stop"
+        else:
+            ledger.hold_company_email(company, "ambiguous_reply_or_opt_out")
+            classification = "suspected_reply"
+    elif sender_ok:
+        # An exact previous destination may identify a company for *holding*
+        # email, but never authorizes recording a human reply without threading.
+        companies = ledger.by_recipient(sender)
+        if len(companies) == 1:
+            ledger.hold_company_email(companies[0], "unthreaded_possible_reply")
+        classification = "unmatched_or_automatic"
+    else:
+        classification = "unmatched"
+    ledger.record_inbound_uid(validity, uid, classification)
+
+
 def ingest_pass(settings, credentials: dict | None = None, stores=None, transport=None,
                 classifier=None) -> int:
     if settings.mode != "local":
@@ -486,6 +582,10 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
     client = transport or ReadOnlyIMAP(creds["host"], creds["username"], creds["password"], creds["mailbox"])
     path = _state_path(settings)
     key = _account_key(creds)
+    cold_ledger = None
+    if getattr(settings, "outreach_enabled", False):
+        from core.outreach_ledger import Ledger
+        cold_ledger = Ledger(settings)
     inserted_count = 0
     try:
         incoming = _generation(getattr(client, "uidvalidity", None))
@@ -529,6 +629,7 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                 pk = match_message(raw, candidates, alias_snapshot)
             except Exception:
                 pk = "UNASSIGNED"
+            prefix = b""
             if _security_code_subject(fields["subject"]):
                 label = "other"
             else:
@@ -541,6 +642,14 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                     _mark_unresolved(path, key, validity, uid)
                     continue
                 label = _classify(fields, decoded, classifier)
+            if cold_ledger is not None:
+                try:
+                    _cold_outreach_message(cold_ledger, settings, raw, prefix, validity, uid)
+                except Exception:
+                    # Leave the UID unresolved for a retry. Never announce a
+                    # fresh inbound watermark after missing a potential stop.
+                    _mark_unresolved(path, key, validity, uid)
+                    continue
             record = {"record_id": str(uuid.uuid4()), **fields, "label": label, "pk": pk}
             admitted = _commit_uid(path, key, validity, uid, record, fields["message_id"])
             if admitted:
@@ -565,6 +674,15 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
             except Exception:
                 # Mail/provider errors are never logged or persisted as metadata.
                 continue
+        if cold_ledger is not None:
+            with WRITE_LOCK:
+                account_after = _read_state(path).get("accounts", {}).get(key, {})
+                complete = (not account_after.get("scan_pending") and
+                            not account_after.get("unresolved_uids") and
+                            _generation(account_after.get("uidvalidity")) == incoming)
+            if complete and getattr(settings, "outreach_inbound_verified", False):
+                cold_ledger.record_successful_poll(
+                    uidvalidity=validity, monitored_address=settings.outreach_sender)
     finally:
         client.logout()
     return inserted_count
