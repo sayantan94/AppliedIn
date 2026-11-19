@@ -610,7 +610,7 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
             ("If-Modified-Since", meta.get("last_modified", ""))
         ) if value
     }
-    if source["kind"] == "sec_atom" and not client.settings.funding_sec_user_agent:
+    if source["kind"] == "sec_atom" and not settings.funding_sec_user_agent:
         raise FundingRefusal("sec_user_agent_missing")
     resp = client.get(source["url"], headers=headers, follow_redirects=True)
     if resp.status_code == 304:
