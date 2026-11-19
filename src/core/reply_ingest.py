@@ -552,7 +552,7 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
         elif automatic:
             classification = "automatic_not_human"
         elif sender_ok and sender == candidate["recipient"] and addressed:
-            ledger.record_stop(company, kind="opt_out" if possible_opt_out else "human_reply")
+            ledger.record_matched_human_response(candidate["id"], opt_out=possible_opt_out)
             classification = "matched_human_stop"
         else:
             ledger.hold_company_email(company, "ambiguous_reply_or_opt_out")
