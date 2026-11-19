@@ -930,6 +930,17 @@ def test_cold_thread_human_reply_records_company_stop(tmp_path):
                          .LinkedInSnapshot(frozenset(), frozenset()))["company_stop"] == "opt_out"
     # Same IMAP UID is idempotent; the new attempt remains forbidden.
     assert not ledger.record_inbound_uid("7", 11, "matched_human_stop")
+    report = ledger.report(lead.company_id,
+                           __import__("core.outreach_contacts", fromlist=["LinkedInSnapshot"])
+                           .LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["accepted_first_emails"] == 1
+    assert report["matched_human_threads"] == 1
+    assert report["human_reply_rate"] == 1.0
+    # Another message in the same accepted thread is still one responder.
+    ledger.record_matched_human_response(ticket["id"], opt_out=True)
+    assert ledger.report(lead.company_id,
+                         __import__("core.outreach_contacts", fromlist=["LinkedInSnapshot"])
+                         .LinkedInSnapshot(frozenset(), frozenset()))["matched_human_threads"] == 1
 
 
 def test_cold_thread_auto_reply_not_human_and_provider_dsn_must_be_permanent(tmp_path):
