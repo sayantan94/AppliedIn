@@ -178,3 +178,30 @@ def test_reply_ingest_python_syntax_without_import_side_effects():
 
     source_path = Path(__file__).resolve().parents[2] / "src/core/reply_ingest.py"
     ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+
+
+def test_company_organizational_alias_cannot_hide_named_recipient_overlap(tmp_path):
+    """One published organizational inbox cannot be re-contacted as a person."""
+    db = Ledger(settings(tmp_path))
+    poll(db)
+    l = lead("a")
+    organization = VerifiedRecipient(
+        "careers@example-co.com", "org", "", "organization",
+        "https://example-co.com/contact")
+    reserve(db, l, organization)
+    overlap = VerifiedRecipient(
+        "careers@example-co.com", "name:recruiter person",
+        "Recruiter Person", "person", "https://example-co.com/team")
+    with pytest.raises(OutreachHold, match="recipient_alias_or_org_overlap"):
+        reserve(db, l, overlap)
+    # The alias must not consume a second first-contact or another quota slot.
+    assert db.report(l.company_id, EMPTY)["email_quota_used"] == 1
+
+
+def test_two_verified_person_names_sharing_address_are_held_for_reconciliation(tmp_path):
+    db = Ledger(settings(tmp_path))
+    poll(db)
+    l = lead("a")
+    reserve(db, l, contact("First Person", address="shared@example-co.com"))
+    with pytest.raises(OutreachHold, match="recipient_alias_or_org_overlap"):
+        reserve(db, l, contact("Second Person", address="shared@example-co.com"))
