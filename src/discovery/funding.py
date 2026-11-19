@@ -151,6 +151,20 @@ def _validate_state(data: object) -> dict:
         if any(not isinstance(feed.get(k, ""), str)
                for k in ("etag", "last_modified", "last_fetch")):
             raise FundingRefusal("corrupt_funding_state")
+        inflight = feed.get("inflight", [])
+        if not isinstance(inflight, list) or len(inflight) > 500:
+            raise FundingRefusal("corrupt_funding_state")
+        for article in inflight:
+            if (not isinstance(article, dict)
+                    or set(article) != {"key", "title", "date", "url"}
+                    or not isinstance(article["key"], str)
+                    or len(article["key"]) != 32
+                    or any(not isinstance(article[field], str)
+                           for field in ("title", "date", "url"))
+                    or len(article["title"]) > 512
+                    or len(article["date"]) > 100
+                    or len(article["url"]) > 2048):
+                raise FundingRefusal("corrupt_funding_state")
     for period in ("day", "week"):
         if not isinstance(data["budgets"].get(period, ""), str):
             raise FundingRefusal("corrupt_budget")
@@ -571,11 +585,23 @@ def ready(settings=None) -> bool:
 def _source_payload(source: dict, state: State, client: GuardedClient, now) -> tuple[list[dict], str]:
     sid = source["id"]
     meta = state.data["feeds"].get(sid, {})
-    # When a previous pass stopped mid-article, a 304 must not hide that
-    # unfinished work on the next pass. Fetch an ordinary body for replay.
-    needs_replay = any(isinstance(v, dict) and v.get("source") == sid
-                       and v.get("status") in ("queued", "retryable", "processing")
-                       for v in state.data["articles"].values())
+    # The cursor and a bounded list of not-yet-acknowledged feed items share
+    # one atomic checkpoint. A queued article still exists after it rolls off
+    # the feed's latest-N page, so the next pass does not need the publisher
+    # to repeat the exact same response.
+    outstanding = []
+    for item in meta.get("inflight", []):
+        status = state.data["articles"].get(item["key"], {}).get("status")
+        if not _fresh(item["date"], now, client.settings.funding_eligible_days):
+            state.data["articles"][item["key"]] = {
+                "status": "complete", "source": sid, "seen_at": now.isoformat()}
+            continue
+        if status != "complete":
+            outstanding.append(item)
+    needs_replay = bool(outstanding) or any(
+        isinstance(v, dict) and v.get("source") == sid
+        and v.get("status") in ("queued", "retryable", "processing")
+        for v in state.data["articles"].values())
     headers = {} if needs_replay else {
         key: value for key, value in (
             ("If-None-Match", meta.get("etag", "")),
@@ -586,7 +612,10 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
         raise FundingRefusal("sec_user_agent_missing")
     resp = client.get(source["url"], headers=headers, follow_redirects=True)
     if resp.status_code == 304:
-        return [], "not_modified"
+        if state.data["feeds"].get(sid, {}).get("inflight"):
+            state.data["feeds"][sid]["inflight"] = outstanding
+            state.save()
+        return outstanding, "not_modified"
     resp.raise_for_status()
     next_cursor = {
         "etag": resp.headers.get("etag", "")[:256],
@@ -606,17 +635,24 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
         return [], "yc_not_round_evidence"
     kind = "atom" if source["kind"] in {"atom", "sec_atom"} else "rss"
     items = _rss_items(resp.content, kind)
+    merged = {a["key"]: a for a in outstanding}
     for item in items:
         item["key"] = _key(sid, item["key"])
+        if state.data["articles"].get(item["key"], {}).get("status") == "complete":
+            continue
+        merged[item["key"]] = item
+    if len(merged) > 500:
+        # Never advance the cursor while silently dropping eligible articles.
+        raise FundingRefusal("source_backlog_limit")
+    for item in merged.values():
         if item["key"] not in state.data["articles"]:
             state.data["articles"][item["key"]] = {
                 "status": "queued", "source": sid, "seen_at": now.isoformat()}
-    # Cursor and unacknowledged article keys must become durable in ONE
-    # replacement. A crash cannot advance an ETag while leaving no replay
-    # witness for an article not yet evaluated.
-    state.data["feeds"][sid] = next_cursor
+    # Atomic cursor + bounded full item metadata permits recovery even when
+    # the next publisher feed no longer contains these article links.
+    state.data["feeds"][sid] = {**next_cursor, "inflight": list(merged.values())}
     state.save()
-    return items, "fetched"
+    return list(merged.values()), "fetched"
 
 
 def _sec_primary_doc(article_url: str, client: GuardedClient) -> str:
