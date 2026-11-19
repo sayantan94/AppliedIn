@@ -926,7 +926,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
         try:
             items, status = _source_payload(source, state, client, now)
             state.count(sid, status, now)
-            for item in items[:settings.funding_max_candidates_per_pass]:
+            for item in items:
                 if source["kind"] == "sec_atom":
                     _sec_proxy(source, item, state, client, now)
                     continue
