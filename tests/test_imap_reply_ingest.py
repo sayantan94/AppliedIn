@@ -1037,3 +1037,44 @@ def test_invalid_imap_generation_revokes_previous_watermark(tmp_path, monkeypatc
             new_company, person, LinkedInSnapshot(frozenset(), frozenset()),
             no_application=True, resume_seed_proved=True, sender_proved=True,
             variant="approved-v1", digest="b"*64, now=now)
+
+
+def test_cold_conflicting_persisted_references_hold_both_threads(tmp_path):
+    """A plausible parent cannot override a contradictory exact References ID."""
+    from datetime import UTC, datetime
+    from core.outreach_contacts import LinkedInSnapshot, VerifiedRecipient
+    from core.outreach_sources import FundedNoOpening
+    from core.outreach_ledger import Ledger
+
+    settings, ledger, original, first = _synthetic_outreach_ticket(tmp_path)
+    at = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    second_lead = FundedNoOpening(
+        "b" * 32, "Other Co", "other-co.com",
+        "https://other-co.com", (), "synthetic", at, "no_openings")
+    second_person = VerifiedRecipient(
+        "beta@other-co.com", "name:beta person", "Beta Person",
+        "person", "https://other-co.com/team")
+    other = ledger.reserve_email(
+        second_lead, second_person, LinkedInSnapshot(frozenset(), frozenset()),
+        no_application=True, resume_seed_proved=True, sender_proved=True,
+        variant="approved-v1", digest="b"*64, now=at)
+    ledger.begin_wire(other["id"], source_checked=True, no_application=True,
+                      linkedin_checked=True, now=at)
+    ledger.finish_wire(other["id"], accepted=True, now=at)
+    incoming = (
+        f"From: Test User <test@example-co.com>\r\n"
+        f"To: sender@example-co.com\r\n"
+        f"In-Reply-To: {first['message_id']}\r\n"
+        f"References: {other['message_id']}\r\n"
+        f"Message-ID: <synthetic-cross-thread@sample.test>\r\n\r\n"
+    ).encode()
+    reply_ingest._cold_outreach_message(
+        ledger, settings, incoming, b"Please stop emailing me.", "7", 123)
+    empty = LinkedInSnapshot(frozenset(), frozenset())
+    first_report = ledger.report(original.company_id, empty)
+    second_report = ledger.report(second_lead.company_id, empty)
+    assert first_report["company_stop"] is None
+    assert second_report["company_stop"] is None
+    assert first_report["company_email_hold"] == "unthreaded_or_ambiguous_reply"
+    assert second_report["company_email_hold"] == "unthreaded_or_ambiguous_reply"
+    assert first_report["matched_human_threads"] == 0
