@@ -788,3 +788,48 @@ def test_sec_nonissuer_cannot_fallback_to_related_person_name(tmp_path):
     assert deal["reason"] == "sec_issuer_or_sector_missing"
     assert deal["issuer"] == ""
     assert "Example Person" not in path.read_text()
+
+
+def test_etag_crash_window_has_durable_unacknowledged_article(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    source = funding._manifest(cfg)["sources"][0]
+    client = OfflineClient({SOURCE: fixture("rss_uk.xml")})
+    items, status = funding._source_payload(source, state, client, NOW)
+    assert status == "fetched" and len(items) == 1
+    # Simulate process death immediately after the source response. The cursor
+    # MUST NOT exist without its corresponding unresolved article witness.
+    restarted = funding.State(path)
+    assert restarted.data["feeds"]["uk_feed"]["etag"] == '"synthetic-v1"'
+    assert restarted.data["articles"][items[0]["key"]]["status"] == "queued"
+    replay = OfflineClient({SOURCE: fixture("rss_uk.xml")})
+    again, _ = funding._source_payload(source, restarted, replay, NOW)
+    assert again == items
+    assert replay.calls[0][1] == {}, "unacknowledged item bypasses conditional 304"
+    restarted.data["articles"][items[0]["key"]]["status"] = "complete"
+    restarted.save()
+    conditional = OfflineClient({SOURCE: (304, b"")})
+    data, status = funding._source_payload(source, restarted, conditional, NOW)
+    assert data == [] and status == "not_modified"
+    assert conditional.calls[0][1]["If-None-Match"] == '"synthetic-v1"'
+
+
+def test_sec_transient_document_failure_retries_then_acknowledges(tmp_path):
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    article = {"key": "synthetic-sec-retry", "url": SEC_INDEX}
+    source = {"id": "sec_test"}
+    unavailable = OfflineClient({})
+    funding._sec_proxy(source, article, state, unavailable, NOW)
+    deal = next(iter(state.data["deals"].values()))
+    assert deal["status"] == "retryable"
+    assert state.data["articles"][article["key"]]["status"] == "retryable"
+    recovered = OfflineClient({
+        SEC_INDEX: fixture("sec_index.html"),
+        SEC_DOC: fixture("sec_primary_doc.xml"),
+    })
+    funding._sec_proxy(source, article, state, recovered, NOW)
+    assert next(iter(state.data["deals"].values()))["status"] == "unresolved"
+    assert state.data["articles"][article["key"]]["status"] == "complete"
+    assert recovered.calls
