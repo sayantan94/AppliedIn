@@ -507,6 +507,21 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
         if len(by_body) == 1:
             candidate = by_body[0]
 
+    # An exact parent reference is not unique proof if another persisted
+    # References member belongs to a different person/company/recipient.
+    # Ordinary followup chains share all three; conflicting witnessed threads
+    # are held for triage without recording a human response or bounce.
+    referenced = [
+        item for item in (ledger.attempt_by_message_id(mid)
+                          for mid in set(parent + references))
+        if item is not None
+    ]
+    if candidate is not None and any(
+            (item["company_id"], item["person_key"], item["recipient"]) !=
+            (candidate["company_id"], candidate["person_key"], candidate["recipient"])
+            for item in referenced):
+        candidate = None
+
     automatic = (str(msg.get("auto-submitted", "")).casefold() not in ("", "no")
                  or bool(msg.get("list-id")) or bool(msg.get("list-unsubscribe"))
                  or str(msg.get("precedence", "")).casefold() in {"bulk", "list", "junk"}
