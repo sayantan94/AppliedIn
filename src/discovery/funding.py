@@ -585,6 +585,33 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
     return items, "fetched"
 
 
+def _sec_primary_doc(article_url: str, client: GuardedClient) -> str:
+    """Choose a filing-supplied document, never guess an issuer site or person."""
+    host, path = _safe_url(article_url)
+    if (host != "www.sec.gov" or not path.startswith("/Archives/edgar/data/")
+            or not path.endswith((".xml", ".html", ".htm"))):
+        raise FundingRefusal("sec_filing_link_unverified")
+    if path.endswith(".xml"):
+        return article_url
+    index = client.get(article_url, follow_redirects=True)
+    index.raise_for_status()
+    if urlsplit(str(index.request.url)).hostname != "www.sec.gov":
+        raise FundingRefusal("sec_filing_redirect")
+    candidates = set()
+    parent = path.rsplit("/", 1)[0] + "/"
+    for _, href in _article(index.text).links[:200]:
+        full = urljoin(article_url, href)
+        try:
+            h, p = _safe_url(full)
+            if h == "www.sec.gov" and p.startswith(parent) and p.endswith("/primary_doc.xml"):
+                candidates.add(full)
+        except FundingRefusal:
+            continue
+    if len(candidates) != 1:
+        raise FundingRefusal("sec_primary_doc_unresolved")
+    return next(iter(candidates))
+
+
 def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient, now) -> None:
     # The Atom list has no issuer site and no round label. Only the filing
     # metadata relevant to sector/amount is touched, never officer/contact nodes.
@@ -593,10 +620,9 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
         state.count(source["id"], "duplicate", now)
         return
     try:
-        # Only a literal, source-provided XML URL; do not invent Form D paths.
-        url = article["url"]
-        if urlsplit(url).hostname != "www.sec.gov" or not urlsplit(url).path.endswith(".xml"):
-            raise FundingRefusal("sec_xml_link_unavailable")
+        # SEC Atom links commonly point to a filing index. Select the exact
+        # primary_doc.xml link in that filing's own document listing.
+        url = _sec_primary_doc(article["url"], client)
         xml = _xml(client.get(url, follow_redirects=True).content)
         industry = _node_text(xml, "industryGroupType")
         fund = any(e.tag.rsplit("}", 1)[-1] == "investmentFundInfo" for e in xml.iter())
@@ -807,8 +833,9 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     region = deal.get("region")
     allowed = set(_manifest(settings)["regions"])
     evidenced = _regions(article["text"], allowed)
-    if region not in evidenced and not (
-            deal.get("remote_first") is True and "remote-first-anywhere" in evidenced):
+    remote_exception = (region not in evidenced and deal.get("remote_first") is True
+                        and "remote-first-anywhere" in evidenced)
+    if region not in evidenced and not remote_exception:
         return "region_unproved", None, None
     homepage = _employer_link(issuer, article["html"], article["url"])
     if not homepage:
@@ -820,9 +847,13 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     # verified employer. A publisher hyperlink is NOT proof of ownership.
     page = client.get(homepage, follow_redirects=True)
     page.raise_for_status()
+    homepage_text = _article(page.text).text[:10000]
     if (registrable(str(page.request.url)) != domain
-            or issuer.casefold() not in _article(page.text).text[:10000].casefold()):
+            or issuer.casefold() not in homepage_text.casefold()):
         return "employer_homepage_owner_unproved", None, None
+    # A news writer calling a business remote-first is not independent proof.
+    if remote_exception and not _REMOTE.search(homepage_text):
+        return "remote_first_not_employer_evidenced", None, None
     evidence = {"name": issuer, "homepage": homepage, "employer_domain": domain,
                 "source": article["source"]}
     reason, active = _preview_verified(
@@ -988,6 +1019,8 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                               "consumer_guard_refused", "source_bound_refused"}
                           else "unresolved" if reason in {
                               "employer_site_unproved", "psl_unavailable_or_unknown",
+                              "remote_first_not_employer_evidenced",
+                              "employer_homepage_owner_unproved",
                               "round_unconfirmed", "round_date_unconfirmed_or_stale",
                               "sector_unproved", "region_unproved", "issuer_unknown"}
                           else "rejected")
