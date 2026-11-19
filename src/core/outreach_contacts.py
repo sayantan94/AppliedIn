@@ -4,6 +4,7 @@ The original owner-private LinkedIn schema is not in this repository. Require
 an operator-supplied private field mapping; never guess it or write its file.
 """
 from __future__ import annotations
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -98,9 +99,10 @@ def verify_published_contact(*, company_domain, source_url, html, address, name=
 class LinkedInSnapshot:
     people: frozenset[str]
     profiles: frozenset[str]
+    warnings: frozenset[str] = frozenset()
 
 
-def read_linkedin(settings, *, company_id, company_name, company_domain):
+def read_linkedin(settings, *, company_id, company_name, company_domain, strict=True):
     """No implicit schema. Configured JSON keys describe the existing source."""
     source, mapping = (getattr(settings, "outreach_linkedin_path", ""),
                        getattr(settings, "outreach_linkedin_fields", ""))
@@ -124,7 +126,7 @@ def read_linkedin(settings, *, company_id, company_name, company_domain):
             raise ValueError
     except (OSError, ValueError, UnicodeError) as exc:
         raise ContactHold("linkedin_private_source_unreadable") from exc
-    people, profiles = set(), set()
+    people, profiles, warnings = set(), set(), set()
     for row in records:
         if not isinstance(row, dict):
             raise ContactHold("linkedin_row_invalid")
@@ -136,18 +138,31 @@ def read_linkedin(settings, *, company_id, company_name, company_domain):
         same_name = str(row.get(fields["company_name"], "")).casefold() == company_name.casefold()
         if not (same_id or same_domain or same_name):
             continue
-        if not (same_id or same_domain):
+        conflict = (not (same_id or same_domain)
+                    or row.get(fields["company_id"]) not in (None, "", company_id)
+                    or row.get(fields["domain"]) not in (None, "", company_domain))
+        if conflict and strict:
             raise ContactHold("linkedin_employer_join_ambiguous")
-        if row.get(fields["company_id"]) not in (None, "", company_id):
-            raise ContactHold("linkedin_company_id_conflict")
-        if row.get(fields["domain"]) not in (None, "", company_domain):
-            raise ContactHold("linkedin_domain_conflict")
         if status == "not_contacted":
             continue
         name, profile = row.get(fields["person_name"]), row.get(fields["profile"])
-        if not name:
-            raise ContactHold("linkedin_name_join_missing")
-        people.add(person_key(name))
-        if profile:
-            profiles.add(profile_key(profile))
-    return LinkedInSnapshot(frozenset(people), frozenset(profiles))
+        try:
+            identity = person_key(name)
+            if profile:
+                profiles.add(profile_key(profile))
+        except ContactHold:
+            if strict:
+                raise
+            identity = None
+        if conflict or identity is None:
+            if strict:
+                raise ContactHold("linkedin_name_join_missing")
+            # Conservatively count uncertain existing contacts rather than
+            # pretending an unmapped record frees a company slot.
+            raw_key = json.dumps(row, sort_keys=True, ensure_ascii=True)
+            identity = "provisional:linkedin:" + hashlib.sha256(
+                raw_key.encode("utf-8")).hexdigest()[:32]
+            warnings.add("linkedin_identity_or_employer_join_unresolved")
+        people.add(identity)
+    return LinkedInSnapshot(frozenset(people), frozenset(profiles),
+                            frozenset(warnings))
