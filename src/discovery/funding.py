@@ -313,12 +313,14 @@ def _public_addresses(host: str, port: int) -> list[tuple]:
     if not addresses:
         raise FundingRefusal("dns_failed")
     for family, _, _, _, sockaddr in addresses:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            raise FundingRefusal("nonpublic_connect_address")
         try:
-            if family not in (socket.AF_INET, socket.AF_INET6) or not ipaddress.ip_address(
-                    sockaddr[0]).is_global:
-                raise FundingRefusal("nonpublic_connect_address")
-        except ValueError as exc:
+            address = ipaddress.ip_address(sockaddr[0])
+        except (ValueError, IndexError, TypeError) as exc:
             raise FundingRefusal("invalid_connect_address") from exc
+        if not address.is_global:
+            raise FundingRefusal("nonpublic_connect_address")
     return addresses[:8]
 
 
@@ -406,7 +408,7 @@ class GuardedClient:
                 data = response.read(self.max_bytes + 1)
                 if len(data) > self.max_bytes:
                     raise FundingRefusal("response_too_large")
-                out_headers = {k: v for k, v in response.getheaders()
+                out_headers = {k.lower(): v for k, v in response.getheaders()
                                if k.lower() in {"location", "etag", "last-modified", "content-type"}}
             finally:
                 conn.close()
