@@ -127,3 +127,42 @@ def test_changed_funding_identity_blocks_fake_smtp_before_wire(tmp_path, monkeyp
             variant_id="synthetic-v1", stores=object(), now=now,
             smtp_factory=factory)
     assert not calls
+
+
+def test_owner_approval_change_before_wire_blocks_fake_smtp(tmp_path, monkeypatch):
+    from core import outreach_email as mail
+    s, now, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
+    approvals = [0]
+    def mutable_approval(*_args):
+        approvals[0] += 1
+        return {"id": "synthetic-v1", "sha256": ("a" if approvals[0] == 1 else "b") * 64}
+    monkeypatch.setattr(mail, "approved_variant", mutable_approval)
+    with pytest.raises(OutreachHold, match="approved_variant_or_resume_changed_before_wire"):
+        mail.send_approved(
+            settings=s, company_id="a"*32,
+            contact_page_url="https://example-co.com/team",
+            exact_address="test@example-co.com", person_name="Test User",
+            variant_id="synthetic-v1", stores=object(), now=now,
+            smtp_factory=factory)
+    assert approvals[0] == 2
+    assert not calls
+
+
+def test_absent_original_seed_never_passes_on_empty_sha(tmp_path, monkeypatch):
+    from core.outreach_email import original_seed_pdf
+    import agent.run
+    pdf = tmp_path / "original.pdf"
+    payload = b"%PDF-1.4 synthetic"
+    pdf.write_bytes(payload)
+    pdf.chmod(0o600)
+    manifest = tmp_path / "resume.json"
+    manifest.write_text(json.dumps({
+        "pdf_path": pdf.name, "sha256": hashlib.sha256(payload).hexdigest(),
+        "resume_seed": "empty-base-fingerprint"}))
+    manifest.chmod(0o600)
+    monkeypatch.setattr(agent.run, "_base_latex", lambda: "")
+    monkeypatch.setattr(agent.run, "seed_fingerprint", lambda: "empty-base-fingerprint")
+    settings = SimpleNamespace(local_dir=str(tmp_path),
+                               outreach_resume_manifest=manifest.name)
+    with pytest.raises(OutreachHold, match="current_original_seed_pdf_required"):
+        original_seed_pdf(settings)
