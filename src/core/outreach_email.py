@@ -82,7 +82,7 @@ def _render(source, fields, *, subject=False):
     try:
         for literal, name, spec, conversion in fmt.parse(source):
             if name is not None:
-                if name not in {"first_name", "company_name", "role_family"} or spec or conversion:
+                if name not in {"first_name", "company_name", "funding_fact", "role_family"} or spec or conversion:
                     raise ValueError
                 names.add(name)
         result = source.format_map(fields)
@@ -95,15 +95,19 @@ def _render(source, fields, *, subject=False):
     return result
 
 
-def render_approved(item, lead, contact):
+def render_approved(item, lead, contact, *, funding_fact=""):
     def plain(value, limit):
         if not isinstance(value, str) or not value or len(value) > limit:
             raise OutreachHold("source_verified_slot_missing")
         if any(ord(c) < 32 or c in "{}<>" for c in value):
             raise OutreachHold("unsafe_verified_slot")
         return value
+    if (not funding_fact and "{funding_fact}" in
+            (item["subject"] + item["body"])):
+        raise OutreachHold("verified_funding_fact_or_approved_generic_variant_required")
     fields = {"first_name":plain(contact.name.split()[0], 70) if contact.name else "",
               "company_name":plain(lead.name, 150),
+              "funding_fact":plain(funding_fact, 180) if funding_fact else "",
               "role_family":plain(item["role_family"], 70)}
     return (_render(item["subject"], fields, subject=True),
             _render(item["body"], fields))
@@ -161,6 +165,53 @@ def _official_page(settings, url, now):
         raise OutreachHold("official_https_contact_page_unavailable") from exc
 
 
+def verified_funding_fact(settings, lead, now):
+    """Optional exact public corroboration of an owner-approved private quote.
+
+    #386 intentionally does not persist a quote or source article in its
+    no-opening record. Never invent a funding statement from the status label.
+    An operator may supply an immutable private manifest; verify its exact
+    sentence against a bounded guarded HTTPS page, otherwise hold a fact-using
+    variant and allow a *separately approved* no-fact variant.
+    """
+    relative = getattr(settings, "outreach_funding_fact_manifest", "")
+    if not relative:
+        return ""
+    path = _private_file(settings, relative, max_bytes=8192)
+    try:
+        proof = json.loads(path.read_text("utf-8"))
+        if not isinstance(proof, dict) or set(proof) != {
+                "company_id", "source_url", "quote", "sha256"}:
+            raise ValueError
+        source, quote = proof["source_url"], proof["quote"]
+        if (proof["company_id"] != lead.company_id
+                or not isinstance(source, str) or not source.startswith("https://")
+                or not isinstance(quote, str) or not 12 <= len(quote) <= 180
+                or any(ord(char) < 32 or char in "{}<>" for char in quote)):
+            raise ValueError
+        signature = json.dumps(
+            {"company_id": lead.company_id, "source_url": source, "quote": quote},
+            sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        if hashlib.sha256(signature.encode()).hexdigest() != proof["sha256"]:
+            raise ValueError
+        # Source text must explicitly tie the asserted seed/round/financing
+        # statement to the very same verified employer (or a verified alias).
+        if not re.search(r"\\b(?:seed|series a|financing|funding|raised)\\b",
+                         quote, re.I) or not any(
+                re.search(r"(?<!\\w)" + re.escape(name) + r"(?!\\w)", quote, re.I)
+                for name in (lead.name, *lead.aliases)):
+            raise ValueError
+        final_url, body = _official_page(settings, source, now)
+        if final_url != source or not isinstance(body, str):
+            raise ValueError
+        visible = " ".join(html.unescape(re.sub(r"<[^>]*>", " ", body)).split())
+        if quote not in visible:
+            raise ValueError
+        return quote
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+        raise OutreachHold("verified_private_funding_fact_required") from exc
+
+
 def send_approved(*, settings, company_id, contact_page_url, exact_address,
                   person_name, variant_id, stores, stage=0, now=None,
                   smtp_factory=None, expand_followups=False):
@@ -183,7 +234,10 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         raise OutreachHold("existing_company_application")
     kind = "first" if stage == 0 else "followup"
     variant = approved_variant(settings, variant_id, kind)
-    subject, body = render_approved(variant, lead, contact)
+    fact = (verified_funding_fact(settings, lead, now)
+            if "{funding_fact}" in (variant.get("subject", "") + variant.get("body", ""))
+            else "")
+    subject, body = render_approved(variant, lead, contact, funding_fact=fact)
     pdf = original_seed_pdf(settings)
     ledger = Ledger(settings)
     ticket = ledger.reserve_email(
@@ -242,6 +296,8 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         if (approved_variant(settings, variant_id, kind)["sha256"] != variant["sha256"]
                 or original_seed_pdf(settings) != pdf):
             raise OutreachHold("approved_variant_or_resume_changed_before_wire")
+        if fact and verified_funding_fact(settings, current, prewire_now) != fact:
+            raise OutreachHold("verified_funding_fact_changed_before_wire")
         ledger.begin_wire(ticket["id"], source_checked=True, no_application=True,
                           linkedin_checked=True, now=prewire_now)
     except Exception:
