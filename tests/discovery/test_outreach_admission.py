@@ -63,3 +63,61 @@ def test_missing_or_colliding_identity_fails_closed(tmp_path):
     ledger.save()
     with pytest.raises(SourceHold, match="collision"):
         read_no_opening(s, KEY, now=NOW)
+
+
+def test_supported_general_ats_and_official_custom_cv_route_reuse_existing_identity(tmp_path):
+    """Source tag is provenance, not relevance bypass or submission authorization."""
+    from core.outreach_sources import verify_funded_application_route
+    s = source(tmp_path)
+    s.outreach_application_handoff_enabled = True
+    accepted = verify_funded_application_route(
+        s, KEY, {"ats":"ashby", "company":"Example Co", "job_id":"ashby:example-co:general"},
+        "https://jobs.ashbyhq.com/example-co/general-123",
+        {"title":"General Application", "text":"Source-verified public application details."},
+        now=NOW)
+    assert accepted.company_id == KEY
+    custom = verify_funded_application_route(
+        s, KEY, {"ats":"custom", "company":"Example Co", "job_id":"custom:123"},
+        "https://example-co.com/careers/cv",
+        {"title":"Talent Pool", "text":"Submit your CV through this official form."},
+        now=NOW)
+    assert custom.company_id == KEY
+    # The same metadata cannot gain a different employer or an unsupported ATS.
+    with pytest.raises(SourceHold, match="employer_mismatch"):
+        verify_funded_application_route(
+            s, KEY, {"ats":"ashby", "company":"Other Co"},
+            "https://jobs.ashbyhq.com/other-co/general",
+            {"title":"General Application", "text":"Apply here"}, now=NOW)
+    with pytest.raises(SourceHold, match="not_supported"):
+        verify_funded_application_route(
+            s, KEY, {"ats":"unsupported", "company":"Example Co"},
+            "https://unknown.example/job",
+            {"title":"Open Application", "text":"Apply here"}, now=NOW)
+    with pytest.raises(SourceHold, match="custom_cv_form_unverified"):
+        verify_funded_application_route(
+            s, KEY, {"ats":"custom", "company":"Example Co"},
+            "https://third-party.example/forms/cv",
+            {"title":"Talent Pool", "text":"Submit your CV"}, now=NOW)
+
+
+def test_funded_general_route_default_off_and_no_relevance_exception(tmp_path):
+    from core.outreach_sources import verify_funded_application_route
+    s = source(tmp_path)
+    record = {"ats":"ashby", "company":"Example Co"}
+    meta = {"title":"General Application", "text":"A real posting."}
+    with pytest.raises(SourceHold, match="handoff_off"):
+        verify_funded_application_route(
+            s, KEY, record, "https://jobs.ashbyhq.com/example-co/123", meta, now=NOW)
+    s.outreach_application_handoff_enabled = True
+    with pytest.raises(SourceHold, match="general_posting_not_proven"):
+        verify_funded_application_route(
+            s, KEY, record, "https://jobs.ashbyhq.com/example-co/123",
+            {"title":"Senior Engineer", "text":"A real posting."}, now=NOW)
+    with pytest.raises(SourceHold, match="general_posting_not_proven"):
+        verify_funded_application_route(
+            s, KEY, record, "https://jobs.ashbyhq.com/example-co/123",
+            {"title":"General Application", "text":""}, now=NOW)
+    s.mode = "cloud"
+    with pytest.raises(SourceHold, match="handoff_off"):
+        verify_funded_application_route(
+            s, KEY, record, "https://jobs.ashbyhq.com/example-co/123", meta, now=NOW)
