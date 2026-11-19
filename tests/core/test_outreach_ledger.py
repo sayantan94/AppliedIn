@@ -209,3 +209,24 @@ def test_two_verified_person_names_sharing_address_are_held_for_reconciliation(t
     reserve(db, l, contact("First Person", address="shared@example-co.com"))
     with pytest.raises(OutreachHold, match="recipient_alias_or_org_overlap"):
         reserve(db, l, contact("Second Person", address="shared@example-co.com"))
+
+
+def test_all_ten_campaign_ramp_days_and_later_hard_twenty(tmp_path):
+    """Synthetic reservations only; no sender, mailbox or transport is opened."""
+    from core.outreach_ledger import RAMP
+    db = Ledger(settings(tmp_path))
+    assert RAMP == (5, 7, 9, 10, 12, 14, 15, 17, 19, 20)
+    for elapsed, cap in enumerate((*RAMP, 20)):
+        current = T + timedelta(days=elapsed)
+        poll(db, current)
+        for i in range(cap):
+            key = f"{elapsed * 100 + i + 1:032x}"
+            l = FundedNoOpening(key, "Example Co", "example-co.com",
+                                "https://example-co.com", (), "synthetic",
+                                current, "no_openings")
+            reserve(db, l, contact("Test User"), now=current)
+        extra = FundedNoOpening(
+            f"{elapsed * 100 + 99:032x}", "Example Co", "example-co.com",
+            "https://example-co.com", (), "synthetic", current, "no_openings")
+        with pytest.raises(OutreachHold, match="email_daily_ramp_or_hard_cap"):
+            reserve(db, extra, contact("Test User"), now=current)
