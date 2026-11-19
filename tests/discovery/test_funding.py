@@ -681,7 +681,6 @@ def test_guarded_redirect_strips_auth_and_cross_host_conditionals(tmp_path, monk
 def test_daily_additions_defer_until_next_pass_and_unproductive_active_expires(tmp_path):
     cfg = settings(tmp_path)
     cfg.funding_daily_new_companies = 0
-    cfg.funding_eligible_days = 120
     funding.poll_once(
         cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
         extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
@@ -700,8 +699,53 @@ def test_daily_additions_defer_until_next_pass_and_unproductive_active_expires(t
     assert len(state.data["active"]) == 1
     cfg.funding_eligible_days = 30
     funding.poll_once(
-        cfg, now=NOW + timedelta(days=91),
+        cfg, now=NOW + timedelta(days=93),
         client_factory=lambda *_: OfflineClient(routes()),
         extractor=lambda *_a, **_kw: pytest.fail("expired announcement was re-extracted"),
         relevance_fn=lambda jobs, prefs: jobs)
     assert funding.State(path).data["active"] == {}
+
+
+def test_large_board_samples_without_trusting_later_duplicate_ids(tmp_path):
+    cfg = settings(tmp_path)
+    cfg.funding_max_postings_per_pass = 1
+    fake = routes()
+    data = json.loads(fixture("ashby.json"))
+    original = data["jobs"][0]
+    data["jobs"] = [original] + [
+        {**original,
+         "id": f"123e4567-e89b-42d3-a456-{i:012d}",
+         "jobUrl": BOARD + f"/123e4567-e89b-42d3-a456-{i:012d}"}
+        for i in range(1, 25)
+    ]
+    fake[ASHBY_API] = json.dumps(data)
+    funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: OfflineClient(fake),
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    assert len(funding.State(
+        tmp_path / "local" / "funded-watchlist.yaml").data["active"]) == 1
+
+    # The second occurrence lies outside the sample. It must still veto
+    # the sampled posting identity rather than silently changing uniqueness.
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other = settings(other_root)
+    other.funding_max_postings_per_pass = 1
+    original_copy = dict(original)
+    duplicate = dict(original_copy)
+    fake[ASHBY_API] = json.dumps({"jobs": [original_copy, duplicate]})
+    funding.poll_once(
+        other, now=NOW,
+        client_factory=lambda *_: OfflineClient(fake),
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    assert not funding.State(
+        Path(other.local_dir) / "funded-watchlist.yaml").data["active"]
+
+
+def test_source_limiter_rejects_out_of_contract_config(tmp_path):
+    cfg = settings(tmp_path)
+    cfg.funding_eligible_days = 365
+    assert funding.poll_once(cfg) == {"status": "disabled"}
+    cfg.funding_eligible_days = 30
+    cfg.funding_max_postings_per_pass = 1000
+    assert not funding.ready(cfg)
