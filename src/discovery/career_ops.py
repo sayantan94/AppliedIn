@@ -598,8 +598,19 @@ def funded_apply_role_handoff(settings, company_id: str, identity: dict,
         raise SourceHold("funded_application_identity_unverified")
     if identity.get("ats") != "custom" and _index_without_job_id(source_url):
         raise SourceHold("funded_general_posting_identity_missing")
+    # Do not trust a provider label or job ID supplied alongside a URL.
+    # Use the existing apply-role URL parser, just as the actual POST does.
+    # This binds the employer tenant and posting ID to the same witness.
+    from server import _manual_role_identity
+
+    parsed = _manual_role_identity(source_url)
+    if (not parsed or parsed.get("ats") != identity.get("ats")
+            or parsed.get("company") != identity.get("company")
+            or (identity.get("job_id") and
+                parsed.get("job_id") != identity["job_id"])):
+        raise SourceHold("funded_application_identity_unverified")
     return funded_apply_role_payload(
-        settings, company_id, identity, source_url, meta, now=now)
+        settings, company_id, parsed, source_url, meta, now=now)
 
 
 def prepare(ids: list[str], stores=None, *, apply_requested: bool = False,
