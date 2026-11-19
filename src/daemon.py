@@ -667,6 +667,23 @@ def _start_imap_poller(stores, settings=None) -> bool:
     return True
 
 
+def _start_funding_poller(settings=None) -> bool:
+    """Only the local, explicitly opted-in and valid source set may start."""
+    from core.config import get_settings
+
+    settings = settings or get_settings()
+    if settings.mode != "local" or not settings.funding_enabled:
+        return False
+    from discovery import funding
+
+    if not funding.ready(settings):
+        log.warning("funding poller disabled: no enabled validated sources or invalid limits")
+        return False
+    threading.Thread(target=funding.run_poller, args=(settings,), daemon=True,
+                     name="funding-poller").start()
+    return True
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -689,6 +706,7 @@ def main() -> None:
     threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
     from core.config import get_settings
     _start_imap_poller(stores, get_settings())
+    _start_funding_poller(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)

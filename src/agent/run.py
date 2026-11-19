@@ -275,7 +275,7 @@ def _reader_url(row: dict) -> str:
     """Source-bound operational read target; never write it back to a row."""
     from urllib.parse import unquote, urljoin, urlsplit
 
-    from discovery.watchlist import load_watchlist
+    from discovery.funding import load_effective_watchlist
     from tools.jd import _valid_reader_url
 
     raw = row.get("jd_url")
@@ -300,7 +300,7 @@ def _reader_url(row: dict) -> str:
         if not isinstance(name, str) or not name.strip() or ats not in ("custom", "workday"):
             raise JDURLUnresolvable("Missing exact historical source classification")
         cfg = Path(get_settings().config_dir) / "watchlist.yaml"
-        current_watchlist = load_watchlist(cfg)
+        current_watchlist = load_effective_watchlist(cfg)
         matches = [c for c in current_watchlist
                    if c.name.strip().casefold() == name.strip().casefold()
                    and c.ats == ats]
@@ -1116,11 +1116,11 @@ def _watchlist_browser_companies() -> set[str]:
     from pathlib import Path as _P
 
     from core.models import DiscoveryMode
-    from discovery.watchlist import load_watchlist
+    from discovery.funding import load_effective_watchlist
 
     try:
         cfg = _P(get_settings().config_dir) / "watchlist.yaml"
-        return {c.name.strip().lower() for c in load_watchlist(cfg)
+        return {c.name.strip().lower() for c in load_effective_watchlist(cfg)
                 if c.discovery is DiscoveryMode.BROWSER}
     except Exception:  # noqa: BLE001 — no watchlist means no browser-only companies
         return set()

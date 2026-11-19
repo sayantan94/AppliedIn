@@ -1,0 +1,10 @@
+{
+  "companies": [
+    {
+      "name": "example-co",
+      "batch": "W26",
+      "isHiring": true,
+      "website": "https://example-co.co.uk"
+    }
+  ]
+}
