@@ -777,9 +777,15 @@ class Ledger:
                 (company_id,)).fetchall()
             named = {r[0] for r in people_rows}
             provisional = {r[0] for r in people_rows if r[1]}
-            attempts = db.execute("SELECT stage,state,approved_variant,tracking_mode "
-                                  "FROM attempts WHERE company_id=?",
-                                  (company_id,)).fetchall()
+            attempts = db.execute("""
+                SELECT a.person_key,a.stage,a.state,a.approved_variant,
+                       a.tracking_mode,CASE WHEN b.attempt_id IS NULL THEN 0 ELSE 1 END
+                FROM attempts a LEFT JOIN bounces b ON b.attempt_id=a.id
+                WHERE a.company_id=?
+            """, (company_id,)).fetchall()
+            person_stops = dict(db.execute(
+                "SELECT person_key,kind FROM stops WHERE company_id=? "
+                "AND person_key!='*'", (company_id,)).fetchall())
             stop = db.execute("SELECT kind FROM stops WHERE company_id=? AND person_key='*'",
                               (company_id,)).fetchone()
             held = db.execute("SELECT reason FROM email_holds WHERE company_id=?",
@@ -827,5 +833,8 @@ class Ledger:
                 "company_stop":stop[0] if stop else None,
                 "company_email_hold":held[0] if held else None,
                 "global_email_pause":global_pause,
-                "attempts":[{"stage":r[0],"state":r[1],
-                             "approved_variant":r[2],"tracking":r[3]} for r in attempts]}
+                "attempts":[{"person_key":r[0],"stage":r[1],"state":r[2],
+                             "approved_variant":r[3], "tracking":r[4],
+                             "hard_bounced":bool(r[5]),
+                             "recipient_stop":person_stops.get(r[0])}
+                            for r in attempts]}
