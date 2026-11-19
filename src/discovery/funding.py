@@ -830,9 +830,13 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     if not source_bound(cfg, cfg):
         return "source_bound_refused", None
     jobs = ADAPTERS[ats].fetch(cfg, client)
-    # Adapters decode a bounded HTTP body. Inspect a bounded read-only sample,
-    # rather than excluding every employer with a normal large ATS board.
-    jobs = jobs[:settings.funding_max_postings_per_pass]
+    # The guarded body already bounds the adapter. Sample only N postings,
+    # but retain full-feed uniqueness evidence: duplicates after the sample
+    # must never make a sampled job's canonical identity look unique.
+    if len(jobs) > settings.funding_max_postings_per_pass:
+        ids = Counter(j.job_id for j in jobs)
+        jobs = [j for j in jobs[:settings.funding_max_postings_per_pass]
+                if ids[j.job_id] == 1]
     approved, refused = admit_feed(cfg, cfg, jobs)
     if refused and not approved:
         return "consumer_guard_refused", None
