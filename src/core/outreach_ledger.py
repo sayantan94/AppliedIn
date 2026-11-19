@@ -254,6 +254,8 @@ class Ledger:
                     {contact.person_key}) > 3)):
                 raise OutreachHold("hard_company_three_person_cap")
             if stage == 0:
+                if contact.person_key != "org" and contact.person_key in existing_keys:
+                    raise OutreachHold("cross_channel_person_already_reserved_or_contacted")
                 if contact.person_key != "org" and contact.person_key in linked:
                     raise OutreachHold("linkedin_already_contacted_person")
                 if existing:
@@ -348,6 +350,10 @@ class Ledger:
                 raise OutreachHold("cannot_prove_no_wire_after_begin")
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
+            db.execute("DELETE FROM pixel_events WHERE token_sha IN "
+                       "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",
+                       (attempt_id,))
+            db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?", (attempt_id,))
             if row[1] != "org" and not db.execute(
                     "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
                     "AND state!='definite_pre_wire_failure'",
@@ -630,6 +636,20 @@ class Ledger:
                 raise OutreachHold("recorded_company_or_recipient_stop")
             if action == "copy" and state not in {"ready", "copied"}:
                 raise OutreachHold("manual_copy_after_sent_not_allowed")
+            if action == "copy" and state == "ready":
+                if person in linkedin.people:
+                    raise OutreachHold("linkedin_already_contacted_person")
+                owner = db.execute(
+                    "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+                    (company, person)).fetchone()
+                if owner is not None and owner[0] != "manual":
+                    raise OutreachHold("cross_channel_person_already_reserved_or_contacted")
+                previous = db.execute(
+                    "SELECT 1 FROM manual_targets WHERE company_id=? AND person_key=? "
+                    "AND id!=? AND state!='ready'",
+                    (company, person, row_id)).fetchone()
+                if previous:
+                    raise OutreachHold("manual_person_already_copied_on_other_row")
             if action == "mark" and state not in {"copied", "owner_marked_sent"}:
                 raise OutreachHold("manual_must_copy_before_mark")
             local = {r[0] for r in db.execute(
@@ -670,6 +690,18 @@ class Ledger:
             linked = set(linkedin.people)
             if len(local | linked | {person_key}) > 3:
                 raise OutreachHold("hard_company_three_person_cap")
+            prior = db.execute(
+                "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+                (company_id, person_key)).fetchone()
+            if person_key in linked:
+                # The private reader now sees the separately recorded send:
+                # the reservation counts once and is never sent again here.
+                if prior and prior[0] == "linkedin-reserved":
+                    return {"reserved":False, "reconciled":True,
+                            "remaining":3-len(local | linked)}
+                raise OutreachHold("linkedin_already_contacted_person")
+            if prior and prior[0] == "email":
+                raise OutreachHold("cross_channel_person_already_contacted")
             db.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?)",
                        (company_id, person_key, "linkedin-reserved",
                         int(person_key.startswith("provisional:"))))
