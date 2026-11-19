@@ -196,9 +196,9 @@ def verified_funding_fact(settings, lead, now):
             raise ValueError
         # Source text must explicitly tie the asserted seed/round/financing
         # statement to the very same verified employer (or a verified alias).
-        if not re.search(r"\\b(?:seed|series a|financing|funding|raised)\\b",
+        if not re.search(r"\b(?:seed|series a|financing|funding|raised)\b",
                          quote, re.I) or not any(
-                re.search(r"(?<!\\w)" + re.escape(name) + r"(?!\\w)", quote, re.I)
+                re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", quote, re.I)
                 for name in (lead.name, *lead.aliases)):
             raise ValueError
         final_url, body = _official_page(settings, source, now)
