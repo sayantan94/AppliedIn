@@ -75,6 +75,10 @@ class Ledger:
                     PRIMARY KEY (company_id, person_key));
                 CREATE TABLE IF NOT EXISTS email_holds (
                     company_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS human_responses (
+                    company_id TEXT NOT NULL, person_key TEXT NOT NULL,
+                    observed_at REAL NOT NULL,
+                    PRIMARY KEY(company_id, person_key));
                 CREATE TABLE IF NOT EXISTS bounces (
                     attempt_id TEXT PRIMARY KEY, observed_at REAL NOT NULL,
                     FOREIGN KEY(attempt_id) REFERENCES attempts(id));
@@ -406,6 +410,33 @@ class Ledger:
                        "ON CONFLICT(company_id,person_key) DO NOTHING",
                        (company_id, person_key, kind, now.timestamp()))
 
+    def record_matched_human_response(self, attempt_id, *, opt_out=False, now=None):
+        """Atomically stop the company and dedup the human-response numerator.
+
+        An uncertain attempted send may still receive a real reply (stop it),
+        but it cannot enter the accepted-first-email response numerator.
+        Every accepted follow-up belongs to its original first-email thread.
+        """
+        now = _time(now)
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT company_id,person_key FROM attempts WHERE id=?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise OutreachHold("human_response_unknown_thread")
+            company, person = row
+            db.execute("INSERT INTO stops VALUES (?,?,?,?) "
+                       "ON CONFLICT(company_id,person_key) DO NOTHING",
+                       (company, "*", "opt_out" if opt_out else "human_reply",
+                        now.timestamp()))
+            accepted_first = db.execute(
+                "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
+                "AND stage=0 AND state='confirmed_smtp_accepted'",
+                (company, person)).fetchone()
+            if accepted_first:
+                db.execute("INSERT OR IGNORE INTO human_responses VALUES (?,?,?)",
+                           (company, person, now.timestamp()))
+
     def hold_company_email(self, company_id, reason="ambiguous_inbound", now=None):
         now = _time(now)
         with self._tx() as db:
@@ -475,8 +506,18 @@ class Ledger:
             held = db.execute("SELECT reason FROM email_holds WHERE company_id=?",
                               (company_id,)).fetchone()
             global_pause = self._meta(db, "global_email_pause") == "1"
+            first_accepted = db.execute(
+                "SELECT COUNT(*) FROM attempts WHERE company_id=? AND stage=0 "
+                "AND state='confirmed_smtp_accepted'", (company_id,)).fetchone()[0]
+            human_replies = db.execute(
+                "SELECT COUNT(*) FROM human_responses WHERE company_id=?",
+                (company_id,)).fetchone()[0]
         people = named | set(linkedin.people)
         return {"used":len(people), "remaining":max(0, 3-len(people)),
+                "accepted_first_emails":first_accepted,
+                "matched_human_threads":human_replies,
+                "human_reply_rate":(human_replies / first_accepted
+                                    if first_accepted else None),
                 "company_stop":stop[0] if stop else None,
                 "company_email_hold":held[0] if held else None,
                 "global_email_pause":global_pause,
