@@ -511,7 +511,11 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
                  or bool(msg.get("list-id")) or bool(msg.get("list-unsubscribe"))
                  or str(msg.get("precedence", "")).casefold() in {"bulk", "list", "junk"}
                  or "out of office" in str(msg.get("subject", "")).casefold()
-                 or "automatic reply" in str(msg.get("subject", "")).casefold())
+                 or "automatic reply" in str(msg.get("subject", "")).casefold()
+                 or "vacation" in str(msg.get("subject", "")).casefold()
+                 or any(msg.get(key) for key in
+                        ("x-autoreply", "x-autorespond", "x-auto-response-suppress",
+                         "x-ms-exchange-inbox-rules-loop")))
     indicators = (str(msg.get_content_type()).casefold() == "multipart/report"
                   and "delivery-status" in str(msg.get("content-type", "")).casefold()
                   or bool(msg.get("x-failed-recipients"))
@@ -553,13 +557,23 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
         else:
             ledger.hold_company_email(company, "ambiguous_reply_or_opt_out")
             classification = "suspected_reply"
-    elif sender_ok:
-        # An exact previous destination may identify a company for *holding*
-        # email, but never authorizes recording a human reply without threading.
-        companies = ledger.by_recipient(sender)
-        if len(companies) == 1:
-            ledger.hold_company_email(companies[0], "unthreaded_possible_reply")
-        classification = "unmatched_or_automatic"
+    else:
+        # A malformed or ambiguous In-Reply-To / References chain is still
+        # evidence of an implicated outbound thread. Hold all *exactly*
+        # referenced companies for reconciliation, never record a human reply
+        # or guess which attempt actually received the response.
+        thread_companies = set()
+        for mid in set(parent + references):
+            referenced = ledger.attempt_by_message_id(mid)
+            if referenced is not None:
+                thread_companies.add(referenced["company_id"])
+        if sender_ok:
+            # Exact earlier recipient is hold-only evidence; sender domain
+            # alone is never a matching or stopping witness.
+            thread_companies.update(ledger.by_recipient(sender))
+        for company in thread_companies:
+            ledger.hold_company_email(company, "unthreaded_or_ambiguous_reply")
+        classification = "unmatched_or_automatic" if sender_ok else "unmatched"
     else:
         classification = "unmatched"
     ledger.record_inbound_uid(validity, uid, classification)
