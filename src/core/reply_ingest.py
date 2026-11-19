@@ -586,6 +586,7 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
     if getattr(settings, "outreach_enabled", False):
         from core.outreach_ledger import Ledger
         cold_ledger = Ledger(settings)
+    cold_pass_complete = False
     inserted_count = 0
     try:
         incoming = _generation(getattr(client, "uidvalidity", None))
@@ -683,7 +684,12 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
             if complete and getattr(settings, "outreach_inbound_verified", False):
                 cold_ledger.record_successful_poll(
                     uidvalidity=validity, monitored_address=settings.outreach_sender)
+                cold_pass_complete = True
     finally:
+        if cold_ledger is not None and not cold_pass_complete:
+            # A failed generation, missing UID or interrupted poll cannot leave
+            # a still-young prior watermark authorizing outbound SMTP.
+            cold_ledger.invalidate_poll()
         client.logout()
     return inserted_count
 
@@ -699,12 +705,23 @@ def run_poller(stop_event=None) -> None:
     from core.stores import make_stores
     logger = logging.getLogger(__name__)
     while stop_event is None or not stop_event.is_set():
+        settings = None
         try:
             settings = get_settings()
             creds = local_credentials(settings)
             if settings.mode == "local" and enabled() and creds:
                 ingest_pass(settings, creds, make_stores(settings), classifier=_production_classifier)
+            elif settings.mode == "local" and getattr(settings, "outreach_enabled", False):
+                from core.outreach_ledger import Ledger
+                Ledger(settings).invalidate_poll()
         except Exception:
+            if settings is not None and settings.mode == "local" and getattr(
+                    settings, "outreach_enabled", False):
+                try:
+                    from core.outreach_ledger import Ledger
+                    Ledger(settings).invalidate_poll()
+                except Exception:
+                    pass
             logger.warning("IMAP poll failed; will retry on next interval")
         interval = poll_interval() or 60
         if stop_event is None:
