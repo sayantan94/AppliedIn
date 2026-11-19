@@ -547,10 +547,19 @@ def ready(settings=None) -> bool:
     settings = settings or get_settings()
     if (settings.mode != "local" or not settings.funding_enabled
             or not 4 <= settings.funding_poll_hours <= 6
-            or min(settings.funding_daily_http, settings.funding_max_http_per_pass,
-                   settings.funding_daily_extraction_calls,
-                   settings.funding_weekly_extraction_tokens,
-                   settings.funding_daily_relevance_calls) <= 0
+            or not 1 <= settings.funding_eligible_days <= 30
+            or not 1 <= settings.funding_daily_extraction_calls <= 48
+            or not 1000 <= settings.funding_weekly_extraction_tokens <= 2_000_000
+            or not 100 <= settings.funding_extract_max_output_tokens <= 4096
+            or not 0 <= settings.funding_daily_new_companies <= 20
+            or not 1 <= settings.funding_daily_http <= 1000
+            or not 1 <= settings.funding_max_http_per_pass <= 250
+            or not 1 <= settings.funding_max_candidates_per_pass <= 100
+            or not 1 <= settings.funding_max_postings_per_pass <= 50
+            or not 1 <= settings.funding_daily_relevance_calls <= 100
+            or not 1 <= settings.funding_recheck_days <= 14
+            or not 7 <= settings.funding_pending_days <= 60
+            or not 30 <= settings.funding_active_days <= 120
             or os.getenv("APPLIEDIN_DISCOVERY", "on").lower() in {"off", "false", "no", "0"}):
         return False
     try:
@@ -821,8 +830,9 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     if not source_bound(cfg, cfg):
         return "source_bound_refused", None
     jobs = ADAPTERS[ats].fetch(cfg, client)
-    if len(jobs) > settings.funding_max_postings_per_pass:
-        return "postings_limit", None
+    # Adapters decode a bounded HTTP body. Inspect a bounded read-only sample,
+    # rather than excluding every employer with a normal large ATS board.
+    jobs = jobs[:settings.funding_max_postings_per_pass]
     approved, refused = admit_feed(cfg, cfg, jobs)
     if refused and not approved:
         return "consumer_guard_refused", None
