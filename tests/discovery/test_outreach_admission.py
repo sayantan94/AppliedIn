@@ -133,7 +133,9 @@ def test_funded_real_apply_role_post_retains_normal_tracking_and_custom_lane(tmp
     from core.storage.local import RedisTracking
     from tools import jd, posting_guard as pg, submit_review
 
-    settings = source(tmp_path)
+    # The in-process API uses wall-clock time; keep the synthetic witness
+    # fresh without touching the owner's funding records.
+    settings = source(tmp_path, seen=datetime.now(UTC) - timedelta(minutes=1))
     settings.outreach_application_handoff_enabled = True
     tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
     stores = SimpleNamespace(tracking=tracking)
