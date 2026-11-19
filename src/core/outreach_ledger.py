@@ -354,6 +354,11 @@ class Ledger:
             db.execute("UPDATE attempts SET state=?, accepted_at=? WHERE id=?",
                        ("confirmed_smtp_accepted" if accepted else "uncertain",
                         now.timestamp() if accepted else None, attempt_id))
+            if accepted:
+                # The 30-message denominator can cross its minimum after a
+                # prior confirmed bounce. Review the persisted threshold at
+                # acceptance too, not only when a DSN arrives.
+                self._apply_bounce_pause(db, now)
 
     def definite_no_wire(self, attempt_id):
         """Only permitted for reserved attempts *before* begin_wire."""
@@ -512,6 +517,20 @@ class Ledger:
                                 (str(uidvalidity), uid, classification))
             return cursor.rowcount == 1
 
+    def _apply_bounce_pause(self, db, now):
+        """Sticky global stop; re-enable requires explicit owner review."""
+        count = db.execute("SELECT COUNT(*) FROM bounces WHERE observed_at>=?",
+                           ((now - timedelta(days=7)).timestamp(),)).fetchone()[0]
+        cohort = db.execute("SELECT COUNT(*) FROM attempts WHERE "
+                            "state='confirmed_smtp_accepted' AND accepted_at>=?",
+                            ((now - timedelta(days=30)).timestamp(),)).fetchone()[0]
+        bounced_cohort = db.execute(
+            "SELECT COUNT(*) FROM bounces AS b JOIN attempts AS a ON b.attempt_id=a.id "
+            "WHERE a.state='confirmed_smtp_accepted' AND a.accepted_at>=?",
+            ((now - timedelta(days=30)).timestamp(),)).fetchone()[0]
+        if count >= 3 or (cohort >= 30 and bounced_cohort / cohort >= 0.03):
+            self._set_meta(db, "global_email_pause", "1")
+
     def confirm_hard_bounce(self, attempt_id, *, now=None):
         now = _time(now)
         with self._tx() as db:
@@ -527,17 +546,7 @@ class Ledger:
                        (row[0], row[1], "hard_bounce", now.timestamp()))
             db.execute("INSERT OR IGNORE INTO email_holds VALUES (?,?,?)",
                        (row[0], "confirmed_hard_bounce_review_required", now.timestamp()))
-            count = db.execute("SELECT COUNT(*) FROM bounces WHERE observed_at>=?",
-                               ((now - timedelta(days=7)).timestamp(),)).fetchone()[0]
-            cohort = db.execute("SELECT COUNT(*) FROM attempts WHERE "
-                                "state='confirmed_smtp_accepted' AND accepted_at>=?",
-                                ((now - timedelta(days=30)).timestamp(),)).fetchone()[0]
-            bounced_cohort = db.execute(
-                "SELECT COUNT(*) FROM bounces AS b JOIN attempts AS a ON b.attempt_id=a.id "
-                "WHERE a.state='confirmed_smtp_accepted' AND a.accepted_at>=?",
-                ((now - timedelta(days=30)).timestamp(),)).fetchone()[0]
-            if count >= 3 or (cohort >= 30 and bounced_cohort / cohort >= 0.03):
-                self._set_meta(db, "global_email_pause", "1")
+            self._apply_bounce_pause(db, now)
         return True
 
 
