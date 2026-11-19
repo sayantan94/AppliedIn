@@ -2135,6 +2135,21 @@ def create_app() -> FastAPI:
         identity = _manual_role_identity(url)
         if not identity:
             return {"ok": False, "error": "posting_identity_unresolved"}
+        # The vendor tenant/domain label is a URL identity, not necessarily
+        # the verified employer's displayed name. Use #386's exact identity
+        # for tracking, but keep the parsed tenant as independent evidence for
+        # the later source-verifying gate.
+        parsed_identity = identity
+        funded_lead = None
+        if funded_tag:
+            from core.outreach_sources import SourceHold, read_no_opening
+            try:
+                funded_lead = read_no_opening(
+                    settings, (body or {}).get("funded_company_id"),
+                    require_fresh=False)
+            except SourceHold as exc:
+                return {"ok": False, "error": str(exc)}
+            identity = {**identity, "company": funded_lead.name}
         stores = make_stores(settings)
         row, ambiguous = _manual_existing_role(stores.tracking, identity, url)
         if ambiguous:
@@ -2175,13 +2190,18 @@ def create_app() -> FastAPI:
         if not isinstance(title, str):
             return {"ok": False, "error": "posting_title_invalid"}
         if funded_tag:
-            from core.outreach_sources import SourceHold, verify_funded_application_route
+            from core.outreach_sources import SourceHold
+            from discovery.career_ops import funded_apply_role_handoff
             try:
-                verify_funded_application_route(
+                funded_apply_role_handoff(
                     settings, (body or {}).get("funded_company_id"),
-                    identity, read_url, meta)
+                    parsed_identity, read_url, meta)
             except SourceHold as exc:
                 return {"ok": False, "error": str(exc)}
+            if row and company.casefold() not in {
+                    funded_lead.name.casefold(),
+                    *(alias.casefold() for alias in funded_lead.aliases)}:
+                return {"ok": False, "error": "funded_existing_employer_mismatch"}
 
         if row:
             if not _commit_manual_posting(pk, stores, meta):
