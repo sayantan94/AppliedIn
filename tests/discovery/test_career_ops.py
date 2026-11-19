@@ -1880,9 +1880,10 @@ def test_funded_application_handoff_reuses_existing_post_and_refuses_indexes(tmp
         "source": "synthetic", "seen_at": current.isoformat(),
     }
     funded.save()
-    identity = {"ats": "ashby", "company": "Example Co",
-                "job_id": "ashby:example-co:general-123"}
+    from server import _manual_role_identity
     url = "https://jobs.ashbyhq.com/example-co/general-123"
+    identity = _manual_role_identity(url)
+    assert identity and identity["ats"] == "ashby"
     meta = {"title": "General Application", "text": "Official synthetic role"}
     proposal = co.funded_apply_role_handoff(settings, key, identity, url, meta, now=current)
     assert proposal["method"] == "POST"
@@ -1897,6 +1898,10 @@ def test_funded_application_handoff_reuses_existing_post_and_refuses_indexes(tmp
         co.funded_apply_role_handoff(
             settings, key, identity,
             "https://jobs.ashbyhq.com/example-co", meta, now=current)
+    with pytest.raises(SourceHold, match="identity_unverified"):
+        co.funded_apply_role_handoff(
+            settings, key, identity,
+            "https://jobs.ashbyhq.com/other-co/general-123", meta, now=current)
     with pytest.raises(SourceHold, match="general_posting_not_proven"):
         co.funded_apply_role_handoff(
             settings, key, identity, url,
