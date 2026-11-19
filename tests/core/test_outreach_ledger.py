@@ -139,6 +139,10 @@ def test_ramp_and_hard_bounce_company_vs_global(tmp_path):
         accept(db, ticket)
         items.append(ticket)
     assert db.confirm_hard_bounce(items[0]["id"], now=T)
+    private = db.report(lead("a").company_id, EMPTY)
+    assert private["attempts"][0]["hard_bounced"] is True
+    assert private["attempts"][0]["recipient_stop"] == "hard_bounce"
+    assert private["attempts"][0]["approved_variant"] == "owner-approved"
     assert not db.report(lead("b").company_id, EMPTY)["global_email_pause"]
     with pytest.raises(OutreachHold, match="company_email_held"):
         reserve(db, lead("a"), contact("Another Person"))
