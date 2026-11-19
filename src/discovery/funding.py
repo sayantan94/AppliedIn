@@ -88,7 +88,7 @@ def _new_state() -> dict:
 
 def _strict_native(name: str, url: str, ats: str, board: str) -> bool:
     if (not isinstance(name, str) or not name.strip() or len(name) > 150
-            or ats not in _BOARD_HOST or not isinstance(board, str)
+            or not isinstance(ats, str) or ats not in _BOARD_HOST or not isinstance(board, str)
             or not _TENANT.fullmatch(board) or not isinstance(url, str)):
         return False
     return url.rstrip("/") == f"https://{_BOARD_HOST[ats]}/{board}"
@@ -143,7 +143,7 @@ def _validate_state(data: object) -> dict:
             raise FundingRefusal("corrupt_funding_state")
     if not isinstance(data["next_poll"], str):
         raise FundingRefusal("corrupt_funding_state")
-    if len(data["active"]) > 300 or len(data["deals"]) > 5000:
+    if len(data["active"]) > 1200 or len(data["deals"]) > 5000:
         raise FundingRefusal("state_capacity")
     for entry in data["active"].values():
         _auto_record(entry)
@@ -241,9 +241,11 @@ class State:
                 if not isinstance(item, dict):
                     raise FundingRefusal("corrupt_funding_state")
                 t = item.get("seen_at", "")
-                if item.get("status") not in ("retryable", "deferred") and t:
+                if t:
                     try:
                         seen = datetime.fromisoformat(t)
+                        # Pending companies and open budgets live elsewhere.
+                        # Stale retryable/deferred tombstones cannot remain forever.
                         if _utc(seen) < cutoff:
                             del self.data[field][key]
                     except ValueError:
@@ -685,7 +687,8 @@ def _extract_batch(articles: list[dict], state: State, settings, now, *, extract
         raise FundingRefusal("invalid_model_result")
     out = {}
     for article in parsed["articles"][:len(inputs)]:
-        if not isinstance(article, dict) or article.get("id") not in {a["id"] for a in inputs}:
+        if (not isinstance(article, dict) or article.get("id") not in
+                {a["id"] for a in inputs} or article["id"] in out):
             raise FundingRefusal("invalid_model_result")
         deals = article.get("deals")
         if not isinstance(deals, list) or len(deals) > 8:
@@ -745,7 +748,15 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
                     continue
                 # The board must independently identify its company. A
                 # functioning guessed slug or shared ATS host is insufficient.
-                board_page = _article(client.get(native, follow_redirects=True).text)
+                board_response = client.get(native, follow_redirects=True)
+                board_response.raise_for_status()
+                reached = urlsplit(str(board_response.request.url))
+                if (reached.scheme != "https" or reached.hostname != host
+                        or reached.path.rstrip("/") != f"/{board}"
+                        or reached.query or reached.fragment):
+                    # A redirect to another tenant is not an owner witness.
+                    continue
+                board_page = _article(board_response.text)
                 if issuer.casefold() not in board_page.text[:12000].casefold():
                     continue
                 return ats, board, native
@@ -756,7 +767,8 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
 
 def _preview_verified(issuer: str, homepage: str, source_id: str,
                       state: State, settings, client: GuardedClient, now,
-                      *, relevance_fn=None, employer_page=None) -> tuple[str, dict | None]:
+                      *, relevance_fn=None, employer_page=None,
+                      aliases=()) -> tuple[str, dict | None]:
     """Re-prove the employer, tenant, producer AND consumer, without stores."""
     from .adapters import ADAPTERS
     from .canonical_job_url import admit_feed, source_bound
@@ -766,10 +778,14 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     if not domain:
         return "psl_unavailable_or_unknown", None
     manual = load_watchlist(Path(settings.config_dir) / "watchlist.yaml")
-    if any(c.name.strip().casefold() == issuer.strip().casefold() for c in manual):
+    identities = {issuer.strip().casefold()} | {
+        a.strip().casefold() for a in aliases if isinstance(a, str)}
+    if any(c.name.strip().casefold() in identities for c in manual):
         return "manual_precedence", None
     for row in state.data["active"].values():
-        if row["employer_domain"] == domain or row["name"].casefold() == issuer.casefold():
+        existing = {row["name"].strip().casefold()} | {
+            a.strip().casefold() for a in row.get("aliases", [])}
+        if row["employer_domain"] == domain or not identities.isdisjoint(existing):
             return "duplicate_verified_employer", None
     page = employer_page if employer_page is not None else client.get(
         homepage, follow_redirects=True)
@@ -781,6 +797,12 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     if not board:
         return "guard_not_proven", None
     ats, token, native_url = board
+    if any((c.ats == ats and c.board == token)
+           or c.careers_url.rstrip("/") == native_url for c in manual):
+        return "manual_board_collision", None
+    if any(row["ats"] == ats and row["board"] == token
+           for row in state.data["active"].values()):
+        return "tenant_collision", None
     cfg = CompanyConfig(name=issuer, careers_url=native_url, ats=ats, board=token)
     if not source_bound(cfg, cfg):
         return "source_bound_refused", None
@@ -803,7 +825,7 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     return "admissible", {
         "name": issuer, "careers_url": native_url, "ats": ats, "board": token,
         "mode": "gated", "discovery": "feed", "employer_domain": domain,
-        "homepage": homepage, "aliases": [],
+        "homepage": homepage, "aliases": list(aliases),
         "source_id": source_id, "admitted_at": now.isoformat(),
         "last_relevant_at": now.isoformat(),
     }
@@ -818,7 +840,15 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     issuer, stage = deal.get("issuer"), deal.get("stage")
     if not isinstance(issuer, str) or not issuer.strip() or len(issuer) > 150:
         return "issuer_unknown", None, None
-    if stage not in _STAGE or not _STAGE[stage].search(article["text"]):
+    if not isinstance(stage, str) or stage not in _STAGE:
+        return "round_unconfirmed", None, None
+    # In a multi-deal article B's round is not evidence for issuer A.
+    mentions = [
+        sentence for sentence in re.split(r"[.!?;](?:\s+|$)", article["text"])
+        if re.search(r"(?<!\w)" + re.escape(issuer) + r"(?!\w)",
+                     sentence, re.I)
+    ]
+    if not any(_STAGE[stage].search(m) and _FUNDING.search(m) for m in mentions):
         return "round_unconfirmed", None, None
     if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
         return "round_date_unconfirmed_or_stale", None, None
@@ -851,14 +881,30 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     if (registrable(str(page.request.url)) != domain
             or issuer.casefold() not in homepage_text.casefold()):
         return "employer_homepage_owner_unproved", None, None
+    # The news article and employer homepage must independently corroborate
+    # every alias before it can participate in identity precedence.
+    proposed = deal.get("aliases", [])
+    if not isinstance(proposed, list) or len(proposed) > 8:
+        return "aliases_unverified", None, None
+    proven_aliases = []
+    for alias in proposed:
+        if (not isinstance(alias, str) or not 2 <= len(alias.strip()) <= 150
+                or alias.strip().casefold() == issuer.strip().casefold()):
+            continue
+        word = r"(?<!\w)" + re.escape(alias.strip()) + r"(?!\w)"
+        if (re.search(word, article["text"], re.I)
+                and re.search(word, homepage_text, re.I)
+                and alias.strip().casefold() not in
+                {a.casefold() for a in proven_aliases}):
+            proven_aliases.append(alias.strip())
     # A news writer calling a business remote-first is not independent proof.
     if remote_exception and not _REMOTE.search(homepage_text):
         return "remote_first_not_employer_evidenced", None, None
     evidence = {"name": issuer, "homepage": homepage, "employer_domain": domain,
-                "source": article["source"]}
+                "source": article["source"], "aliases": proven_aliases}
     reason, active = _preview_verified(
         issuer, homepage, article["source"], state, settings, client, now,
-        relevance_fn=relevance_fn, employer_page=page)
+        relevance_fn=relevance_fn, employer_page=page, aliases=proven_aliases)
     return reason, active, evidence
 
 
@@ -887,7 +933,8 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
                 raise FundingRefusal("corrupt_pending_state")
             reason, active = _preview_verified(
                 row["name"], row["homepage"], row["source"],
-                state, settings, client, now, relevance_fn=relevance_fn)
+                state, settings, client, now, relevance_fn=relevance_fn,
+                aliases=row.get("aliases", []))
         except (FundingRefusal, httpx.HTTPError, ValueError):
             reason, active = "pending_recheck_failed", None
         if active is not None and not state.reserve(
@@ -1016,7 +1063,8 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                           {"probe_retryable", "relevance_budget", "postings_limit"}
                           else "pending" if reason in {
                               "guard_not_proven", "no_openings", "no_relevant_openings",
-                              "consumer_guard_refused", "source_bound_refused"}
+                              "consumer_guard_refused", "source_bound_refused",
+                              "manual_board_collision", "tenant_collision"}
                           else "unresolved" if reason in {
                               "employer_site_unproved", "psl_unavailable_or_unknown",
                               "remote_first_not_employer_evidenced",
