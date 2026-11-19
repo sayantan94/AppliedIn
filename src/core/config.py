@@ -266,6 +266,7 @@ class Settings(BaseSettings):
     outreach_linkedin_path: str = ""
     outreach_linkedin_fields: str = ""
     outreach_approvals_file: str = "outreach-approved-templates.json"
+    outreach_resume_manifest: str = "outreach-resume.json"
     outreach_smtp_host: str = ""
     outreach_smtp_port: int = 465
     outreach_smtp_username: str = ""
