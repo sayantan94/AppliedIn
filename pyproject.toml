@@ -22,6 +22,7 @@ dependencies = [
     # the install extras can prune it again.
     "greenlet>=3",
     "orjson>=3.11.9",
+    "tldextract>=5.4.0,<6",
 ]
 
 [project.optional-dependencies]
