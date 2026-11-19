@@ -936,6 +936,35 @@ def test_two_issuer_passages_cannot_cross_authorize_sector_or_region(
     assert (reason, active, verified) == (expected_reason, None, None)
 
 
+@pytest.mark.parametrize("body,region", [
+    (
+        "example-co raised seed financing as a non-fintech firm in Germany; "
+        "OtherCo raised seed fintech funding in London.",
+        "eu",
+    ),
+    (
+        "example-co raised seed financing and "
+        "OtherCo raised seed fintech funding in London.",
+        "uk",
+    ),
+])
+def test_negated_sector_and_named_other_issuer_cannot_admit(
+        tmp_path, body, region):
+    cfg = settings(tmp_path)
+    news = funding._article(
+        f'<h1>{body}</h1><a href="{HOME}">example-co</a>')
+    deal = {"issuer": "example-co", "stage": "seed",
+            "date": "2026-11-18", "sector": "fintech", "region": region}
+    client = OfflineClient(routes())
+    reason, active, verified = funding._prove_deal(
+        deal, {"source": "uk_feed", "date": "2026-11-18",
+               "text": news.text, "html": news, "url": ARTICLE},
+        funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, verified) == ("sector_unproved", None, None)
+    assert client.calls == [], "an issuer-negative article cannot probe an ATS"
+
+
 def test_portfolio_page_with_valid_ashby_board_is_not_employer_homepage(tmp_path):
     cfg = settings(tmp_path)
     portfolio = "https://portfolio.example.org/companies/example-co"
