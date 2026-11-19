@@ -789,6 +789,8 @@ def create_app() -> FastAPI:
     from discovery.cosign_api import router as cosign_router
     app.include_router(cosign_router)
     settings = get_settings()
+    from core.outreach_manual import register_routes as register_outreach_routes
+    register_outreach_routes(app, settings)
     from tools import submit_review
 
     @app.get("/steering")
@@ -2122,6 +2124,9 @@ def create_app() -> FastAPI:
         from core.models import JobRecord
         from tools import jd, posting_guard as pg
 
+        funded_tag = (body or {}).get("discovery_source") == "funded_no_opening"
+        if (body or {}).get("discovery_source") not in (None, "", "funded_no_opening"):
+            return {"ok": False, "error": "unsupported_discovery_source"}
         url = ((body or {}).get("url") or "").strip()
         if url and not url.lower().startswith(("http://", "https://")):
             url = "https://" + url
@@ -2169,6 +2174,14 @@ def create_app() -> FastAPI:
                  or (row or {}).get("title") or "Role from URL")
         if not isinstance(title, str):
             return {"ok": False, "error": "posting_title_invalid"}
+        if funded_tag:
+            from core.outreach_sources import SourceHold, verify_funded_application_route
+            try:
+                verify_funded_application_route(
+                    settings, (body or {}).get("funded_company_id"),
+                    identity, read_url, meta)
+            except SourceHold as exc:
+                return {"ok": False, "error": str(exc)}
 
         if row:
             if not _commit_manual_posting(pk, stores, meta):
@@ -2188,7 +2201,8 @@ def create_app() -> FastAPI:
         job = JobRecord(company=company, job_id=identity["job_id"], title=title,
                         jd_url=read_url, jd_text=pending["text"],
                         posting_guard=pending["posting_guard"], ats=identity["ats"],
-                        posted_at=meta.get("posted_at") or "")
+                        posted_at=meta.get("posted_at") or "",
+                        discovery_source="funded_no_opening" if funded_tag else "")
         pk = job.pk
         if not stores.tracking.put_new(job):
             return {"ok": False, "error": "tracking_conflict"}
