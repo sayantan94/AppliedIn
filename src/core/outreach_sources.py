@@ -98,8 +98,8 @@ _SUPPORTED_APPLICATION_ATS = frozenset({
     "greenhouse", "ashby", "lever", "workday", "workable",
     "smartrecruiters", "eightfold", "personio",
 })
-_GENERAL_ROLE = re.compile(r"\\b(?:general application|open application|talent pool)\\b", re.I)
-_CUSTOM_FORM = re.compile(r"\\b(?:submit|send|upload|attach|apply with)\\b.{0,90}\\b(?:cv|resume|résumé)\\b", re.I | re.S)
+_GENERAL_ROLE = re.compile(r"\b(?:general application|open application|talent pool)\b", re.I)
+_CUSTOM_FORM = re.compile(r"\b(?:submit|send|upload|attach|apply with)\b.{0,90}\b(?:cv|resume|résumé)\b", re.I | re.S)
 
 
 def verify_funded_application_route(settings, company_id, identity, url, meta, *, now=None):
