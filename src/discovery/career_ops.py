@@ -582,6 +582,26 @@ def _index_without_job_id(url: str) -> bool:
                               "job-boards.greenhouse.io"} and "/" not in path
 
 
+def funded_apply_role_handoff(settings, company_id: str, identity: dict,
+                              source_url: str, meta: dict, *, now=None) -> dict:
+    """Use the existing apply-role admission, not Career Ops auto-prepare.
+
+    A general ATS role must have a real posting identity (not a board index);
+    the separately proven official employer CV-form route can use an exact
+    employer-hosted form URL. Both need #386 and fresh JD source evidence at
+    the existing POST boundary, whose scorer makes the fit decision.
+    """
+    from core.outreach_sources import SourceHold
+    from discovery.handler import funded_apply_role_payload
+
+    if not isinstance(identity, dict) or not isinstance(source_url, str):
+        raise SourceHold("funded_application_identity_unverified")
+    if identity.get("ats") != "custom" and _index_without_job_id(source_url):
+        raise SourceHold("funded_general_posting_identity_missing")
+    return funded_apply_role_payload(
+        settings, company_id, identity, source_url, meta, now=now)
+
+
 def prepare(ids: list[str], stores=None, *, apply_requested: bool = False,
             continue_check=None) -> dict:
     """Idempotent handoff; only an explicit Apply action authorizes submission."""
