@@ -125,8 +125,9 @@ def registrable(homepage: str) -> str | None:
         if (p.scheme != "https" or not p.hostname or p.username or p.password
                 or p.port not in (None, 443) or not p.hostname.isascii()):
             return None
-        ext = TLDExtract(suffix_list_urls=(), cache_dir=None)(p.hostname)
-        if not ext.suffix or not ext.domain or not ext.is_valid:
+        ext = TLDExtract(suffix_list_urls=(), cache_dir=None,
+                         include_psl_private_domains=True)(p.hostname)
+        if not ext.suffix or not ext.domain:
             return None
         return (ext.domain + "." + ext.suffix).casefold()
     except (ImportError, ValueError, TypeError, AttributeError):
@@ -563,7 +564,10 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
             raise FundingRefusal("invalid_yc_json") from exc
         return [], "yc_not_round_evidence"
     kind = "atom" if source["kind"] in {"atom", "sec_atom"} else "rss"
-    return _rss_items(resp.content, kind), "fetched"
+    items = _rss_items(resp.content, kind)
+    for item in items:
+        item["key"] = _key(sid, item["key"])
+    return items, "fetched"
 
 
 def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient, now) -> None:
@@ -830,7 +834,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
         batch = candidates[index:index + 4]
         try:
             extracted = _extract_batch(batch, state, settings, now, extractor=extractor)
-        except (FundingRefusal, ValueError, KeyError, TypeError):
+        except Exception:  # LLM failures consume the pre-call reservation
             for item in batch:
                 state.data["articles"][item["key"]] = {
                     "status": "retryable", "seen_at": now.isoformat()}
