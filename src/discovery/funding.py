@@ -582,7 +582,9 @@ def ready(settings=None) -> bool:
         return False
 
 
-def _source_payload(source: dict, state: State, client: GuardedClient, now) -> tuple[list[dict], str]:
+def _source_payload(source: dict, state: State, client: GuardedClient, now,
+                    *, settings=None) -> tuple[list[dict], str]:
+    settings = settings or getattr(client, "settings", None) or get_settings()
     sid = source["id"]
     meta = state.data["feeds"].get(sid, {})
     # The cursor and a bounded list of not-yet-acknowledged feed items share
@@ -592,7 +594,7 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now) -> t
     outstanding = []
     for item in meta.get("inflight", []):
         status = state.data["articles"].get(item["key"], {}).get("status")
-        if not _fresh(item["date"], now, client.settings.funding_eligible_days):
+        if not _fresh(item["date"], now, settings.funding_eligible_days):
             state.data["articles"][item["key"]] = {
                 "status": "complete", "source": sid, "seen_at": now.isoformat()}
             continue
@@ -1063,7 +1065,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
     for source in (x for x in manifest["sources"] if x["enabled"]):
         sid = source["id"]
         try:
-            items, status = _source_payload(source, state, client, now)
+            items, status = _source_payload(source, state, client, now, settings=settings)
             state.count(sid, status, now)
             for item in items:
                 if source["kind"] == "sec_atom":
