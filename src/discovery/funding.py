@@ -143,6 +143,17 @@ def _validate_state(data: object) -> dict:
             raise FundingRefusal("corrupt_funding_state")
     if not isinstance(data["next_poll"], str):
         raise FundingRefusal("corrupt_funding_state")
+    for field in ("feeds", "articles", "deals", "pending", "unresolved"):
+        if any(not isinstance(k, str) or len(k) > 200 or not isinstance(v, dict)
+               for k, v in data[field].items()):
+            raise FundingRefusal("corrupt_funding_state")
+    for feed in data["feeds"].values():
+        if any(not isinstance(feed.get(k, ""), str)
+               for k in ("etag", "last_modified", "last_fetch")):
+            raise FundingRefusal("corrupt_funding_state")
+    for period in ("day", "week"):
+        if not isinstance(data["budgets"].get(period, ""), str):
+            raise FundingRefusal("corrupt_budget")
     if len(data["active"]) > 1200 or len(data["deals"]) > 5000:
         raise FundingRefusal("state_capacity")
     for entry in data["active"].values():
@@ -512,14 +523,17 @@ def _manifest(settings) -> dict:
         raise FundingRefusal("invalid_source_configuration")
     regions = v["regions"]
     if (not isinstance(regions, list) or not regions or len(regions) > 12
-            or any(x not in _REGIONS | {"remote-first-anywhere"} for x in regions)):
+            or any(not isinstance(x, str) or x not in _REGIONS | {"remote-first-anywhere"}
+                   for x in regions) or len(set(regions)) != len(regions)):
         raise FundingRefusal("invalid_source_regions")
     ids = set()
     if not isinstance(v["sources"], list) or len(v["sources"]) > 40:
         raise FundingRefusal("invalid_source_configuration")
     for item in v["sources"]:
         if (not isinstance(item, dict) or set(item) != {"id", "kind", "region", "url", "enabled"}
+                or not isinstance(item["kind"], str)
                 or item["kind"] not in {"rss", "atom", "yc_json", "sec_atom"}
+                or not isinstance(item["region"], str)
                 or not isinstance(item["enabled"], bool) or not isinstance(item["id"], str)
                 or not re.fullmatch(r"[a-z0-9_-]{2,40}", item["id"])
                 or item["id"] in ids or item["region"] not in set(regions)):
