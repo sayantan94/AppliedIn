@@ -689,7 +689,8 @@ def _employer_link(issuer: str, a: _ArticleHTML, article_url: str) -> str | None
     return match[0] if len(set(match)) == 1 else None
 
 
-def _board_from_employer(homepage: str, issuer: str, client: GuardedClient) -> tuple[str, str, str] | None:
+def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
+                         employer_page=None) -> tuple[str, str, str] | None:
     from .resolver import resolve
 
     seen = set()
@@ -697,7 +698,8 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient) -> t
         if url in seen:
             continue
         seen.add(url)
-        page = client.get(url, follow_redirects=True)
+        page = employer_page if employer_page is not None else client.get(
+            url, follow_redirects=True)
         page.raise_for_status()
         html = _article(page.text)
         if (registrable(str(page.request.url)) != registrable(homepage)
@@ -726,58 +728,36 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient) -> t
     return None
 
 
-def _prove_deal(deal: dict, article: dict, state: State, settings,
-                client: GuardedClient, now, *, relevance_fn=None) -> tuple[str, dict | None]:
+def _preview_verified(issuer: str, homepage: str, source_id: str,
+                      state: State, settings, client: GuardedClient, now,
+                      *, relevance_fn=None, employer_page=None) -> tuple[str, dict | None]:
+    """Re-prove the employer, tenant, producer AND consumer, without stores."""
     from .adapters import ADAPTERS
     from .canonical_job_url import admit_feed, source_bound
     from .watchlist import CompanyConfig, load_watchlist, load_preferences
 
-    if not isinstance(deal, dict):
-        return "invalid_deal", None
-    issuer, stage = deal.get("issuer"), deal.get("stage")
-    if not isinstance(issuer, str) or not issuer.strip() or len(issuer) > 150:
-        return "issuer_unknown", None
-    if stage not in _STAGE or not _STAGE[stage].search(article["text"]):
-        return "round_unconfirmed", None
-    if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
-        return "round_date_unconfirmed_or_stale", None
-    # A model-invented date is not independent publication evidence.
-    item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
-    if not item_day or not round_day or abs((item_day - round_day).days) > 14:
-        return "round_date_unconfirmed_or_stale", None
-    if deal.get("sector") not in {"ai", "fintech"} or not _SECTOR.search(article["text"]):
-        return "sector_unproved", None
-    if _BLOCKED_SECTOR.search(article["text"]):
-        return "fund_not_issuer", None
-    region = deal.get("region")
-    allowed = set(_manifest(settings)["regions"])
-    evidenced = _regions(article["text"], allowed)
-    if region not in evidenced and not (
-            deal.get("remote_first") is True and "remote-first-anywhere" in evidenced):
-        return "region_unproved", None
-    # The publisher must actually link the named issuer to its own homepage.
-    homepage = _employer_link(issuer, article["html"], article["url"])
-    if not homepage:
-        return "employer_site_unproved", None
     domain = registrable(homepage)
     if not domain:
         return "psl_unavailable_or_unknown", None
     manual = load_watchlist(Path(settings.config_dir) / "watchlist.yaml")
-    names = {issuer.casefold()} | {x.casefold() for x in deal.get("aliases", [])
-                                   if isinstance(x, str) and 0 < len(x) < 150}
-    if any(c.name.strip().casefold() in names for c in manual):
+    if any(c.name.strip().casefold() == issuer.strip().casefold() for c in manual):
         return "manual_precedence", None
     for row in state.data["active"].values():
-        if domain == row["employer_domain"] or row["name"].casefold() in names:
+        if row["employer_domain"] == domain or row["name"].casefold() == issuer.casefold():
             return "duplicate_verified_employer", None
-    board = _board_from_employer(homepage, issuer, client)
+    page = employer_page if employer_page is not None else client.get(
+        homepage, follow_redirects=True)
+    page.raise_for_status()
+    if (registrable(str(page.request.url)) != domain
+            or issuer.casefold() not in _article(page.text).text[:10000].casefold()):
+        return "employer_homepage_owner_unproved", None
+    board = _board_from_employer(homepage, issuer, client, employer_page=page)
     if not board:
         return "guard_not_proven", None
     ats, token, native_url = board
     cfg = CompanyConfig(name=issuer, careers_url=native_url, ats=ats, board=token)
     if not source_bound(cfg, cfg):
         return "source_bound_refused", None
-    # The canonical production producer and consumer gates are the authority.
     jobs = ADAPTERS[ats].fetch(cfg, client)
     if len(jobs) > settings.funding_max_postings_per_pass:
         return "postings_limit", None
@@ -798,9 +778,104 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
         "name": issuer, "careers_url": native_url, "ats": ats, "board": token,
         "mode": "gated", "discovery": "feed", "employer_domain": domain,
         "homepage": homepage, "aliases": [],
-        "source_id": article["source"], "admitted_at": now.isoformat(),
+        "source_id": source_id, "admitted_at": now.isoformat(),
         "last_relevant_at": now.isoformat(),
     }
+
+
+def _prove_deal(deal: dict, article: dict, state: State, settings,
+                client: GuardedClient, now, *, relevance_fn=None
+                ) -> tuple[str, dict | None, dict | None]:
+    """News evidence plus independently checked homepage; no guessed domain."""
+    if not isinstance(deal, dict):
+        return "invalid_deal", None, None
+    issuer, stage = deal.get("issuer"), deal.get("stage")
+    if not isinstance(issuer, str) or not issuer.strip() or len(issuer) > 150:
+        return "issuer_unknown", None, None
+    if stage not in _STAGE or not _STAGE[stage].search(article["text"]):
+        return "round_unconfirmed", None, None
+    if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
+        return "round_date_unconfirmed_or_stale", None, None
+    # A model-invented date cannot stand in for a published announcement.
+    item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
+    if not item_day or not round_day or abs((item_day - round_day).days) > 14:
+        return "round_date_unconfirmed_or_stale", None, None
+    if deal.get("sector") not in {"ai", "fintech"} or not _SECTOR.search(article["text"]):
+        return "sector_unproved", None, None
+    if _BLOCKED_SECTOR.search(article["text"]):
+        return "fund_not_issuer", None, None
+    region = deal.get("region")
+    allowed = set(_manifest(settings)["regions"])
+    evidenced = _regions(article["text"], allowed)
+    if region not in evidenced and not (
+            deal.get("remote_first") is True and "remote-first-anywhere" in evidenced):
+        return "region_unproved", None, None
+    homepage = _employer_link(issuer, article["html"], article["url"])
+    if not homepage:
+        return "employer_site_unproved", None, None
+    domain = registrable(homepage)
+    if not domain:
+        return "psl_unavailable_or_unknown", None, None
+    # Independently read the candidate homepage before treating a lead as a
+    # verified employer. A publisher hyperlink is NOT proof of ownership.
+    page = client.get(homepage, follow_redirects=True)
+    page.raise_for_status()
+    if (registrable(str(page.request.url)) != domain
+            or issuer.casefold() not in _article(page.text).text[:10000].casefold()):
+        return "employer_homepage_owner_unproved", None, None
+    evidence = {"name": issuer, "homepage": homepage, "employer_domain": domain,
+                "source": article["source"]}
+    reason, active = _preview_verified(
+        issuer, homepage, article["source"], state, settings, client, now,
+        relevance_fn=relevance_fn, employer_page=page)
+    return reason, active, evidence
+
+
+def _recheck_pending(state: State, settings, client: GuardedClient,
+                     now, *, relevance_fn=None) -> None:
+    """One bounded weekly check per independently verified pending employer."""
+    reviewed = 0
+    for key, row in list(state.data["pending"].items()):
+        if reviewed >= settings.funding_max_candidates_per_pass:
+            break
+        if not isinstance(row, dict):
+            raise FundingRefusal("corrupt_pending_state")
+        expiry = _date(row.get("expires", ""))
+        if expiry and now >= expiry:
+            del state.data["pending"][key]
+            state.count(row.get("source", "local"), "pending_expired", now)
+            continue
+        due = _date(row.get("next_check", ""))
+        if due is None or due > now:
+            continue
+        reviewed += 1
+        try:
+            if (not isinstance(row.get("name"), str)
+                    or not isinstance(row.get("homepage"), str)
+                    or registrable(row["homepage"]) != row.get("employer_domain")):
+                raise FundingRefusal("corrupt_pending_state")
+            reason, active = _preview_verified(
+                row["name"], row["homepage"], row["source"],
+                state, settings, client, now, relevance_fn=relevance_fn)
+        except (FundingRefusal, httpx.HTTPError, ValueError):
+            reason, active = "pending_recheck_failed", None
+        if active is not None and not state.reserve(
+                now, "day_added", 1, settings.funding_daily_new_companies):
+            reason, active = "daily_addition_deferred", None
+        if active is not None:
+            state.data["active"][key] = active
+            del state.data["pending"][key]
+            state.data["deals"][key]["status"] = "active"
+            state.data["deals"][key]["reason"] = "recheck_admitted"
+            state.count(row["source"], "recheck_admitted", now)
+        else:
+            row["reason"] = reason
+            row["next_check"] = (now + timedelta(
+                days=settings.funding_recheck_days)).isoformat()
+            if key in state.data["deals"]:
+                state.data["deals"][key]["reason"] = reason
+            state.count(row["source"], reason, now)
+        state.save()
 
 
 def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
@@ -902,14 +977,15 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.count(article["source"], "duplicate", now)
                     continue
                 try:
-                    reason, active = _prove_deal(
+                    reason, active, verified = _prove_deal(
                         deal, article, state, settings, client, now, relevance_fn=relevance_fn)
                 except (FundingRefusal, httpx.HTTPError, ValueError, KeyError):
-                    reason, active = "probe_retryable", None
+                    reason, active, verified = "probe_retryable", None, None
                 status = ("active" if active else "retryable" if reason in
                           {"probe_retryable", "relevance_budget", "postings_limit"}
                           else "pending" if reason in {
-                              "guard_not_proven", "no_openings", "no_relevant_openings"}
+                              "guard_not_proven", "no_openings", "no_relevant_openings",
+                              "consumer_guard_refused", "source_bound_refused"}
                           else "unresolved" if reason in {
                               "employer_site_unproved", "psl_unavailable_or_unknown",
                               "round_unconfirmed", "round_date_unconfirmed_or_stale",
@@ -922,7 +998,8 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.data["active"][key] = active
                 if status == "pending":
                     state.data["pending"][key] = {
-                        "name": issuer[:150], "reason": reason, "seen_at": now.isoformat(),
+                        **(verified or {}), "name": issuer[:150],
+                        "reason": reason, "seen_at": now.isoformat(),
                         "next_check": (now + timedelta(days=settings.funding_recheck_days)).isoformat(),
                         "expires": (now + timedelta(days=settings.funding_pending_days)).isoformat(),
                         "source": article["source"]}
@@ -938,6 +1015,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 "source": article["source"], "seen_at": now.isoformat(),
                 **({} if every_persisted else {"children": children})}
             state.save()
+    _recheck_pending(state, settings, client, now, relevance_fn=relevance_fn)
     # Unproductive entries can age out, but manual watchlist is never touched.
     for key, row in list(state.data["active"].items()):
         last = _date(row["last_relevant_at"])
