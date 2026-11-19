@@ -339,7 +339,11 @@ def test_source_304_and_partial_replay_cannot_hide_retryable_article(tmp_path):
     assert items and status == "fetched"
     assert not client.calls[0][1], "Unfinished feeds must bypass stale ETag 304"
     no_work = OfflineClient({SOURCE: (304, b"")})
-    state.data["articles"].clear()
+    # Completed articles no longer need replay. A missing article record
+    # is deliberately NOT treated as complete: that could lose an item.
+    for item in items:
+        state.data["articles"][item["key"]]["status"] = "complete"
+    state.data["articles"]["retry"]["status"] = "complete"
     state.save()
     items, status = funding._source_payload(
         funding._manifest(cfg)["sources"][0], state, no_work, NOW)
@@ -833,3 +837,35 @@ def test_sec_transient_document_failure_retries_then_acknowledges(tmp_path):
     assert next(iter(state.data["deals"].values()))["status"] == "unresolved"
     assert state.data["articles"][article["key"]]["status"] == "complete"
     assert recovered.calls
+
+
+def test_feed_rollover_keeps_unacknowledged_deal_link(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    source = funding._manifest(cfg)["sources"][0]
+    first, status = funding._source_payload(
+        source, state, OfflineClient({SOURCE: fixture("rss_uk.xml")}), NOW)
+    assert status == "fetched" and len(first) == 1
+    old_key, old_url = first[0]["key"], first[0]["url"]
+    # Publisher drops the old story from its 40 most recent items. The old
+    # unacknowledged child still has a durable URL/date/title, not just a hash.
+    latest = b"""<?xml version="1.0" encoding="utf-8"?><rss><channel>
+    <item><guid>new-round</guid><title>OtherCo raises seed fintech funding in London</title>
+    <link>https://news.example.com/new-round</link>
+    <pubDate>Wed, 18 Nov 2026 12:00:00 GMT</pubDate></item>
+    </channel></rss>"""
+    restarted = funding.State(path)
+    both, status = funding._source_payload(
+        source, restarted, OfflineClient({SOURCE: latest}), NOW)
+    assert status == "fetched" and len(both) == 2
+    assert both[0]["key"] == old_key and both[0]["url"] == old_url
+    persisted = funding.State(path).data["feeds"]["uk_feed"]["inflight"]
+    assert {x["url"] for x in persisted} == {
+        old_url, "https://news.example.com/new-round"}
+    for row in both:
+        restarted.data["articles"][row["key"]]["status"] = "complete"
+    restarted.save()
+    none, status = funding._source_payload(
+        source, restarted, OfflineClient({SOURCE: (304, b"")}), NOW)
+    assert none == [] and status == "not_modified"
