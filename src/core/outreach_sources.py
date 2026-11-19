@@ -1,6 +1,7 @@
 """Read-only #386 adapter: only a fresh, actually proved no-opening result."""
 from __future__ import annotations
 from dataclasses import dataclass
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -91,3 +92,42 @@ def read_no_opening(settings, company_id, *, now=None, require_fresh=True):
                 raise SourceHold("funded_employer_identity_collision")
     return FundedNoOpening(company_id, name.strip(), domain, homepage, tuple(aliases),
                            str(row.get("source") or ""), seen, row["reason"])
+
+
+_SUPPORTED_APPLICATION_ATS = frozenset({
+    "greenhouse", "ashby", "lever", "workday", "workable",
+    "smartrecruiters", "eightfold", "personio",
+})
+_GENERAL_ROLE = re.compile(r"\\b(?:general application|open application|talent pool)\\b", re.I)
+_CUSTOM_FORM = re.compile(r"\\b(?:submit|send|upload|attach|apply with)\\b.{0,90}\\b(?:cv|resume|résumé)\\b", re.I | re.S)
+
+
+def verify_funded_application_route(settings, company_id, identity, url, meta, *, now=None):
+    """Only a real source-verified general posting reaches existing apply-role.
+
+    This changes the JobRecord's discovery source, never the scorer or any
+    final-Submit path. If the present reader cannot prove a custom CV form,
+    leave it to the ordinary existing operator route, not a fabricated PK.
+    """
+    if (getattr(settings, "mode", None) != "local"
+            or not getattr(settings, "outreach_enabled", False)
+            or not getattr(settings, "outreach_application_handoff_enabled", False)):
+        raise SourceHold("funded_application_handoff_off")
+    lead = read_no_opening(settings, company_id, now=now, require_fresh=False)
+    if not isinstance(identity, dict) or not isinstance(meta, dict):
+        raise SourceHold("funded_application_identity_unverified")
+    ats, company = identity.get("ats"), identity.get("company")
+    if (not isinstance(company, str) or company.casefold() not in
+            {lead.name.casefold(), *(a.casefold() for a in lead.aliases)}):
+        raise SourceHold("funded_application_employer_mismatch")
+    title = meta.get("title")
+    source_text = meta.get("text")
+    if (not isinstance(title, str) or not _GENERAL_ROLE.search(title)
+            or not isinstance(source_text, str) or not source_text.strip()):
+        raise SourceHold("funded_general_posting_not_proven")
+    if ats == "custom":
+        if registrable(url) != lead.domain or not _CUSTOM_FORM.search(source_text[:12000]):
+            raise SourceHold("funded_official_custom_cv_form_unverified")
+    elif ats not in _SUPPORTED_APPLICATION_ATS:
+        raise SourceHold("funded_application_ats_not_supported")
+    return lead
