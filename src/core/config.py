@@ -257,7 +257,7 @@ class Settings(BaseSettings):
     funding_pending_days: int = 60
     funding_active_days: int = 90
 
-    # #387 slice A: private, local, opt-in email only. No pixel/manual/ATS lane.
+    # #387: all lanes are separate opt-ins and remain operator-local.
     outreach_enabled: bool = False
     outreach_timezone: str = "UTC"
     outreach_sender: str = ""
@@ -276,6 +276,14 @@ class Settings(BaseSettings):
     outreach_followup_variant_id: str = ""
     outreach_followups_auto: bool = False
     outreach_followups_expanded: bool = False
+    outreach_manual_enabled: bool = False
+    outreach_application_handoff_enabled: bool = False
+    outreach_pixel_enabled: bool = False
+    outreach_pixel_healthy: bool = False
+    # Operator evidence: suppress token-bearing request URIs in ALL ingress logs.
+    outreach_pixel_ingress_logs_safe: bool = False
+    outreach_pixel_base: str = ""
+    outreach_pixel_loopback_port: int = 0
 
     aws_region: str = "us-east-1"
 
