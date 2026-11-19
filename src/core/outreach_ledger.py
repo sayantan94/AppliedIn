@@ -6,6 +6,7 @@ this database. A wire timeout is uncertain and is never retried blindly.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -85,6 +86,23 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS inbound (
                     uidvalidity TEXT NOT NULL, uid INTEGER NOT NULL, classification TEXT NOT NULL,
                     PRIMARY KEY (uidvalidity, uid));
+                CREATE TABLE IF NOT EXISTS pixel_tokens (
+                    token_sha TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE,
+                    created_at REAL NOT NULL, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
+                CREATE TABLE IF NOT EXISTS pixel_events (
+                    token_sha TEXT NOT NULL, observed_at REAL NOT NULL,
+                    utc_day INTEGER NOT NULL, classification TEXT NOT NULL,
+                    PRIMARY KEY(token_sha, utc_day, classification));
+                CREATE TABLE IF NOT EXISTS manual_targets (
+                    id TEXT PRIMARY KEY, company_id TEXT NOT NULL,
+                    channel TEXT NOT NULL, person_key TEXT NOT NULL,
+                    person_name TEXT NOT NULL, target_url TEXT NOT NULL,
+                    evidence_url TEXT NOT NULL, message TEXT NOT NULL,
+                    variant_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready',
+                    version INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+                    marked_at REAL, CHECK (state IN ('ready','copied','owner_marked_sent')));
+                CREATE INDEX IF NOT EXISTS manual_by_company
+                    ON manual_targets(company_id, state);
                 CREATE TABLE IF NOT EXISTS earned_due (
                     company_id TEXT NOT NULL, person_key TEXT NOT NULL,
                     stage INTEGER NOT NULL, due_at REAL NOT NULL,
@@ -225,7 +243,7 @@ class Ledger:
             if charged >= day_cap:
                 raise OutreachHold("email_daily_ramp_or_hard_cap")
             existing = db.execute(
-                "SELECT stage,state,recipient,message_id,accepted_at FROM attempts "
+                "SELECT stage,state,recipient,message_id,accepted_at,id,tracking_mode FROM attempts "
                 "WHERE company_id=? AND person_key=? AND state != 'definite_pre_wire_failure' "
                 "ORDER BY stage, reserved_at",
                 (lead.company_id, contact.person_key)).fetchall()
@@ -247,16 +265,18 @@ class Ledger:
                         or [row[0] for row in existing] != list(range(stage))
                         or not all(row[2] == contact.address for row in existing)):
                     raise OutreachHold("followup_thread_not_definitively_accepted")
-                if stage > 2 and not expanded_followups:
-                    raise OutreachHold("followup_expansion_not_approved")
+                opens = self._qualified_opens(db, existing[-1][5])
+                if stage > 2 and (not expanded_followups or len(opens) < 3):
+                    raise OutreachHold("followup_expansion_requires_three_qualified_opens")
                 previous_at = datetime.fromtimestamp(existing[-1][4], UTC)
                 if now - previous_at < timedelta(hours=48):
                     raise OutreachHold("followup_minimum_spacing")
                 due = db.execute(
                     "SELECT due_at FROM earned_due WHERE company_id=? AND person_key=? AND stage=?",
                     (lead.company_id, contact.person_key, stage)).fetchone()
-                # No pixel slice A: only accepted S + 7 days is earned.
-                computed = due_for_band(previous_at, tracked=False).timestamp()
+                computed = due_for_band(
+                    previous_at, opens=opens,
+                    tracked=existing[-1][6] == "pixel_enabled").timestamp()
                 earned = min(due[0], computed) if due else computed
                 db.execute("INSERT INTO earned_due VALUES (?,?,?,?) "
                            "ON CONFLICT(company_id,person_key,stage) "
@@ -357,7 +377,7 @@ class Ledger:
         with self._tx() as db:
             rows = db.execute("""
                 SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
-                       a.contact_name,a.stage,a.accepted_at
+                       a.contact_name,a.stage,a.accepted_at,a.id,a.tracking_mode
                 FROM attempts a
                 WHERE a.state='confirmed_smtp_accepted'
                   AND a.stage < ?
@@ -370,10 +390,15 @@ class Ledger:
                 ORDER BY a.accepted_at ASC LIMIT 100
             """, (max_stage,)).fetchall()
         result = []
-        for company, person, recipient, url, name, stage, accepted_at in rows:
+        for company, person, recipient, url, name, stage, accepted_at, attempt_id, mode in rows:
+            with self._tx() as db:
+                opens = self._qualified_opens(db, attempt_id)
+            if stage >= 2 and len(opens) < 3:
+                continue
             accepted = datetime.fromtimestamp(accepted_at, UTC)
-            earned = self.earn_due(company, person, stage+1,
-                                   due_for_band(accepted, tracked=False))
+            earned = self.earn_due(
+                company, person, stage+1,
+                due_for_band(accepted, opens=opens, tracked=mode == "pixel_enabled"))
             if earned <= now.timestamp():
                 result.append({"company_id": company, "person_key": person,
                                "recipient": recipient, "contact_url": url,
@@ -493,11 +518,168 @@ class Ledger:
                 self._set_meta(db, "global_email_pause", "1")
         return True
 
+
+    @staticmethod
+    def _qualified_opens(db, attempt_id):
+        rows = db.execute(
+            """SELECT e.observed_at FROM pixel_events e
+               JOIN pixel_tokens t ON t.token_sha=e.token_sha
+               WHERE t.attempt_id=? AND e.classification='qualified'
+               ORDER BY e.observed_at""", (attempt_id,)).fetchall()
+        return [datetime.fromtimestamp(r[0], UTC) for r in rows]
+
+    def register_pixel(self, attempt_id: str, token: str, *, now=None):
+        """Each attempt gets an independent opaque token before SMTP wire."""
+        now = _time(now)
+        if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{64}", token):
+            raise OutreachHold("pixel_token_invalid")
+        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT state FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if not row or row[0] != "reserved":
+                raise OutreachHold("pixel_attempt_not_reserved")
+            db.execute("INSERT INTO pixel_tokens VALUES (?,?,?)",
+                       (digest, attempt_id, now.timestamp()))
+            db.execute("UPDATE attempts SET tracking_mode='pixel_enabled' WHERE id=?",
+                       (attempt_id,))
+
+    def record_pixel_open(self, token: str, classification: str, *, now=None):
+        """Synchronous FULL WAL commit precedes the handler's HTTP 200."""
+        now = _time(now)
+        if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{64}", token):
+            return False
+        if classification not in {"qualified", "scanner", "unknown"}:
+            raise OutreachHold("pixel_classification_invalid")
+        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self._tx() as db:
+            match = db.execute("SELECT 1 FROM pixel_tokens WHERE token_sha=?",
+                               (digest,)).fetchone()
+            if match is None:
+                return False
+            # A proxy/scanner can fetch endlessly: keep just one per category
+            # per fixed UTC 24h bucket, so metrics cannot be inflated.
+            db.execute("INSERT OR IGNORE INTO pixel_events VALUES (?,?,?,?)",
+                       (digest, now.timestamp(), int(now.timestamp() // 86400),
+                        classification))
+            # Bound diagnostics while retaining enough for follow-up schedules.
+            db.execute("DELETE FROM pixel_events WHERE observed_at<?",
+                       ((now - timedelta(days=90)).timestamp(),))
+            return True
+
+    def manual_enqueue(self, *, company_id, channel, person_key, person_name,
+                       target_url, evidence_url, message, variant_id, now=None):
+        """Private draft. No slot is reserved until the owner requests copy."""
+        now = _time(now)
+        if (channel not in {"linkedin", "discord", "telegram", "x"}
+                or not isinstance(person_key, str) or not person_key
+                or len(person_key) > 180 or not isinstance(message, str)
+                or not 1 <= len(message) <= 4000 or not isinstance(variant_id, str)
+                or not variant_id or len(variant_id) > 80
+                or not isinstance(person_name, str) or len(person_name) > 100
+                or not isinstance(target_url, str) or len(target_url) > 2048
+                or not isinstance(evidence_url, str) or len(evidence_url) > 2048):
+            raise OutreachHold("manual_target_evidence_invalid")
+        ident = uuid.uuid4().hex
+        with self._tx() as db:
+            db.execute("""INSERT INTO manual_targets
+                (id,company_id,channel,person_key,person_name,target_url,
+                 evidence_url,message,variant_id,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (ident, company_id, channel, person_key, person_name,
+                 target_url, evidence_url, message, variant_id, now.timestamp()))
+        return {"id": ident, "version": 1}
+
+    def manual_action(self, row_id, version, linkedin: LinkedInSnapshot, *,
+                      no_application: bool, action: str, now=None):
+        """Copy and mark both recheck known slots atomically.
+
+        A copy consumes a provisional slot even when the identity is unresolved.
+        Mark reuses the exact same slot, never double charges. Nothing is sent.
+        """
+        now = _time(now)
+        if action not in {"copy", "mark"} or type(version) is not int:
+            raise OutreachHold("manual_action_invalid")
+        if not isinstance(linkedin, LinkedInSnapshot) or not no_application:
+            raise OutreachHold("manual_linkedin_or_application_unverified")
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT company_id,person_key,state,version,message FROM manual_targets WHERE id=?",
+                (row_id,)).fetchone()
+            if row is None:
+                raise OutreachHold("manual_row_not_found")
+            company, person, state, current, message = row
+            if current != version:
+                raise OutreachHold("manual_row_version_conflict")
+            if db.execute("SELECT 1 FROM stops WHERE company_id=? "
+                          "AND person_key IN ('*', ?)", (company, person)).fetchone():
+                raise OutreachHold("recorded_company_or_recipient_stop")
+            if action == "copy" and state not in {"ready", "copied"}:
+                raise OutreachHold("manual_copy_after_sent_not_allowed")
+            if action == "mark" and state not in {"copied", "owner_marked_sent"}:
+                raise OutreachHold("manual_must_copy_before_mark")
+            local = {r[0] for r in db.execute(
+                "SELECT person_key FROM people WHERE company_id=?", (company,))}
+            linked = set(linkedin.people)
+            if person not in local | linked and len(local | linked) >= 3:
+                raise OutreachHold("hard_company_three_person_cap")
+            if len(local | linked | {person}) > 3:
+                raise OutreachHold("hard_company_three_person_cap")
+            if person not in linked:
+                db.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?)",
+                           (company, person, "manual",
+                            int(person.startswith("provisional:"))))
+            next_state = "copied" if action == "copy" else "owner_marked_sent"
+            if state != next_state:
+                db.execute("UPDATE manual_targets SET state=?,version=version+1,"
+                           "marked_at=CASE WHEN ?='mark' THEN ? ELSE marked_at END "
+                           "WHERE id=?", (next_state, action, now.timestamp(), row_id))
+                current += 1
+            return {"id": row_id, "version": current, "state": next_state,
+                    "message": message if action == "copy" else None}
+
+    def reserve_linkedin_slot(self, company_id, person_key, linkedin: LinkedInSnapshot,
+                              *, no_application: bool, now=None):
+        """Operator reserves before independent LinkedIn send; tracker stays read-only."""
+        _time(now)
+        if not isinstance(linkedin, LinkedInSnapshot) or not no_application:
+            raise OutreachHold("linkedin_coordination_unavailable")
+        if not isinstance(person_key, str) or not person_key.startswith(
+                ("name:", "provisional:")):
+            raise OutreachHold("linkedin_person_identity_unverified")
+        with self._tx() as db:
+            if db.execute("SELECT 1 FROM stops WHERE company_id=? "
+                          "AND person_key IN ('*', ?)", (company_id, person_key)).fetchone():
+                raise OutreachHold("recorded_company_or_recipient_stop")
+            local = {r[0] for r in db.execute(
+                "SELECT person_key FROM people WHERE company_id=?", (company_id,))}
+            linked = set(linkedin.people)
+            if len(local | linked | {person_key}) > 3:
+                raise OutreachHold("hard_company_three_person_cap")
+            db.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?)",
+                       (company_id, person_key, "linkedin-reserved",
+                        int(person_key.startswith("provisional:"))))
+            return {"reserved": True, "remaining": 3-len(local | linked | {person_key})}
+
+    def manual_rows(self, company_id):
+        with self._tx() as db:
+            rows = db.execute("""SELECT id,channel,person_name,target_url,evidence_url,
+                                        message,variant_id,person_key,state,version,created_at
+                                 FROM manual_targets WHERE company_id=?
+                                 ORDER BY created_at DESC LIMIT 100""",
+                              (company_id,)).fetchall()
+        fields = ("id","channel","person_name","target_url","evidence_url",
+                  "message","variant_id","person_key","state","version","created_at")
+        return [dict(zip(fields, row)) for row in rows]
+
     def report(self, company_id, linkedin: LinkedInSnapshot, *, now=None):
         now = _time(now)
         with self._tx() as db:
-            named = {r[0] for r in db.execute(
-                "SELECT person_key FROM people WHERE company_id=?", (company_id,))}
+            people_rows = db.execute(
+                "SELECT person_key,provisional FROM people WHERE company_id=?",
+                (company_id,)).fetchall()
+            named = {r[0] for r in people_rows}
+            provisional = {r[0] for r in people_rows if r[1]}
             attempts = db.execute("SELECT stage,state,approved_variant,tracking_mode "
                                   "FROM attempts WHERE company_id=?",
                                   (company_id,)).fetchall()
@@ -512,8 +694,29 @@ class Ledger:
             human_replies = db.execute(
                 "SELECT COUNT(*) FROM human_responses WHERE company_id=?",
                 (company_id,)).fetchone()[0]
+            due_rows = db.execute(
+                "SELECT person_key,stage,due_at FROM earned_due WHERE company_id=?",
+                (company_id,)).fetchall()
+            opening_rows = db.execute("""SELECT e.classification,COUNT(*)
+                FROM pixel_events e JOIN pixel_tokens t ON t.token_sha=e.token_sha
+                JOIN attempts a ON a.id=t.attempt_id
+                WHERE a.company_id=? GROUP BY e.classification""",
+                (company_id,)).fetchall()
+            bounced = db.execute("""SELECT COUNT(*) FROM bounces b
+                JOIN attempts a ON a.id=b.attempt_id
+                WHERE a.company_id=?""", (company_id,)).fetchone()[0]
+            ramp_day, ramp_limit = self._day(db, now)
+            day_used = db.execute("SELECT COUNT(*) FROM attempts WHERE day=? "
+                                  "AND state!='definite_pre_wire_failure'",
+                                  (ramp_day,)).fetchone()[0]
         people = named | set(linkedin.people)
-        return {"used":len(people), "remaining":max(0, 3-len(people)),
+        return {"used":len(people), "provisional":len(provisional - set(linkedin.people)),
+                "remaining":max(0, 3-len(people)), "hard_limit":3,
+                "ramp_day":ramp_day, "ramp_limit":ramp_limit, "email_quota_used":day_used,
+                "bounced_attempts":bounced,
+                "opens":dict(opening_rows),
+                "earliest_earned_due":[{"person_key":p,"stage":n,"due_at":d}
+                                       for p,n,d in due_rows],
                 "accepted_first_emails":first_accepted,
                 "matched_human_threads":human_replies,
                 "human_reply_rate":(human_replies / first_accepted
