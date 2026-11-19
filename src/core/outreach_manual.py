@@ -160,19 +160,26 @@ def owner_response(*, settings, company_id, target_id, trusted: bool, opt_out=Fa
     return {"held":not trusted, "company_stopped":bool(trusted)}
 
 
-def owner_linkedin_reserve(*, settings, company_id, person_name, stores, now=None):
-    """Reserve combined capacity BEFORE owner operates their separate channel."""
+def owner_linkedin_reserve(*, settings, company_id, target_id, stores, now=None):
+    """Reserve a slot for a *published* LinkedIn target, never a typed name.
+
+    The owner then sends in the existing LinkedIn channel and records it
+    there. This program only observes that tracker on the next read.
+    """
     now = now or datetime.now(UTC)
     lead = _lead(settings, company_id, now)
     if not company_application_clear(stores, lead):
         raise OutreachHold("existing_company_application")
     linkedin = _read_combined(settings, lead)
-    try:
-        key = person_key(person_name)
-    except ContactHold as exc:
-        raise OutreachHold("linkedin_verified_person_name_required") from exc
-    return Ledger(settings).reserve_linkedin_slot(
-        company_id, key, linkedin, no_application=True, now=now)
+    ledger = Ledger(settings)
+    rows = [r for r in ledger.manual_rows(company_id) if r["id"] == target_id]
+    if len(rows) != 1 or rows[0]["channel"] != "linkedin":
+        raise OutreachHold("linkedin_published_target_required")
+    if rows[0]["state"] == "owner_marked_sent":
+        raise OutreachHold("linkedin_target_already_marked_sent")
+    return ledger.reserve_linkedin_slot(
+        company_id, rows[0]["person_key"], linkedin,
+        no_application=True, now=now)
 
 
 def register_routes(app, settings):
@@ -278,4 +285,4 @@ def register_routes(app, settings):
         checked(request, mutate=True)
         return guarded(lambda: owner_linkedin_reserve(
             settings=settings, company_id=body.get("company_id"),
-            person_name=body.get("person_name"), stores=make_stores(settings)))
+            target_id=body.get("target_id"), stores=make_stores(settings)))
