@@ -490,8 +490,12 @@ class _ArticleHTML(HTMLParser):
         self.href = ""
         self.anchor_text = []
         self.ignored = 0
+        self.headings = []
+        self._heading_parts = None
 
     def handle_starttag(self, tag, attrs):
+        if tag in ("h1", "title") and not self.ignored:
+            self._heading_parts = []
         if tag in ("script", "style", "noscript"):
             self.ignored += 1
         if tag == "a" and not self.ignored:
@@ -502,10 +506,18 @@ class _ArticleHTML(HTMLParser):
         if self.ignored:
             return
         self.parts.append(value)
+        if self._heading_parts is not None:
+            self._heading_parts.append(value)
         if self.href:
             self.anchor_text.append(value)
 
     def handle_endtag(self, tag):
+        if tag in ("h1", "title") and self._heading_parts is not None:
+            self.headings.append(" ".join(self._heading_parts).strip())
+            self._heading_parts = None
+        if tag in ("p", "h1", "h2", "h3", "li", "section", "article"):
+            # Preserve publisher paragraph boundaries across HTML flattening.
+            self.parts.append("; ")
         if tag in ("script", "style", "noscript"):
             self.ignored = max(0, self.ignored - 1)
         if tag == "a" and self.href:
@@ -671,6 +683,11 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
     }
     if source["kind"] == "sec_atom" and not settings.funding_sec_user_agent:
         raise FundingRefusal("sec_user_agent_missing")
+    if len(outstanding) >= 500:
+        # Do not consume a moving latest-N page while durable work is full.
+        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
+        state.save()
+        return outstanding, "backlog_deferred"
     resp = client.get(source["url"], headers=headers, follow_redirects=True)
     if resp.status_code == 304:
         if state.data["feeds"].get(sid, {}).get("inflight"):
@@ -703,8 +720,10 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
             continue
         merged[item["key"]] = item
     if len(merged) > 500:
-        # Never advance the cursor while silently dropping eligible articles.
-        raise FundingRefusal("source_backlog_limit")
+        # Keep the prior cursor, drain outstanding, then retry new intake.
+        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
+        state.save()
+        return outstanding, "backlog_deferred"
     for item in merged.values():
         if item["key"] not in state.data["articles"]:
             state.data["articles"][item["key"]] = {
@@ -863,8 +882,30 @@ def _employer_link(issuer: str, a: _ArticleHTML, article_url: str) -> str | None
     return match[0] if len(set(match)) == 1 else None
 
 
+def _employer_owner_proved(issuer: str, homepage: str, html: _ArticleHTML,
+                           aliases=()) -> bool:
+    """Require first-party identity, not a publisher-linked portfolio mention.
+
+    Exact PSL employer brand + a prominent first-party heading are separate
+    positive witnesses. The native ATS board remains independently checked.
+    """
+    domain = registrable(homepage)
+    if not domain:
+        return False
+    names = (issuer, *aliases)
+    normalize = lambda value: re.sub(r"[^a-z0-9]", "", value.casefold())
+    if normalize(domain.split(".", 1)[0]) not in {
+            normalize(name) for name in names if isinstance(name, str)}:
+        return False
+    return any(
+        re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", heading, re.I)
+        for heading in html.headings
+        for name in names if isinstance(name, str) and name.strip()
+    )
+
+
 def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
-                         employer_page=None) -> tuple[str, str, str] | None:
+                         employer_page=None, aliases=()) -> tuple[str, str, str] | None:
     from .resolver import resolve
 
     seen = set()
@@ -877,7 +918,7 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
         page.raise_for_status()
         html = _article(page.text)
         if (registrable(str(page.request.url)) != registrable(homepage)
-                or issuer.casefold() not in html.text[:10000].casefold()):
+                or not _employer_owner_proved(issuer, homepage, html, aliases)):
             return None
         possible = [urljoin(url, link) for _, link in html.links[:150]]
         for board_url in possible:
@@ -891,15 +932,12 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
                 match = resolve(native, client=client, name=issuer)
                 if match.ats != ats or match.board != board:
                     continue
-                # The board must independently identify its company. A
-                # functioning guessed slug or shared ATS host is insufficient.
                 board_response = client.get(native, follow_redirects=True)
                 board_response.raise_for_status()
                 reached = urlsplit(str(board_response.request.url))
                 if (reached.scheme != "https" or reached.hostname != host
                         or reached.path.rstrip("/") != f"/{board}"
                         or reached.query or reached.fragment):
-                    # A redirect to another tenant is not an owner witness.
                     continue
                 board_page = _article(board_response.text)
                 if issuer.casefold() not in board_page.text[:12000].casefold():
@@ -936,9 +974,11 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
         homepage, follow_redirects=True)
     page.raise_for_status()
     if (registrable(str(page.request.url)) != domain
-            or issuer.casefold() not in _article(page.text).text[:10000].casefold()):
+            or not _employer_owner_proved(
+                issuer, homepage, _article(page.text), aliases)):
         return "employer_homepage_owner_unproved", None
-    board = _board_from_employer(homepage, issuer, client, employer_page=page)
+    board = _board_from_employer(
+        homepage, issuer, client, employer_page=page, aliases=aliases)
     if not board:
         return "guard_not_proven", None
     ats, token, native_url = board
@@ -993,13 +1033,19 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
         return "issuer_unknown", None, None
     if not isinstance(stage, str) or stage not in _STAGE:
         return "round_unconfirmed", None, None
-    # In a multi-deal article B's round is not evidence for issuer A.
+    # A publisher's unrelated issuer clauses must not prove this issuer's
+    # stage, sector, or geography, including when they share one HTML article.
     mentions = [
-        sentence for sentence in re.split(r"[.!?;](?:\s+|$)", article["text"])
+        passage for passage in re.split(
+            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s+(?:but|and)\s+",
+            article["text"], flags=re.I)
         if re.search(r"(?<!\w)" + re.escape(issuer) + r"(?!\w)",
-                     sentence, re.I)
+                     passage, re.I)
     ]
-    if not any(_STAGE[stage].search(m) and _FUNDING.search(m) for m in mentions):
+    round_passages = [
+        p for p in mentions if _STAGE[stage].search(p) and _FUNDING.search(p)
+    ]
+    if not round_passages:
         return "round_unconfirmed", None, None
     if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
         return "round_date_unconfirmed_or_stale", None, None
@@ -1007,16 +1053,21 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
     if not item_day or not round_day or abs((item_day - round_day).days) > 14:
         return "round_date_unconfirmed_or_stale", None, None
-    if deal.get("sector") not in {"ai", "fintech"} or not _SECTOR.search(article["text"]):
-        return "sector_unproved", None, None
-    if _BLOCKED_SECTOR.search(article["text"]):
+    if any(_BLOCKED_SECTOR.search(p) for p in round_passages):
         return "fund_not_issuer", None, None
+    if deal.get("sector") not in {"ai", "fintech"}:
+        return "sector_unproved", None, None
+    sector_passages = [p for p in round_passages if _SECTOR.search(p)]
+    if not sector_passages:
+        return "sector_unproved", None, None
     region = deal.get("region")
     allowed = set(_manifest(settings)["regions"])
-    evidenced = _regions(article["text"], allowed)
+    evidenced = set().union(*(_regions(p, allowed) for p in round_passages))
     remote_exception = (region not in evidenced and deal.get("remote_first") is True
-                        and "remote-first-anywhere" in evidenced)
-    if region not in evidenced and not remote_exception:
+                        and evidenced == {"remote-first-anywhere"})
+    if (len(evidenced) != 1 or
+            (not any(region in _regions(p, allowed) for p in sector_passages)
+             and not remote_exception)):
         return "region_unproved", None, None
     homepage = _employer_link(issuer, article["html"], article["url"])
     if not homepage:
@@ -1028,9 +1079,9 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     # verified employer. A publisher hyperlink is NOT proof of ownership.
     page = client.get(homepage, follow_redirects=True)
     page.raise_for_status()
-    homepage_text = _article(page.text).text[:10000]
-    if (registrable(str(page.request.url)) != domain
-            or issuer.casefold() not in homepage_text.casefold()):
+    employer_html = _article(page.text)
+    homepage_text = employer_html.text[:10000]
+    if registrable(str(page.request.url)) != domain:
         return "employer_homepage_owner_unproved", None, None
     # The news article and employer homepage must independently corroborate
     # every alias before it can participate in identity precedence.
@@ -1048,6 +1099,8 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
                 and alias.strip().casefold() not in
                 {a.casefold() for a in proven_aliases}):
             proven_aliases.append(alias.strip())
+    if not _employer_owner_proved(issuer, homepage, employer_html, proven_aliases):
+        return "employer_homepage_owner_unproved", None, None
     # A news writer calling a business remote-first is not independent proof.
     if remote_exception and not _REMOTE.search(homepage_text):
         return "remote_first_not_employer_evidenced", None, None
