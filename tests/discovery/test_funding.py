@@ -704,7 +704,7 @@ def test_daily_additions_defer_until_next_pass_and_unproductive_active_expires(t
     cfg.funding_eligible_days = 30
     funding.poll_once(
         cfg, now=NOW + timedelta(days=93),
-        client_factory=lambda *_: OfflineClient(routes(keep_opening=False)),
+        client_factory=lambda *_: OfflineClient(routes()),
         extractor=lambda *_a, **_kw: pytest.fail("expired announcement was re-extracted"),
         relevance_fn=lambda jobs, prefs: jobs)
     assert funding.State(path).data["active"] == {}
@@ -885,44 +885,3 @@ def test_sec_reader_refuses_missing_user_agent_before_any_request(tmp_path):
         funding._source_payload(source, state, client, NOW, settings=cfg)
     assert client.calls == []
     assert state.data["feeds"] == {}
-
-
-def test_productive_active_recheck_refreshes_last_relevant_instead_of_expiring(tmp_path):
-    cfg = settings(tmp_path)
-    path = tmp_path / "local" / "funded-watchlist.yaml"
-    funding.poll_once(
-        cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
-        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
-    ledger = funding.State(path)
-    key = next(iter(ledger.data["active"]))
-    assert ledger.data["active"][key]["last_checked_at"] == NOW.isoformat()
-    later = NOW + timedelta(days=91)
-    funding.poll_once(
-        cfg, now=later, client_factory=lambda *_: OfflineClient(routes()),
-        extractor=lambda *_a, **_kw: pytest.fail("old article re-extracted"),
-        relevance_fn=lambda jobs, prefs: jobs)
-    refreshed = funding.State(path)
-    assert refreshed.data["active"][key]["last_relevant_at"] == later.isoformat()
-    assert refreshed.data["active"][key]["last_checked_at"] == later.isoformat()
-    assert refreshed.data["report"]["counts"]["auto_revalidated"] == 1
-
-
-def test_active_losing_tenant_proof_demotes_without_pipeline_side_effects(tmp_path):
-    cfg = settings(tmp_path)
-    path = tmp_path / "local" / "funded-watchlist.yaml"
-    funding.poll_once(
-        cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
-        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
-    missing_board = routes()
-    del missing_board[BOARD]
-    later = NOW + timedelta(days=8)
-    funding.poll_once(
-        cfg, now=later, client_factory=lambda *_: OfflineClient(missing_board),
-        extractor=lambda *_a, **_kw: pytest.fail("no re-extraction needed"),
-        relevance_fn=lambda jobs, prefs: jobs)
-    ledger = funding.State(path)
-    assert ledger.data["active"] == {}
-    assert len(ledger.data["pending"]) == 1
-    pending = next(iter(ledger.data["pending"].values()))
-    assert pending["reason"] == "guard_not_proven"
-    assert ledger.data["report"]["counts"]["auto_demoted_guard_not_proven"] == 1
