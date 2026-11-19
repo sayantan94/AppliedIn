@@ -33,7 +33,7 @@ _ALLOWED_STATE = frozenset({"version", "feeds", "articles", "deals", "active", "
                             "unresolved", "budgets", "report", "next_poll"})
 _ALLOWED_AUTO = frozenset({"name", "careers_url", "ats", "board", "mode", "discovery",
                            "employer_domain", "aliases", "homepage", "source_id",
-                           "admitted_at", "last_relevant_at", "last_checked_at"})
+                           "admitted_at", "last_relevant_at"})
 _BOARD_HOST = {"ashby": "jobs.ashbyhq.com", "lever": "jobs.lever.co"}
 _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
 _FUNDING = re.compile(r"\b(?:funding|financing|fundraise|raised|raises|secured|pre.seed|seed|series a)\b", re.I)
@@ -114,9 +114,6 @@ def _auto_record(item: object) -> dict:
     for field in ("source_id", "admitted_at", "last_relevant_at"):
         if not isinstance(item.get(field), str) or len(item[field]) > 160:
             raise FundingRefusal("auto_record_metadata")
-    checked = item.get("last_checked_at", item["admitted_at"])
-    if not isinstance(checked, str) or len(checked) > 160:
-        raise FundingRefusal("auto_record_metadata")
     return item
 
 
@@ -857,7 +854,7 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient,
 def _preview_verified(issuer: str, homepage: str, source_id: str,
                       state: State, settings, client: GuardedClient, now,
                       *, relevance_fn=None, employer_page=None,
-                      aliases=(), skip_active_key=None) -> tuple[str, dict | None]:
+                      aliases=()) -> tuple[str, dict | None]:
     """Re-prove the employer, tenant, producer AND consumer, without stores."""
     from .adapters import ADAPTERS
     from .canonical_job_url import admit_feed, source_bound
@@ -871,9 +868,7 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
         a.strip().casefold() for a in aliases if isinstance(a, str)}
     if any(c.name.strip().casefold() in identities for c in manual):
         return "manual_precedence", None
-    for key, row in state.data["active"].items():
-        if key == skip_active_key:
-            continue
+    for row in state.data["active"].values():
         existing = {row["name"].strip().casefold()} | {
             a.strip().casefold() for a in row.get("aliases", [])}
         if row["employer_domain"] == domain or not identities.isdisjoint(existing):
@@ -891,8 +886,8 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     if any((c.ats == ats and c.board == token)
            or c.careers_url.rstrip("/") == native_url for c in manual):
         return "manual_board_collision", None
-    if any(key != skip_active_key and row["ats"] == ats and row["board"] == token
-           for key, row in state.data["active"].items()):
+    if any(row["ats"] == ats and row["board"] == token
+           for row in state.data["active"].values()):
         return "tenant_collision", None
     cfg = CompanyConfig(name=issuer, careers_url=native_url, ats=ats, board=token)
     if not source_bound(cfg, cfg):
@@ -924,7 +919,7 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
         "mode": "gated", "discovery": "feed", "employer_domain": domain,
         "homepage": homepage, "aliases": list(aliases),
         "source_id": source_id, "admitted_at": now.isoformat(),
-        "last_relevant_at": now.isoformat(), "last_checked_at": now.isoformat(),
+        "last_relevant_at": now.isoformat(),
     }
 
 
@@ -1007,12 +1002,11 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
 
 
 def _recheck_pending(state: State, settings, client: GuardedClient,
-                     now, *, relevance_fn=None, limit=None) -> int:
+                     now, *, relevance_fn=None) -> None:
     """One bounded weekly check per independently verified pending employer."""
     reviewed = 0
-    cap = settings.funding_max_candidates_per_pass if limit is None else limit
     for key, row in list(state.data["pending"].items()):
-        if reviewed >= cap:
+        if reviewed >= settings.funding_max_candidates_per_pass:
             break
         if not isinstance(row, dict):
             raise FundingRefusal("corrupt_pending_state")
@@ -1053,59 +1047,6 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
             if key in state.data["deals"]:
                 state.data["deals"][key]["reason"] = reason
             state.count(row["source"], reason, now)
-        state.save()
-    return reviewed
-
-
-def _recheck_active(state: State, settings, client: GuardedClient, now,
-                    *, relevance_fn=None, limit=0) -> None:
-    """Weekly, read-only proof refresh; expiry measures actually unproductive time.
-
-    A changed or unproved ATS tenant cannot keep contributing to the effective
-    watchlist merely because it was once valid. All checks share the funding
-    candidate and HTTP/relevance budgets; no discovery or queue writes occur.
-    """
-    reviewed = 0
-    for key, row in list(state.data["active"].items()):
-        if reviewed >= limit:
-            break
-        checked = _date(row.get("last_checked_at", row["admitted_at"]))
-        if checked and now - checked < timedelta(days=settings.funding_recheck_days):
-            continue
-        reviewed += 1
-        try:
-            reason, proved = _preview_verified(
-                row["name"], row["homepage"], row["source_id"],
-                state, settings, client, now, relevance_fn=relevance_fn,
-                aliases=row.get("aliases", []), skip_active_key=key)
-            if proved is not None and any(
-                    proved[field] != row[field]
-                    for field in ("careers_url", "ats", "board", "employer_domain")):
-                reason, proved = "tenant_changed_manual_review", None
-        except (FundingRefusal, httpx.HTTPError, ValueError):
-            reason, proved = "active_recheck_failed", None
-        row["last_checked_at"] = now.isoformat()
-        if proved is not None:
-            row["last_relevant_at"] = now.isoformat()
-            state.count(row["source_id"], "auto_revalidated", now)
-        elif reason not in {"no_openings", "no_relevant_openings",
-                            "relevance_budget", "active_recheck_failed"}:
-            # Loss of authority must immediately stop automatic discovery.
-            del state.data["active"][key]
-            state.data["pending"][key] = {
-                "name": row["name"], "homepage": row["homepage"],
-                "employer_domain": row["employer_domain"],
-                "aliases": row.get("aliases", []), "source": row["source_id"],
-                "reason": reason, "seen_at": now.isoformat(),
-                "next_check": (now + timedelta(days=settings.funding_recheck_days)).isoformat(),
-                "expires": (now + timedelta(days=settings.funding_pending_days)).isoformat(),
-            }
-            if key in state.data["deals"]:
-                state.data["deals"][key]["status"] = "pending"
-                state.data["deals"][key]["reason"] = reason
-            state.count(row["source_id"], "auto_demoted_" + reason, now)
-        else:
-            state.count(row["source_id"], "auto_recheck_" + reason, now)
         state.save()
 
 
@@ -1278,14 +1219,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 "source": article["source"], "seen_at": now.isoformat(),
                 **({} if every_persisted else {"children": children})}
             state.save()
-    # All new article evaluations and periodic proof rechecks share a bounded
-    # funding-only candidate budget, independent of downstream company caps.
-    remaining = max(0, settings.funding_max_candidates_per_pass - len(candidates))
-    pending_checked = _recheck_pending(
-        state, settings, client, now, relevance_fn=relevance_fn, limit=remaining)
-    _recheck_active(
-        state, settings, client, now, relevance_fn=relevance_fn,
-        limit=max(0, remaining - pending_checked))
+    _recheck_pending(state, settings, client, now, relevance_fn=relevance_fn)
     # Unproductive entries can age out, but manual watchlist is never touched.
     for key, row in list(state.data["active"].items()):
         last = _date(row["last_relevant_at"])
