@@ -64,3 +64,51 @@ def test_qualified_opens_are_one_per_utc_day_and_latest_attempt_only(tmp_path):
     persisted = report["earliest_earned_due"][0]["due_at"]
     assert persisted == due
     assert report["opens"]["qualified"] == 6
+
+
+def test_earned_expansion_survives_later_unopened_followups(tmp_path):
+    """Three qualified original opens permit stage 3 even if stages 1/2 had none."""
+    from types import SimpleNamespace
+    from core.outreach_ledger import Ledger
+    from core.outreach_contacts import LinkedInSnapshot, VerifiedRecipient
+    from core.outreach_sources import FundedNoOpening
+
+    t0 = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    settings = SimpleNamespace(
+        mode="local", outreach_enabled=True, local_dir=str(tmp_path),
+        outreach_timezone="UTC", outreach_sender="sender@example-co.com",
+        outreach_followups_expanded=True)
+    db = Ledger(settings)
+    linkedin = LinkedInSnapshot(frozenset(), frozenset())
+    person = VerifiedRecipient("test@example-co.com", "name:test user",
+                               "Test User", "person", "https://example-co.com/team")
+    def lead(at):
+        return FundedNoOpening("a"*32, "Example Co", "example-co.com",
+                               "https://example-co.com", (), "synthetic",
+                               at, "no_openings")
+    for stage in range(3):
+        at = t0 + timedelta(days=stage * 7)
+        db.record_successful_poll(uidvalidity="2", monitored_address=settings.outreach_sender,
+                                  now=at)
+        ticket = db.reserve_email(
+            lead(at), person, linkedin, no_application=True, resume_seed_proved=True,
+            sender_proved=True, variant="approved", digest="a"*64,
+            stage=stage, now=at, expanded_followups=True)
+        if stage == 0:
+            db.register_pixel(ticket["id"], "e"*64, now=at)
+        db.begin_wire(ticket["id"], source_checked=True, no_application=True,
+                      linkedin_checked=True, now=at)
+        db.finish_wire(ticket["id"], accepted=True, now=at)
+        if stage == 0:
+            for day in (1, 2, 3):
+                db.record_pixel_open("e"*64, "qualified", now=at + timedelta(days=day))
+    t3 = t0 + timedelta(days=21)
+    db.record_successful_poll(uidvalidity="2", monitored_address=settings.outreach_sender,
+                              now=t3)
+    due = db.due_followups(now=t3)
+    assert len(due) == 1 and due[0]["stage"] == 3
+    ticket = db.reserve_email(
+        lead(t3), person, linkedin, no_application=True, resume_seed_proved=True,
+        sender_proved=True, variant="approved", digest="a"*64,
+        stage=3, now=t3, expanded_followups=True)
+    assert ticket["stage"] == 3
