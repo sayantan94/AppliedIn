@@ -544,6 +544,20 @@ class Ledger:
             db.execute("UPDATE attempts SET tracking_mode='pixel_enabled' WHERE id=?",
                        (attempt_id,))
 
+    def disable_pixel(self, attempt_id: str):
+        """Revoke the optional token before wire if ingress is unsafe."""
+        with self._tx() as db:
+            state = db.execute("SELECT state FROM attempts WHERE id=?",
+                               (attempt_id,)).fetchone()
+            if not state or state[0] != "reserved":
+                raise OutreachHold("pixel_change_after_wire_forbidden")
+            db.execute("DELETE FROM pixel_events WHERE token_sha IN "
+                       "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",
+                       (attempt_id,))
+            db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?", (attempt_id,))
+            db.execute("UPDATE attempts SET tracking_mode='not_tracked' WHERE id=?",
+                       (attempt_id,))
+
     def record_pixel_open(self, token: str, classification: str, *, now=None):
         """Synchronous FULL WAL commit precedes the handler's HTTP 200."""
         now = _time(now)
@@ -705,7 +719,13 @@ class Ledger:
             bounced = db.execute("""SELECT COUNT(*) FROM bounces b
                 JOIN attempts a ON a.id=b.attempt_id
                 WHERE a.company_id=?""", (company_id,)).fetchone()[0]
-            ramp_day, ramp_limit = self._day(db, now)
+            # Inspecting a report cannot start the immutable ramp clock.
+            from datetime import date
+            zone = ZoneInfo(getattr(self.settings, "outreach_timezone", "UTC"))
+            ramp_day = now.astimezone(zone).date().isoformat()
+            first = self._meta(db, "first_day")
+            elapsed = max(0, (date.fromisoformat(ramp_day) - date.fromisoformat(first)).days) if first else 0
+            ramp_limit = RAMP[min(elapsed, len(RAMP)-1)]
             day_used = db.execute("SELECT COUNT(*) FROM attempts WHERE day=? "
                                   "AND state!='definite_pre_wire_failure'",
                                   (ramp_day,)).fetchone()[0]
