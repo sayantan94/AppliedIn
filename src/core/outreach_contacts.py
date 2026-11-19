@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from email.utils import parseaddr
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -53,6 +54,73 @@ def profile_key(value):
         raise ContactHold("linkedin_profile_unverified") from exc
 
 
+class _PublishedPersonBinding(HTMLParser):
+    """Bind a mailto to the name in its own smallest rendered container.
+
+    A name somewhere else on a team page or beside another mailbox is not
+    evidence for this person's exact recipient. Icon-only and unscoped names
+    remain held until the operator finds a stronger publication.
+    """
+    CONTAINERS = frozenset({"div", "li", "p", "section", "article", "tr", "td"})
+
+    def __init__(self, target):
+        super().__init__(convert_charrefs=True)
+        self.target = target
+        self.stack = []
+        self.anchors = []
+        self.current = None
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.casefold()
+        if tag in self.CONTAINERS:
+            self.stack.append({"tag": tag, "text": [], "emails": set()})
+        if tag == "a":
+            links = [str(v) for k, v in attrs
+                     if k.casefold() == "href" and isinstance(v, str)]
+            mail = links[0].split("?", 1)[0][7:].casefold() if (
+                len(links) == 1 and links[0].casefold().startswith("mailto:")) else ""
+            parent = self.stack[-1] if self.stack else None
+            if mail and parent is not None:
+                parent["emails"].add(mail)
+            self.current = {"mail": mail, "parent": parent, "text": []}
+
+    def handle_data(self, data):
+        if self.stack:
+            frame = self.stack[-1]
+            if sum(map(len, frame["text"])) < 500:
+                frame["text"].append(data[:500])
+        if self.current is not None and sum(map(len, self.current["text"])) < 500:
+            self.current["text"].append(data[:500])
+
+    def handle_endtag(self, tag):
+        tag = tag.casefold()
+        if tag == "a" and self.current is not None:
+            self.anchors.append(self.current)
+            self.current = None
+        if tag in self.CONTAINERS and self.stack:
+            if self.stack[-1]["tag"] == tag:
+                self.stack.pop()
+            else:
+                # Malformed nested structures cannot establish a precise link.
+                self.stack.clear()
+
+    def binds(self, full_name):
+        required = " ".join(full_name.casefold().split())
+        boundary = re.compile(r"(?<!\\w)" + re.escape(required) + r"(?!\\w)")
+        for anchor in self.anchors:
+            if anchor["mail"] != self.target:
+                continue
+            label = " ".join(" ".join(anchor["text"]).casefold().split())
+            if boundary.search(label):
+                return True
+            parent = anchor["parent"]
+            if parent is not None and parent["emails"] == {self.target}:
+                context = " ".join(" ".join(parent["text"]).casefold().split())
+                if len(context) <= 400 and boundary.search(context):
+                    return True
+        return False
+
+
 @dataclass(frozen=True)
 class VerifiedRecipient:
     address: str
@@ -85,8 +153,9 @@ def verify_published_contact(*, company_domain, source_url, html, address, name=
         raise ContactHold("exact_address_publication_missing")
     if name:
         key = person_key(name)
-        nearby = re.sub(r"<[^>]*>", " ", payload[max(0, hits[0].start()-160):hits[0].end()+160])
-        if key[5:] not in " ".join(nearby.casefold().split()):
+        witness = _PublishedPersonBinding(address)
+        witness.feed(payload)
+        if not witness.binds(name):
             raise ContactHold("named_person_exact_address_binding_missing")
         return VerifiedRecipient(address, key, name.strip(), "person", source_url)
     if address.split("@", 1)[0] not in {
