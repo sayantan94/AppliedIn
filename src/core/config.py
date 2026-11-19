@@ -273,6 +273,9 @@ class Settings(BaseSettings):
     outreach_smtp_password: str = ""
     outreach_dsn_sender_addresses: str = ""
     outreach_provider_dsn_verified: bool = False
+    outreach_followup_variant_id: str = ""
+    outreach_followups_auto: bool = False
+    outreach_followups_expanded: bool = False
 
     aws_region: str = "us-east-1"
 

@@ -684,6 +684,52 @@ def _start_funding_poller(settings=None) -> bool:
     return True
 
 
+
+def _outreach_followup_loop() -> None:
+    """Opt-in local email-only schedule; every send still passes guards."""
+    from core.config import get_settings
+    from core.outreach_ledger import Ledger, OutreachHold
+    from core.outreach_email import send_approved
+
+    while True:
+        settings = get_settings()
+        if (settings.mode == "local" and settings.outreach_enabled
+                and settings.outreach_followups_auto):
+            try:
+                ledger = Ledger(settings)
+                stores = make_stores(settings)
+                if settings.outreach_followup_variant_id:
+                    for item in ledger.due_followups(limit=5):
+                        try:
+                            send_approved(
+                                settings=settings, company_id=item["company_id"],
+                                contact_page_url=item["contact_url"],
+                                exact_address=item["recipient"], person_name=item["person_name"],
+                                variant_id=settings.outreach_followup_variant_id,
+                                stores=stores, stage=item["stage"],
+                                expand_followups=settings.outreach_followups_expanded)
+                        except (OutreachHold, ValueError, OSError):
+                            log.warning("outreach follow-up held for operator review")
+            except Exception:
+                log.warning("outreach scheduler held; check private configuration")
+        time.sleep(300)
+
+
+def _start_outreach_followups(settings=None) -> bool:
+    from core.config import get_settings
+    from core.outreach_ledger import Ledger
+
+    settings = settings or get_settings()
+    if (settings.mode != "local" or not settings.outreach_enabled
+            or not settings.outreach_followups_auto):
+        return False
+    # Crash after SMTP initiation is unknown, never retry automatically.
+    Ledger(settings).hold_orphaned_attempts()
+    threading.Thread(target=_outreach_followup_loop, daemon=True,
+                     name="outreach-followups").start()
+    return True
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -707,6 +753,7 @@ def main() -> None:
     from core.config import get_settings
     _start_imap_poller(stores, get_settings())
     _start_funding_poller(get_settings())
+    _start_outreach_followups(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)

@@ -59,6 +59,7 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS attempts (
                     id TEXT PRIMARY KEY, company_id TEXT NOT NULL,
                     person_key TEXT NOT NULL, recipient TEXT NOT NULL,
+                    contact_url TEXT NOT NULL, contact_name TEXT NOT NULL,
                     message_id TEXT NOT NULL UNIQUE,
                     stage INTEGER NOT NULL, state TEXT NOT NULL,
                     approved_variant TEXT NOT NULL, approved_digest TEXT NOT NULL,
@@ -266,11 +267,13 @@ class Ledger:
             domain = sender.rsplit("@", 1)[1]
             message_id = "<" + uuid.uuid4().hex + "." + uuid.uuid4().hex + "@" + domain + ">"
             db.execute("""INSERT INTO attempts
-                (id,company_id,person_key,recipient,message_id,stage,state,approved_variant,
-                 approved_digest,reserved_at,day,prior_id,references_json)
-                VALUES (?,?,?,?,?,?,'reserved',?,?,?,?,?,?)""",
+                (id,company_id,person_key,recipient,contact_url,contact_name,
+                 message_id,stage,state,approved_variant,approved_digest,
+                 reserved_at,day,prior_id,references_json)
+                VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?)""",
                 (attempt_id, lead.company_id, contact.person_key, contact.address,
-                 message_id, stage, variant, digest, now.timestamp(), day, prior_id,
+                 contact.evidence_url, contact.name, message_id, stage,
+                 variant, digest, now.timestamp(), day, prior_id,
                  json.dumps(references)))
         return {"id": attempt_id, "message_id": message_id, "to": contact.address,
                 "in_reply_to": prior_id, "references": references,
@@ -318,6 +321,66 @@ class Ledger:
                     (row[0], row[1])).fetchone():
                 db.execute("DELETE FROM people WHERE company_id=? AND person_key=? "
                            "AND channel='email'", (row[0], row[1]))
+
+
+    def earn_due(self, company_id, person_key, stage, calculated):
+        """Persist earliest earned due even when a later quota check holds."""
+        if calculated.tzinfo is None or not 1 <= stage <= 5:
+            raise OutreachHold("followup_due_invalid")
+        with self._tx() as db:
+            db.execute("INSERT INTO earned_due VALUES (?,?,?,?) "
+                       "ON CONFLICT(company_id,person_key,stage) "
+                       "DO UPDATE SET due_at=min(earned_due.due_at,excluded.due_at)",
+                       (company_id, person_key, stage, calculated.timestamp()))
+            return db.execute("SELECT due_at FROM earned_due WHERE "
+                              "company_id=? AND person_key=? AND stage=?",
+                              (company_id, person_key, stage)).fetchone()[0]
+
+    def due_followups(self, *, now=None, limit=10):
+        """Only complete accepted threads, not uncertain/recovered sends."""
+        now = _time(now)
+        limit = max(1, min(int(limit), 25))
+        max_stage = 5 if getattr(self.settings, "outreach_followups_expanded", False) else 2
+        with self._tx() as db:
+            rows = db.execute("""
+                SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
+                       a.contact_name,a.stage,a.accepted_at
+                FROM attempts a
+                WHERE a.state='confirmed_smtp_accepted'
+                  AND a.stage < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM attempts b
+                      WHERE b.company_id=a.company_id
+                        AND b.person_key=a.person_key
+                        AND b.state!='definite_pre_wire_failure'
+                        AND b.stage>a.stage)
+                ORDER BY a.accepted_at ASC LIMIT 100
+            """, (max_stage,)).fetchall()
+        result = []
+        for company, person, recipient, url, name, stage, accepted_at in rows:
+            accepted = datetime.fromtimestamp(accepted_at, UTC)
+            earned = self.earn_due(company, person, stage+1,
+                                   due_for_band(accepted, tracked=False))
+            if earned <= now.timestamp():
+                result.append({"company_id": company, "person_key": person,
+                               "recipient": recipient, "contact_url": url,
+                               "person_name": name, "stage": stage+1})
+            if len(result) >= limit:
+                break
+        return result
+
+    def clear_reviewed_email_hold(self, company_id, *, reviewed=False):
+        if reviewed is not True:
+            raise OutreachHold("owner_review_required_before_email_reenable")
+        with self._tx() as db:
+            db.execute("DELETE FROM email_holds WHERE company_id=?", (company_id,))
+
+    def reenable_global_email(self, *, owner_reviewed=False):
+        """Explicit repair only; preserve historical bounce evidence."""
+        if owner_reviewed is not True:
+            raise OutreachHold("owner_review_required_before_email_reenable")
+        with self._tx() as db:
+            self._set_meta(db, "global_email_pause", "0")
 
     def hold_orphaned_attempts(self):
         """Call on process startup, not during concurrent sends; never auto-replay."""
