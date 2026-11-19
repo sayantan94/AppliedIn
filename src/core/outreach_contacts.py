@@ -106,7 +106,7 @@ class _PublishedPersonBinding(HTMLParser):
 
     def binds(self, full_name):
         required = " ".join(full_name.casefold().split())
-        boundary = re.compile(r"(?<!\\w)" + re.escape(required) + r"(?!\\w)")
+        boundary = re.compile(r"(?<!\w)" + re.escape(required) + r"(?!\w)")
         for anchor in self.anchors:
             if anchor["mail"] != self.target:
                 continue
