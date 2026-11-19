@@ -403,18 +403,25 @@ class _ArticleHTML(HTMLParser):
         self.parts, self.links = [], []
         self.href = ""
         self.anchor_text = []
+        self.ignored = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag == "a":
+        if tag in ("script", "style", "noscript"):
+            self.ignored += 1
+        if tag == "a" and not self.ignored:
             self.href = dict(attrs).get("href", "")
             self.anchor_text = []
 
     def handle_data(self, value):
+        if self.ignored:
+            return
         self.parts.append(value)
         if self.href:
             self.anchor_text.append(value)
 
     def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript"):
+            self.ignored = max(0, self.ignored - 1)
         if tag == "a" and self.href:
             self.links.append((" ".join(self.anchor_text).strip(), self.href))
             self.href = ""
@@ -685,7 +692,8 @@ def _board_from_employer(homepage: str, issuer: str, client: GuardedClient) -> t
         page = client.get(url, follow_redirects=True)
         page.raise_for_status()
         html = _article(page.text)
-        if issuer.casefold() not in html.text[:10000].casefold():
+        if (registrable(str(page.request.url)) != registrable(homepage)
+                or issuer.casefold() not in html.text[:10000].casefold()):
             return None
         possible = [urljoin(url, link) for _, link in html.links[:150]]
         for board_url in possible:
@@ -724,6 +732,10 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     if stage not in _STAGE or not _STAGE[stage].search(article["text"]):
         return "round_unconfirmed", None
     if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
+        return "round_date_unconfirmed_or_stale", None
+    # A model-invented date is not independent publication evidence.
+    item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
+    if not item_day or not round_day or abs((item_day - round_day).days) > 14:
         return "round_date_unconfirmed_or_stale", None
     if deal.get("sector") not in {"ai", "fintech"} or not _SECTOR.search(article["text"]):
         return "sector_unproved", None
@@ -874,9 +886,9 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 status = ("active" if active else "retryable" if reason in
                           {"probe_retryable", "relevance_budget", "postings_limit"}
                           else "pending" if reason in {
-                              "guard_not_proven", "no_openings", "no_relevant_openings",
-                              "employer_site_unproved", "psl_unavailable_or_unknown"}
+                              "guard_not_proven", "no_openings", "no_relevant_openings"}
                           else "unresolved" if reason in {
+                              "employer_site_unproved", "psl_unavailable_or_unknown",
                               "round_unconfirmed", "round_date_unconfirmed_or_stale",
                               "sector_unproved", "region_unproved", "issuer_unknown"}
                           else "rejected")
