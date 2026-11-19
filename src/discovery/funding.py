@@ -44,6 +44,9 @@ _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
 _SECTOR = re.compile(r"\b(?:fintech|payments?|financial technology|artificial intelligence|"
                      r"generative ai|machine learning|llms?|ai[- /]powered|ai startup)\b", re.I)
 _BLOCKED_SECTOR = re.compile(r"\b(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
+_NEGATED_SECTOR = re.compile(
+    r"\b(?:non[-\s]+(?:fintech|ai)|not\s+(?:an?\s+)?"
+    r"(?:fintech|ai|financial technology|artificial intelligence))\b", re.I)
 _REGIONS = {"eu", "uk", "usa", "uae", "gcc", "india", "singapore", "australia"}
 _REGION_PHRASES = {
     "eu": ("europe", "european union", "france", "germany", "netherlands", "ireland",
@@ -1044,7 +1047,8 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     # stage, sector, or geography, including when they share one HTML article.
     mentions = [
         passage for passage in re.split(
-            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s+(?:but|and)\s+",
+            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s+(?:but|and)\s+"
+            r"|\band\s+(?=[A-Z][A-Za-z0-9._-]{2,}\b)",
             article["text"], flags=re.I)
         if re.search(r"(?<!\w)" + re.escape(issuer) + r"(?!\w)",
                      passage, re.I)
@@ -1062,7 +1066,8 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
         return "round_date_unconfirmed_or_stale", None, None
     if any(_BLOCKED_SECTOR.search(p) for p in round_passages):
         return "fund_not_issuer", None, None
-    if deal.get("sector") not in {"ai", "fintech"}:
+    if (deal.get("sector") not in {"ai", "fintech"}
+            or any(_NEGATED_SECTOR.search(p) for p in round_passages)):
         return "sector_unproved", None, None
     sector_passages = [p for p in round_passages if _SECTOR.search(p)]
     if not sector_passages:
