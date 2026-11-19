@@ -19,11 +19,29 @@ class _PublicLinks(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.links = set()
+        self.labels = {}
+        self._anchor = None
+        self._text = []
 
     def handle_starttag(self, tag, attrs):
         if tag.casefold() == "a":
-            self.links.update(v for k, v in attrs if k.casefold() == "href"
-                              and isinstance(v, str) and len(v) <= 2048)
+            choices = [v for k, v in attrs if k.casefold() == "href"
+                       and isinstance(v, str) and len(v) <= 2048]
+            self.links.update(choices)
+            self._anchor = choices[0] if len(choices) == 1 else None
+            self._text = []
+
+    def handle_data(self, data):
+        if self._anchor is not None and sum(map(len, self._text)) < 400:
+            self._text.append(data[:400])
+
+    def handle_endtag(self, tag):
+        if tag.casefold() == "a":
+            if self._anchor is not None:
+                self.labels.setdefault(self._anchor, []).append(
+                    " ".join(" ".join(self._text).casefold().split())[:400])
+            self._anchor = None
+            self._text = []
 
 
 def _social_link(channel: str, target_url: str) -> bool:
@@ -94,7 +112,12 @@ def queue_target(*, settings, company_id: str, channel: str, target_url: str,
     if isinstance(person_name, str) and person_name:
         try:
             key = person_key(person_name)
-            if key[5:] in " ".join(re.sub(r"<[^>]+>", " ", html).casefold().split()):
+            # A name elsewhere on the employer page does NOT bind this handle
+            # to that person. Only text of the exact published target anchor
+            # proves the identity; icon-only links remain provisional slots.
+            labels = links.labels.get(target_url, [])
+            if any(re.search(r"(?<!\\w)" + re.escape(key[5:]) + r"(?!\\w)",
+                             label) for label in labels):
                 identity, verified_name = key, person_name.strip()
         except ContactHold:
             pass
