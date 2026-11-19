@@ -574,8 +574,6 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
         for company in thread_companies:
             ledger.hold_company_email(company, "unthreaded_or_ambiguous_reply")
         classification = "unmatched_or_automatic" if sender_ok else "unmatched"
-    else:
-        classification = "unmatched"
     ledger.record_inbound_uid(validity, uid, classification)
 
 
