@@ -19,6 +19,19 @@ def company_application_clear(stores, lead):
             for row in stores.tracking.query_status(status):
                 if str(row.get("company", "")).strip().casefold() in known:
                     return False
+        # A rejection may be a recorded employer disposition, not a member of
+        # Status (which models the application lifecycle, not reply outcomes).
+        # Reject only explicit recorded negatives; do not infer rejection
+        # from a skipped posting or a low relevance score.
+        for row in stores.tracking.all():
+            if not isinstance(row, dict) or str(
+                    row.get("company", "")).strip().casefold() not in known:
+                continue
+            if str(row.get("status", "")).casefold() in {
+                    "applied", "applied_manual", "submitting", "rejected", "declined"}:
+                return False
+            if row.get("rejected_at") or row.get("employer_rejection_at"):
+                return False
     except Exception as exc:
         raise OutreachHold("application_tracker_unreadable") from exc
     return True
