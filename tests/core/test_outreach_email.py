@@ -166,3 +166,53 @@ def test_absent_original_seed_never_passes_on_empty_sha(tmp_path, monkeypatch):
                                outreach_resume_manifest=manifest.name)
     with pytest.raises(OutreachHold, match="current_original_seed_pdf_required"):
         original_seed_pdf(settings)
+
+
+def test_fake_smtp_optional_pixel_only_with_operator_safe_ingress(tmp_path, monkeypatch):
+    """No real SMTP or HTTPS listener; token URL appears only under opt-in."""
+    from core import outreach_email as mail
+    s, now, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
+    s.outreach_pixel_enabled = True
+    s.outreach_pixel_healthy = True
+    s.outreach_pixel_ingress_logs_safe = True
+    s.outreach_pixel_base = "https://pixels.example-co.com"
+    result = mail.send_approved(
+        settings=s, company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com", person_name="Test User",
+        variant_id="synthetic-v1", stores=object(), now=now,
+        smtp_factory=factory)
+    assert result["tracking"] == "pixel_enabled"
+    messages = [x[1] for x in calls if x[0] == "message"]
+    assert len(messages) == 1
+    email = messages[0]
+    plain = email.get_body(preferencelist=("plain",)).get_content()
+    image = email.get_body(preferencelist=("html",)).get_content()
+    assert "pixels.example-co.com/o/" not in plain
+    assert 'src="https://pixels.example-co.com/o/' in image
+    assert "test@example-co.com" not in image
+    assert email["Message-ID"].startswith("<")
+    from core.outreach_ledger import Ledger
+    from core.outreach_contacts import LinkedInSnapshot
+    report = Ledger(s).report("a"*32, LinkedInSnapshot(frozenset(), frozenset()),
+                              now=now)
+    assert report["attempts"][0]["tracking"] == "pixel_enabled"
+
+
+def test_pixel_ingress_unverified_still_sends_without_tracking(tmp_path, monkeypatch):
+    from core import outreach_email as mail
+    s, now, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
+    s.outreach_pixel_enabled = True
+    s.outreach_pixel_healthy = True
+    s.outreach_pixel_ingress_logs_safe = False
+    s.outreach_pixel_base = "https://pixels.example-co.com"
+    result = mail.send_approved(
+        settings=s, company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com", person_name="Test User",
+        variant_id="synthetic-v1", stores=object(), now=now,
+        smtp_factory=factory)
+    assert result["tracking"] == "not_tracked"
+    message = [x[1] for x in calls if x[0] == "message"][0]
+    assert message.get_body(preferencelist=("html",)) is None
+    assert "pixel" not in message.get_body(preferencelist=("plain",)).get_content().lower()
