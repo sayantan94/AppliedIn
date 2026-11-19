@@ -731,6 +731,23 @@ def _start_outreach_followups(settings=None) -> bool:
     return True
 
 
+def _start_outreach_pixel(settings=None) -> bool:
+    """Only an explicitly enabled operator-verified separate loopback service."""
+    from core.config import get_settings
+    from core.outreach_tracking import pixel_base, serve_pixel
+
+    settings = settings or get_settings()
+    if pixel_base(settings) is None:
+        return False
+    port = getattr(settings, "outreach_pixel_loopback_port", 0)
+    if type(port) is not int or not 1024 <= port <= 65535:
+        log.warning("outreach pixel disabled: dedicated loopback port is missing")
+        return False
+    threading.Thread(target=serve_pixel, args=(settings,), daemon=True,
+                     name="outreach-pixel-only").start()
+    return True
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -755,6 +772,7 @@ def main() -> None:
     _start_imap_poller(stores, get_settings())
     _start_funding_poller(get_settings())
     _start_outreach_followups(get_settings())
+    _start_outreach_pixel(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)
