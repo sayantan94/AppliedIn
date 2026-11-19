@@ -470,3 +470,238 @@ def test_eligible_region_and_round_requires_independent_evidence():
     assert funding._fresh("2026-11-18", NOW, 30)
     assert not funding._fresh("2025-02-18", NOW, 30)
     assert not funding._fresh("2030-02-18", NOW, 30)
+
+
+def test_manual_native_board_wins_even_when_auto_name_differs(tmp_path):
+    cfg = settings(tmp_path)
+    (tmp_path / "watchlist.yaml").write_text(
+        "companies:\n- name: ManualCo\n  careers_url: " + BOARD + "\n"
+    )
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    state.data["active"]["other"] = {
+        "name": "OtherCo", "careers_url": BOARD, "ats": "ashby",
+        "board": "example-co", "mode": "gated", "discovery": "feed",
+        "employer_domain": "otherco.com", "homepage": "https://otherco.com",
+        "aliases": [], "source_id": "uk_feed", "admitted_at": NOW.isoformat(),
+        "last_relevant_at": NOW.isoformat(),
+    }
+    state.save()
+    merged = load_effective_watchlist(tmp_path / "watchlist.yaml", settings=cfg)
+    assert [x.name for x in merged] == ["ManualCo"], "a tenant is not shared authority"
+
+
+def test_exact_tenant_collision_refuses_different_employer(tmp_path):
+    cfg = settings(tmp_path)
+    ledger = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    ledger.data["active"]["first"] = {
+        "name": "OtherCo", "careers_url": BOARD, "ats": "ashby",
+        "board": "example-co", "mode": "gated", "discovery": "feed",
+        "employer_domain": "otherco.com", "homepage": "https://otherco.com",
+        "aliases": [], "source_id": "uk_feed", "admitted_at": NOW.isoformat(),
+        "last_relevant_at": NOW.isoformat(),
+    }
+    ledger.save()
+    reason, active = funding._preview_verified(
+        "example-co", HOME, "uk_feed", ledger, cfg,
+        OfflineClient(routes()), NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active) == ("tenant_collision", None)
+
+
+def test_board_redirect_to_another_tenant_is_not_owner_evidence(tmp_path):
+    cfg = settings(tmp_path)
+    ledger = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+
+    class RedirectedBoard(OfflineClient):
+        def get(self, url, **kwargs):
+            reply = super().get(url, **kwargs)
+            if url == BOARD:
+                return httpx.Response(
+                    200, content=reply.content,
+                    request=httpx.Request(
+                        "GET", "https://jobs.ashbyhq.com/foreign-tenant"),
+                )
+            return reply
+
+    reason, active = funding._preview_verified(
+        "example-co", HOME, "uk_feed", ledger, cfg,
+        RedirectedBoard(routes()), NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active) == ("guard_not_proven", None)
+
+
+def test_alias_needs_two_independent_sources_and_manual_wins(tmp_path):
+    cfg = settings(tmp_path)
+    (tmp_path / "watchlist.yaml").write_text(
+        "companies:\n- name: LEGACYCO\n  careers_url: https://jobs.lever.co/legacyco\n"
+    )
+    news = funding._article(
+        '<h1>example-co (formerly LegacyCo) raised seed fintech funding in London.</h1>'
+        '<a href="https://example-co.co.uk/">example-co</a>')
+    home = b'<h1>example-co, formerly LegacyCo</h1><p>Fintech in London.</p>'
+    article = {
+        "source": "uk_feed", "date": "2026-11-18",
+        "text": news.text, "html": news, "url": ARTICLE,
+    }
+    deal = {
+        "issuer": "example-co", "stage": "seed", "date": "2026-11-18",
+        "sector": "fintech", "region": "uk", "aliases": ["LegacyCo"],
+    }
+    reason, active, evidence = funding._prove_deal(
+        deal, article, funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, OfflineClient({HOME: home}), NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "manual_precedence" and active is None
+    assert evidence["aliases"] == ["LegacyCo"]
+    # An alias asserted only by a publisher is not automatically trusted.
+    reason, active, evidence = funding._prove_deal(
+        deal, article, funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, OfflineClient({HOME: b"<h1>example-co</h1><p>London fintech.</p>",
+                            BOARD: fixture("board_ashby.html"), ASHBY_API: fixture("ashby.json")}),
+        NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert evidence["aliases"] == []
+    assert reason != "manual_precedence"
+
+
+def test_other_deals_stage_cannot_authorize_this_issuer(tmp_path):
+    cfg = settings(tmp_path)
+    news = funding._article(
+        '<p>example-co received an industry award.</p>'
+        '<p>OtherCo announced seed fintech financing in London.</p>')
+    deal = {"issuer": "example-co", "stage": "seed",
+            "date": "2026-11-18", "sector": "fintech", "region": "uk"}
+    reason, active, evidence = funding._prove_deal(
+        deal, {"source": "uk_feed", "date": "2026-11-18",
+               "text": news.text, "html": news, "url": ARTICLE},
+        funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
+        cfg, OfflineClient({}), NOW)
+    assert (reason, active, evidence) == ("round_unconfirmed", None, None)
+
+
+def test_old_retryables_compact_without_resetting_open_spend(tmp_path):
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    state.data["deals"]["stale-retry"] = {
+        "status": "retryable",
+        "seen_at": (NOW - timedelta(days=90)).isoformat(),
+    }
+    state.data["articles"]["stale-defer"] = {
+        "status": "deferred", "source": "uk_feed",
+        "seen_at": (NOW - timedelta(days=90)).isoformat(),
+    }
+    assert state.reserve(NOW, "day_calls", 1, 8)
+    assert state.reserve(NOW, "week_tokens", 3000, 10000)
+    state.compact(NOW)
+    reloaded = funding.State(path).data
+    assert reloaded["deals"] == {} and reloaded["articles"] == {}
+    assert reloaded["budgets"]["day_calls"] == 1
+    assert reloaded["budgets"]["week_tokens"] == 3000
+
+
+def test_invalid_source_and_local_schema_fail_closed(tmp_path):
+    cfg = settings(tmp_path)
+    manifest = yaml.safe_load((tmp_path / "funding-feeds.yaml").read_text())
+    manifest["regions"].append(["injected-invalid-type"])
+    (tmp_path / "funding-feeds.yaml").write_text(yaml.safe_dump(manifest))
+    assert not funding.ready(cfg)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    state.data["budgets"]["day"] = ["malformed-period"]
+    with pytest.raises(funding.FundingRefusal, match="corrupt_budget"):
+        state.save()
+    state.data["budgets"]["day"] = "2026-11-19"
+    state.data["active"]["bad"] = {
+        "name": "example-co", "careers_url": BOARD, "ats": [],
+        "board": "example-co", "mode": "gated", "discovery": "feed",
+        "employer_domain": "example-co.co.uk", "homepage": HOME,
+        "aliases": [], "source_id": "uk_feed",
+        "admitted_at": NOW.isoformat(), "last_relevant_at": NOW.isoformat(),
+    }
+    with pytest.raises(funding.FundingRefusal, match="auto_record_authority"):
+        state.save()
+
+
+def test_resolver_probe_uses_guarded_connect_time_dns(tmp_path, monkeypatch):
+    from discovery.resolver import resolve
+
+    cfg = settings(tmp_path)
+    ledger = funding.State(tmp_path / "funded-watchlist.yaml")
+    calls = []
+    def private_dns(host, port, *, type):
+        calls.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 ("127.0.0.1", port))]
+    monkeypatch.setattr(funding.socket, "getaddrinfo", private_dns)
+    client = funding.GuardedClient(state=ledger, settings=cfg, now=NOW)
+    with pytest.raises(funding.FundingRefusal, match="nonpublic_connect_address"):
+        resolve("https://example-co.co.uk/careers", client=client, name="example-co")
+    assert calls == ["example-co.co.uk"]
+    assert ledger.data["budgets"]["day_http"] == 1
+
+
+def test_guarded_redirect_strips_auth_and_cross_host_conditionals(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    ledger = funding.State(tmp_path / "funded-watchlist.yaml")
+    requests = []
+
+    class SyntheticResponse:
+        def __init__(self, status, headers, content):
+            self.status, self.headers, self.content = status, headers, content
+        def read(self, _limit):
+            return self.content
+        def getheaders(self):
+            return list(self.headers.items())
+
+    class SyntheticTLS:
+        def __init__(self, host, _port, **_kwargs):
+            self.host = host
+        def request(self, method, path, *, headers):
+            requests.append((self.host, method, path, dict(headers)))
+        def getresponse(self):
+            if self.host == "feeds.example.com":
+                return SyntheticResponse(
+                    302, {"Location": "https://other.example.com/new"}, b"")
+            return SyntheticResponse(200, {}, b"synthetic")
+        def close(self):
+            pass
+
+    monkeypatch.setattr(funding, "_SafeTLS", SyntheticTLS)
+    client = funding.GuardedClient(state=ledger, settings=cfg, now=NOW)
+    response = client.get(
+        "https://feeds.example.com/item", follow_redirects=True,
+        headers={"Authorization": "no-forward", "Cookie": "no-forward",
+                 "If-None-Match": '"local-etag"'})
+    assert response.content == b"synthetic"
+    assert [x[0] for x in requests] == ["feeds.example.com", "other.example.com"]
+    assert requests[0][3].get("If-None-Match") == '"local-etag"'
+    assert "If-None-Match" not in requests[1][3]
+    assert all("Authorization" not in x[3] and "Cookie" not in x[3]
+               for x in requests)
+    assert ledger.data["budgets"]["day_http"] == 2
+
+
+def test_daily_additions_defer_until_next_pass_and_unproductive_active_expires(tmp_path):
+    cfg = settings(tmp_path)
+    cfg.funding_daily_new_companies = 0
+    cfg.funding_eligible_days = 120
+    funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    path = tmp_path / "local" / "funded-watchlist.yaml"
+    state = funding.State(path)
+    assert not state.data["active"]
+    assert any(d["reason"] == "daily_addition_deferred"
+               for d in state.data["deals"].values())
+    cfg.funding_daily_new_companies = 1
+    funding.poll_once(
+        cfg, now=NOW + timedelta(days=1),
+        client_factory=lambda *_: OfflineClient(routes()),
+        extractor=lambda *_a, **_kw: pytest.fail("persisted children were re-extracted"),
+        relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(path)
+    assert len(state.data["active"]) == 1
+    cfg.funding_eligible_days = 30
+    funding.poll_once(
+        cfg, now=NOW + timedelta(days=91),
+        client_factory=lambda *_: OfflineClient(routes()),
+        extractor=lambda *_a, **_kw: pytest.fail("expired announcement was re-extracted"),
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert funding.State(path).data["active"] == {}
