@@ -1,4 +1,4 @@
-"""Approved-template, no-pixel SMTP lane. No SMTP during imports or tests.
+"""Approved-template SMTP lane with optional token-free fallback. No SMTP on import.
 
 All irreversible network work follows the persisted reservation and pre-wire
 stop/freshness checks. An exception after begin_wire is uncertain, never an
@@ -7,6 +7,7 @@ automatic retry. SMTP acceptance is not delivery or a human reply.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import smtplib
@@ -20,6 +21,7 @@ from core.outreach_contacts import (ContactHold, read_linkedin,
                                     normalize_email, verify_published_contact)
 from core.outreach_ledger import Ledger, OutreachHold
 from core.outreach_sources import read_no_opening
+from core.outreach_tracking import register_pixel, pixel_base
 from tools.outreach_guard import company_application_clear
 
 
@@ -188,6 +190,12 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         lead, contact, linkedin, no_application=True, resume_seed_proved=True,
         sender_proved=True, variant=variant["id"], digest=variant["sha256"],
         stage=stage, now=now, expanded_followups=expand_followups)
+    image_url, tracking_mode = "", "not_tracked"
+    try:
+        image_url, tracking_mode = register_pixel(settings, ledger, ticket["id"])
+    except (OSError, ValueError):
+        # The optional tracker must never prevent an otherwise safe message.
+        image_url, tracking_mode = "", "not_tracked"
     msg = EmailMessage()
     msg["From"] = sender
     msg["Reply-To"] = sender
@@ -198,6 +206,15 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         msg["In-Reply-To"] = ticket["in_reply_to"]
         msg["References"] = " ".join(ticket["references"])
     msg.set_content(body)
+    if image_url and pixel_base(settings) == image_url.split("/o/", 1)[0]:
+        # Only a private, enabled message gets an opaque image link. No
+        # identifiers are embedded in the URL, body or public log messages.
+        html_body = '<div style="white-space:pre-wrap">' + html.escape(body) + '</div>'
+        msg.add_alternative(html_body + '<img src="' + image_url +
+                            '" width="1" height="1" alt="" />', subtype="html")
+    else:
+        image_url, tracking_mode = "", "not_tracked"
+        ledger.disable_pixel(ticket["id"])
     msg.add_attachment(pdf, maintype="application", subtype="pdf",
                        filename="resume.pdf")
     try:
@@ -259,4 +276,4 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         raise OutreachHold("smtp_wire_outcome_uncertain_reconcile_manually") from exc
     ledger.finish_wire(ticket["id"], accepted=True)
     return {"attempt_id":ticket["id"], "state":"confirmed_smtp_accepted",
-            "tracking":"not_tracked", "variant":variant["id"]}
+            "tracking":tracking_mode, "variant":variant["id"]}
