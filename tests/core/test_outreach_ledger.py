@@ -230,3 +230,35 @@ def test_all_ten_campaign_ramp_days_and_later_hard_twenty(tmp_path):
             "https://example-co.com", (), "synthetic", current, "no_openings")
         with pytest.raises(OutreachHold, match="email_daily_ramp_or_hard_cap"):
             reserve(db, extra, contact("Test User"), now=current)
+
+
+def test_bounce_ratio_pauses_at_thirtieth_acceptance_not_at_twenty_ninth(tmp_path):
+    """The >=30 denominator threshold is checked on both DSN and later SMTP ACK."""
+    db = Ledger(settings(tmp_path))
+    tickets = []
+    idx = 0
+    for elapsed, count in enumerate((5, 7, 9, 8)):
+        current = T + timedelta(days=elapsed)
+        poll(db, current)
+        for _ in range(count):
+            idx += 1
+            lead_row = FundedNoOpening(
+                f"{idx:032x}", "Example Co", "example-co.com",
+                "https://example-co.com", (), "synthetic",
+                current, "no_openings")
+            ticket = reserve(db, lead_row, contact("Test User"), now=current)
+            accept(db, ticket, at=current)
+            tickets.append(ticket)
+    assert len(tickets) == 29
+    at = T + timedelta(days=3)
+    assert db.confirm_hard_bounce(tickets[0]["id"], now=at)
+    assert not db.report(lead("b").company_id, EMPTY)["global_email_pause"]
+    poll(db, at)
+    last = FundedNoOpening(
+        f"{30:032x}", "Example Co", "example-co.com",
+        "https://example-co.com", (), "synthetic", at, "no_openings")
+    thirtieth = reserve(db, last, contact("Test User"), now=at)
+    accept(db, thirtieth, at=at)
+    assert db.report(lead("b").company_id, EMPTY)["global_email_pause"]
+    with pytest.raises(OutreachHold, match="global_email_bounce_pause"):
+        reserve(db, lead("z", at), contact("Test User"), now=at)
