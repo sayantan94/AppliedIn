@@ -749,3 +749,42 @@ def test_source_limiter_rejects_out_of_contract_config(tmp_path):
     cfg.funding_eligible_days = 30
     cfg.funding_max_postings_per_pass = 1000
     assert not funding.ready(cfg)
+
+
+def test_report_tracks_deal_proofs_without_operator_or_person_data(tmp_path):
+    cfg = settings(tmp_path)
+    funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
+        extractor=extractor, relevance_fn=lambda jobs, prefs: jobs)
+    report = funding.State(
+        tmp_path / "local" / "funded-watchlist.yaml").data["report"]
+    counts = report["sources"]["uk_feed"]
+    assert counts["fetched"] == 1
+    assert counts["extracted_deal"] == 1
+    assert counts["verified_homepage"] == 1
+    assert counts["source_and_consumer_proved"] == 1
+    assert counts["deal_active"] == 1
+    assert counts["added"] == 1
+    dumped = yaml.safe_dump(report).lower()
+    assert "user-agent" not in dumped and "officer" not in dumped
+    assert "secret" not in dumped
+
+
+def test_sec_nonissuer_cannot_fallback_to_related_person_name(tmp_path):
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    # A missing primaryIssuer is not cured by an entityName elsewhere.
+    synthetic = b"""<?xml version="1.0"?><edgarSubmission>
+    <relatedPersons><relatedPerson><entityName>Example Person</entityName></relatedPerson></relatedPersons>
+    <offeringData><industryGroup><industryGroupType>Other Technology</industryGroupType></industryGroup>
+    <offeringSalesAmounts><totalOfferingAmount>1000000</totalOfferingAmount></offeringSalesAmounts></offeringData>
+    </edgarSubmission>"""
+    client = OfflineClient({SEC_DOC: synthetic})
+    funding._sec_proxy({"id": "sec_test"},
+                       {"key": "nonissuer", "url": SEC_DOC},
+                       state, client, NOW)
+    deal = next(iter(funding.State(path).data["deals"].values()))
+    assert deal["status"] == "rejected"
+    assert deal["reason"] == "sec_issuer_or_sector_missing"
+    assert deal["issuer"] == ""
+    assert "Example Person" not in path.read_text()
