@@ -869,3 +869,19 @@ def test_feed_rollover_keeps_unacknowledged_deal_link(tmp_path):
     none, status = funding._source_payload(
         source, restarted, OfflineClient({SOURCE: (304, b"")}), NOW)
     assert none == [] and status == "not_modified"
+
+
+def test_sec_reader_refuses_missing_user_agent_before_any_request(tmp_path):
+    cfg = settings(tmp_path)
+    cfg.funding_sec_user_agent = ""
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+    source = {
+        "id": "sec_test", "kind": "sec_atom", "region": "usa",
+        "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=D&output=atom",
+        "enabled": True,
+    }
+    client = OfflineClient({})
+    with pytest.raises(funding.FundingRefusal, match="sec_user_agent_missing"):
+        funding._source_payload(source, state, client, NOW, settings=cfg)
+    assert client.calls == []
+    assert state.data["feeds"] == {}
