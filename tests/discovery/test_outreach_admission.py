@@ -121,3 +121,86 @@ def test_funded_general_route_default_off_and_no_relevance_exception(tmp_path):
     with pytest.raises(SourceHold, match="handoff_off"):
         verify_funded_application_route(
             s, KEY, record, "https://jobs.ashbyhq.com/example-co/123", meta, now=NOW)
+
+
+def test_funded_real_apply_role_post_retains_normal_tracking_and_custom_lane(tmp_path, monkeypatch):
+    """An in-process fake POST, not a live application or browser/SMTP call."""
+    import sys
+    from types import ModuleType
+    from fastapi.testclient import TestClient
+    import fakeredis
+    import server
+    from core.storage.local import RedisTracking
+    from tools import jd, posting_guard as pg, submit_review
+
+    settings = source(tmp_path)
+    settings.outreach_application_handoff_enabled = True
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    stores = SimpleNamespace(tracking=tracking)
+    calls = []
+    monkeypatch.setattr(server, "get_settings", lambda: settings)
+    monkeypatch.setattr(server, "make_stores", lambda _settings: stores)
+    monkeypatch.setattr(submit_review, "recover_orphans", lambda: None)
+    monkeypatch.setattr(server.submit_hold, "blocked", lambda *a, **kw: False)
+    worker = ModuleType("agent.run")
+    worker.run_job = lambda pk, _stores: calls.append(pk)
+    events = ModuleType("core.events")
+    events.emit = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "agent.run", worker)
+    monkeypatch.setitem(sys.modules, "core.events", events)
+
+    title = ["General Application"]
+    def reader(url):
+        text = ("This is a synthetic official employer posting. "
+                "Submit your CV through this official form. ") * 8
+        page = "<article>" + text + "</article>"
+        inspected = pg.analyze(text, html_variants=[page],
+                               source_required=True, source_complete=True)
+        return {**inspected, "title": title[0],
+                "source_kind": "ats_html", "source_url": url, "source_identity": {}}
+    monkeypatch.setattr(jd, "fetch_jd_meta", reader)
+    def post(client, url):
+        return client.post("/actions/apply-role", json={
+            "url":url, "discovery_source":"funded_no_opening", "funded_company_id":KEY
+        }).json()
+
+    with TestClient(server.create_app()) as client:
+        supported = post(client, "https://jobs.ashbyhq.com/example-co/general-123")
+        assert supported["ok"] and supported["status"] == "running"
+        persisted = tracking.get(supported["pk"])
+        assert persisted["company"] == "Example Co"
+        assert persisted["ats"] == "ashby"
+        assert persisted["discovery_source"] == "funded_no_opening"
+        assert calls == [supported["pk"]]  # only the existing scorer/prepare workflow
+
+        title[0] = "Talent Pool"
+        official_form = post(client, "https://example-co.com/careers/cv")
+        assert official_form["ok"] and official_form["status"] == "running"
+        custom_row = tracking.get(official_form["pk"])
+        assert custom_row["ats"] == "custom"
+        assert custom_row["company"] == "Example Co"
+        assert custom_row["discovery_source"] == "funded_no_opening"
+
+        before = len(tracking.all())
+        forged = post(client, "https://jobs.ashbyhq.com/other-co/general-123")
+        assert not forged["ok"] and forged["error"] == "funded_application_employer_mismatch"
+        title[0] = "Senior Software Engineer"
+        irrelevant = post(client, "https://jobs.ashbyhq.com/example-co/engineering-123")
+        assert not irrelevant["ok"] and irrelevant["error"] == "funded_general_posting_not_proven"
+        assert len(tracking.all()) == before
+        assert calls == [supported["pk"], official_form["pk"]]
+
+
+def test_official_custom_cv_form_can_use_shorter_domain_label(tmp_path):
+    from core.outreach_sources import verify_funded_application_route
+    s = source(tmp_path)
+    s.outreach_application_handoff_enabled = True
+    row = State(tmp_path / "funded-watchlist.yaml")
+    row.data["pending"][KEY]["name"] = "Example Co Incorporated"
+    row.save()
+    route = verify_funded_application_route(
+        s, KEY, {"ats":"custom", "company":"Example Co", "job_id":"custom:abc"},
+        "https://example-co.com/careers/cv",
+        {"title":"Talent Pool", "text":"Please submit your CV via this official form."},
+        now=NOW)
+    assert route.name == "Example Co Incorporated"
