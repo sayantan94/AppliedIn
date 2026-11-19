@@ -36,7 +36,7 @@ def setup(tmp_path, monkeypatch, linkedin=TWO):
             '<p>Test User Fourth Person Third Person</p>'
             '<a href="https://x.com/fourth">X</a>'
             '<a href="https://x.com/third">X</a>'
-            '<a href="https://linkedin.com/in/test-user">LinkedIn</a>')
+            '<a href="https://linkedin.com/in/test-user">Test User</a>')
     monkeypatch.setattr(manual, "_official_page", page)
     monkeypatch.setattr(manual, "approved_variant", lambda *_: {"id":"owner-v1"})
     monkeypatch.setattr(manual, "render_approved", lambda *_: ("Owner subject", "Approved text"))
@@ -159,3 +159,17 @@ def test_csrf_host_origin_and_loopback_required_without_network(tmp_path, monkey
             assert (await client.get("/outreach/csrf")).status_code == 403
 
     asyncio.run(exercise())
+
+
+def test_manual_name_on_page_not_bound_to_unrelated_icon_handle(tmp_path, monkeypatch):
+    """Ambiguous links use a conservative one-person provisional slot."""
+    s = setup(tmp_path, monkeypatch, linkedin=LinkedInSnapshot(frozenset(), frozenset()))
+    # The page lists Fourth Person, but the X anchor says only 'X'.
+    row = queue(s, "x", "https://x.com/fourth", "Fourth Person")
+    copied = manual.act_on_target(settings=s, company_id=KEY, target_id=row["id"],
+                                  version=1, action="copy", stores=object(), now=T)
+    assert copied["state"] == "copied"
+    saved = Ledger(s).manual_rows(KEY)
+    assert saved[0]["person_key"].startswith("provisional:manual:")
+    report = manual.manual_report(settings=s, company_id=KEY, now=T)
+    assert report["provisional"] == 1 and report["used"] == 1
