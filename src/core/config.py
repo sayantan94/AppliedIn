@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     # #387: all lanes are separate opt-ins and remain operator-local.
     outreach_enabled: bool = False
     outreach_timezone: str = "UTC"
+    outreach_send_start_hour: int = 9
+    outreach_send_end_hour: int = 17
+    # Private JSON, e.g. {"1":{"named":"approved-1","team":"approved-1-team"}}.
+    # Every follow-up stage uses its own explicit owner-approved mapping.
+    outreach_followup_stage_variants: str = ""
     outreach_sender: str = ""
     outreach_sender_authorized: bool = False
     outreach_inbound_verified: bool = False
