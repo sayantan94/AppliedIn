@@ -368,3 +368,18 @@ def test_configured_iana_zone_handles_dst_gap_fold_without_sending(tmp_path):
     with pytest.raises(OutreachHold,match="business_window_closed"):
         db._window(datetime(2026,11,2,13,59,tzinfo=UTC))
     db._window(datetime(2026,11,2,14,0,tzinfo=UTC))
+
+
+def test_non_numeric_pacing_deadline_stays_inspectable(tmp_path):
+    """A damaged next_not_before cannot bypass pacing or crash the status API."""
+    db=Ledger(cfg(tmp_path))
+    queue_id=intent(db,"a","Test User","test@example-co.com")["queue_id"]
+    with db._tx() as conn:
+        conn.execute("UPDATE email_dispatch SET last_handoff=?,next_not_before=?",
+                     (T.timestamp()-300,"invalid"))
+    assert db.claim_queue(now=T) is None
+    status=db.queue_status(queue_id)
+    assert status["state"]=="held"
+    assert status["reason"]=="dispatch_clock_or_metadata_invalid"
+    assert status["next_action"]=="owner_reconcile_dispatch_metadata"
+    assert isinstance(status["next_check_at"],float)
