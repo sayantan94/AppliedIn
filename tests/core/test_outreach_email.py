@@ -326,3 +326,42 @@ def test_unnamed_official_organization_mailbox_requires_no_name_template(tmp_pat
     assert result["state"]=="queued"
     with Ledger(s)._tx() as conn:
         assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==0
+
+
+def test_followup_mime_subject_exactly_threads_saved_unicode_root(tmp_path,monkeypatch):
+    """An approved follow-up body must never replace the first logical Subject."""
+    from datetime import timedelta
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,now,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    settings.outreach_followups_auto=True
+    settings.outreach_followup_stage_variants=(
+        '{"1":{"named":"stage1-named","team":"stage1-team"}}')
+    monkeypatch.setattr(mail,"approved_variant",lambda settings,variant_id,kind: {
+        "id":variant_id,"sha256":"a"*64,"subject":"Unrelated follow-up",
+        "body":"Owner-approved synthetic text.","role_family":"PM"})
+    monkeypatch.setattr(mail,"render_approved",lambda item,*args,**kwargs: (
+        "Résumé – exact original Subject" if item["id"]=="synthetic-v1"
+        else "Unrelated follow-up","Synthetic approved body."))
+    _send_fake(mail,settings=settings,company_id="a"*32,
+               contact_page_url="https://example-co.com/team",
+               exact_address="test@example-co.com",person_name="Test User",
+               variant_id="synthetic-v1",stores=object(),now=now,smtp_factory=factory)
+    later=now+timedelta(days=7)
+    ledger=Ledger(settings)
+    ledger.record_successful_poll(uidvalidity="3",
+                                   monitored_address=settings.outreach_sender,now=later)
+    due=ledger.due_followups(now=later,limit=1)[0]
+    queued=mail.enqueue_due_followup(settings=settings,candidate=due,now=later)
+    claimed=ledger.claim_queue(now=later)
+    assert claimed and claimed["id"]==queued["queue_id"]
+    mail.send_approved(settings=settings,queue_id=claimed["id"],
+                       owner_token=claimed["owner_token"],stores=object(),
+                       now=later,smtp_factory=factory)
+    messages=[call[1] for call in calls if call[0]=="message"]
+    assert len(messages)==2
+    assert str(messages[0]["Subject"])=="Résumé – exact original Subject"
+    assert str(messages[1]["Subject"])=="Re: Résumé – exact original Subject"
+    assert str(messages[1]["In-Reply-To"])==str(messages[0]["Message-ID"])
+    assert str(messages[1]["References"])==str(messages[0]["Message-ID"])
