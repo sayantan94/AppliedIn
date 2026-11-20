@@ -199,7 +199,10 @@ def test_company_organizational_alias_cannot_hide_named_recipient_overlap(tmp_pa
     with pytest.raises(OutreachHold, match="recipient_alias_or_org_overlap"):
         reserve(db, l, overlap)
     # The alias must not consume a second first-contact or another quota slot.
-    assert db.report(l.company_id, EMPTY)["email_quota_used"] == 1
+    # The report's daily quota is keyed to the requested campaign day,
+    # not the wall-clock day on which CI happens to read it.
+    assert db.report(l.company_id, EMPTY, now=T)["email_quota_used"] == 1
+    assert len(db.report(l.company_id, EMPTY, now=T)["attempts"]) == 1
 
 
 def test_two_verified_person_names_sharing_address_are_held_for_reconciliation(tmp_path):
