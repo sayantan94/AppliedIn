@@ -133,8 +133,9 @@ def test_csrf_host_origin_and_loopback_required_without_network(tmp_path, monkey
 
     s = setup(tmp_path, monkeypatch)
     app = FastAPI()
-    manual.register_routes(app, s)
+    # register_routes imports make_stores when defining the endpoint closure.
     monkeypatch.setattr("core.stores.make_stores", lambda *_: object())
+    manual.register_routes(app, s)
     monkeypatch.setattr(manual, "act_on_target", lambda **_kwargs: {"state":"copied"})
 
     async def listening_loopback_app(scope, receive, send):
