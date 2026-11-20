@@ -285,6 +285,22 @@ def register_routes(app, settings):
             variant_id=body.get("variant_id"), stores=make_stores(settings),
             stage=0))
 
+    @app.post("/outreach/email/confirm-bounce")
+    def confirm_bounce(body: dict, request: Request):
+        """Owner-only local triage after independently verifying the provider DSN.
+
+        A spoofable From or multipart/report header alone is never enough.
+        """
+        checked(request, mutate=True, manual=False)
+        from core.reply_ingest import owner_confirm_suspected_hard_bounce
+        return guarded(lambda: owner_confirm_suspected_hard_bounce(
+            settings, uidvalidity=body.get("uidvalidity"), uid=body.get("uid"),
+            message_id=body.get("message_id"),
+            failed_recipient=body.get("failed_recipient"),
+            permanent_status=body.get("permanent_status"),
+            owner_reviewed=body.get("owner_reviewed"),
+            provider_evidence_confirmed=body.get("provider_evidence_confirmed")))
+
     @app.get("/outreach/report")
     def report(company_id: str, request: Request):
         checked(request)
