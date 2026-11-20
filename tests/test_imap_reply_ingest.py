@@ -1147,3 +1147,88 @@ def test_forged_configured_dsn_sender_cannot_confirm_bounce_or_global_pause(tmp_
     assert report["company_email_hold"] == "suspected_dsn_needs_review"
     assert report["bounced_attempts"] == 0
     assert report["global_email_pause"] is False
+
+
+def test_owner_confirmed_provider_bounces_activate_global_breaker_after_three(tmp_path):
+    """Spoofable IMAP headers never confirm; owner-reviewed permanent DSNs do."""
+    from datetime import UTC, datetime
+    from core.outreach_contacts import LinkedInSnapshot, VerifiedRecipient
+    from core.outreach_sources import FundedNoOpening
+    from core.outreach_ledger import OutreachHold
+
+    now = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    settings, ledger, first_lead, first = _synthetic_outreach_ticket(tmp_path)
+    empty = LinkedInSnapshot(frozenset(), frozenset())
+    tickets = [(first_lead, first)]
+    for letter in ("b", "c"):
+        lead = FundedNoOpening(letter * 32, "Example " + letter.upper(),
+                               "example-" + letter + ".com",
+                               "https://example-" + letter + ".com", (),
+                               "synthetic", now, "no_openings")
+        recipient = VerifiedRecipient(
+            "test@example-" + letter + ".com", "name:test user", "Test User",
+            "person", "https://example-" + letter + ".com/team")
+        item = ledger.reserve_email(
+            lead, recipient, empty, no_application=True, resume_seed_proved=True,
+            sender_proved=True, variant="approved-v1", digest="b" * 64, now=now)
+        ledger.begin_wire(item["id"], source_checked=True, no_application=True,
+                          linkedin_checked=True, now=now)
+        ledger.finish_wire(item["id"], accepted=True, now=now)
+        tickets.append((lead, item))
+
+    for index, (lead, item) in enumerate(tickets):
+        recipient = "test@" + lead.domain
+        uid = 200 + index
+        headers = (
+            f"From: mailer-daemon@example-co.com\r\n"
+            f"To: sender@example-co.com\r\n"
+            f"Content-Type: multipart/report; report-type=delivery-status\r\n"
+            f"X-Failed-Recipients: {recipient}\r\n"
+            f"In-Reply-To: {item['message_id']}\r\n\r\n"
+        ).encode()
+        reply_ingest._cold_outreach_message(
+            ledger, settings, headers,
+            f"Final-Recipient: rfc822; {recipient}\r\nStatus: 5.1.1".encode(),
+            "7", uid)
+        assert ledger.report(lead.company_id, empty)["bounced_attempts"] == 0
+        args = dict(uidvalidity="7", uid=uid, message_id=item["message_id"],
+                    failed_recipient=recipient, permanent_status="5.1.1",
+                    owner_reviewed=True, provider_evidence_confirmed=True, now=now)
+        if index == 0:
+            with pytest.raises(OutreachHold, match="owner_provider_dsn_confirmation_required"):
+                reply_ingest.owner_confirm_suspected_hard_bounce(
+                    settings, **{**args, "owner_reviewed": False})
+            with pytest.raises(OutreachHold, match="permanent_dsn_status_unverified"):
+                reply_ingest.owner_confirm_suspected_hard_bounce(
+                    settings, **{**args, "permanent_status": "4.2.2"})
+            with pytest.raises(OutreachHold, match="dsn_exact_accepted_recipient_mismatch"):
+                reply_ingest.owner_confirm_suspected_hard_bounce(
+                    settings, **{**args, "failed_recipient": "other@example-co.com"})
+            with pytest.raises(OutreachHold, match="suspected_dsn_uid_not_persisted"):
+                reply_ingest.owner_confirm_suspected_hard_bounce(
+                    settings, **{**args, "uid": 999})
+        confirmed = reply_ingest.owner_confirm_suspected_hard_bounce(settings, **args)
+        assert confirmed["confirmed"] is True
+        assert confirmed["global_email_pause"] is (index == 2)
+        report = ledger.report(lead.company_id, empty)
+        assert report["bounced_attempts"] == 1
+        assert report["company_email_hold"] == "suspected_dsn_needs_review"
+        assert not reply_ingest.owner_confirm_suspected_hard_bounce(
+            settings, **args)["confirmed"]
+    assert ledger.report(first_lead.company_id, empty)["global_email_pause"] is True
+    assert sum(ledger.report(lead.company_id, empty)["bounced_attempts"]
+               for lead, _ in tickets) == 3
+
+
+def test_owner_bounce_triage_disabled_without_provider_configuration(tmp_path):
+    """A suspected UID with no configured provider is not a hard-bounce proof."""
+    from core.outreach_ledger import OutreachHold
+    settings, ledger, _lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    settings.outreach_provider_dsn_verified = False
+    with pytest.raises(OutreachHold, match="provider_dsn_triage_not_configured"):
+        reply_ingest.owner_confirm_suspected_hard_bounce(
+            settings, uidvalidity="7", uid=14,
+            message_id=ticket["message_id"],
+            failed_recipient="test@example-co.com",
+            permanent_status="5.1.1", owner_reviewed=True,
+            provider_evidence_confirmed=True)
