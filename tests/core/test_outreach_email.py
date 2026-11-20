@@ -296,3 +296,33 @@ def test_private_approved_funding_quote_requires_exact_public_witness(tmp_path, 
     private.write_text(json.dumps({**proof, "quote": "Example Co raised $999 billion."}))
     with pytest.raises(OutreachHold, match="verified_private_funding_fact_required"):
         mail.verified_funding_fact(settings, lead, datetime(2026, 11, 20, tzinfo=UTC))
+
+
+def test_unnamed_official_organization_mailbox_requires_no_name_template(tmp_path,monkeypatch):
+    """An officially published org inbox is not proof of a person's first name."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    now=datetime(2026,11,20,10,tzinfo=UTC)
+    lead=FundedNoOpening("a"*32,"Example Co","example-co.com",
+                         "https://example-co.com",(),"synthetic",now,"no_openings")
+    s=SimpleNamespace(mode="local",outreach_enabled=True,local_dir=str(tmp_path))
+    page="https://example-co.com/contact"
+    markup='<a href="mailto:hello@example-co.com">Contact</a>'
+    monkeypatch.setattr(mail,"read_no_opening",lambda *args,**kwargs: lead)
+    monkeypatch.setattr(mail,"_official_page",lambda *args: (page,markup))
+    variant={"id":"team","sha256":"a"*64,"subject":"Hello {first_name}",
+             "body":"Hi from {company_name}","role_family":"PM"}
+    monkeypatch.setattr(mail,"approved_variant",lambda *args: variant)
+    fields=dict(settings=s,company_id=lead.company_id,contact_page_url=page,
+                exact_address="hello@example-co.com",person_name="",
+                variant_id="team",now=now)
+    with pytest.raises(OutreachHold,match="verified_name_or_approved_team_variant_required"):
+        mail.enqueue_first(**fields)
+    assert not (tmp_path/"outreach-ledger.sqlite3").exists()
+
+    variant["subject"]="Hello"
+    result=mail.enqueue_first(**fields)
+    assert result["state"]=="queued"
+    with Ledger(s)._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==0
