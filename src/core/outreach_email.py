@@ -423,6 +423,17 @@ def send_approved(*, settings, queue_id, owner_token, stores,
             ledger.disable_pixel(ticket["id"])
         msg.add_attachment(pdf,maintype="application",subtype="pdf",filename="resume.pdf")
         tls_context = ssl.create_default_context()
+        # The message was rendered locally, but mutable owner approvals and
+        # application state can change while the message is assembled. Recheck
+        # immediately before the ledger's final atomic handoff, never afterwards.
+        if approved_variant(settings,q["selected_variant"],kind)["sha256"] != q["selected_digest"]:
+            raise OutreachHold("frozen_stage_approval_changed_before_wire")
+        if stage>0 and _stage_variant_id(settings,stage,contact)!=q["selected_variant"]:
+            raise OutreachHold("stage_variant_mapping_changed_requires_owner_choice")
+        if _sender(settings)!=sender:
+            raise OutreachHold("sender_identity_changed_before_wire")
+        if not company_application_clear(stores,lead):
+            raise OutreachHold("existing_company_application")
         # The final transaction rechecks the current clock/window, stops,
         # inbound poll and follow-up flags, and persists the global fence.
         handoff = _current_time(now,clock)
