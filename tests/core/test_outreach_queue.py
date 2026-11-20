@@ -122,7 +122,10 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
     q=intent(db,"a","Test User","test@example-co.com")["queue_id"]
     claim=db.claim_queue(now=T)
     db.hold_orphaned_attempts()
-    assert Ledger(s).queue_status(q)["state"]=="claimed"
+    claimed_status=Ledger(s).queue_status(q)
+    assert claimed_status["state"]=="claimed"
+    assert claimed_status["next_action"]=="wait_or_prove_sender_inactive"
+    assert claimed_status["next_check_at"] is None
     with pytest.raises(OutreachHold,match="positive_owner_termination"):
         db.recover_claim_with_owner_proof(q,expected_version=2)
     db.recover_claim_with_owner_proof(q,expected_version=2,owner_inactive_proved=True,now=T)
@@ -131,7 +134,10 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
     ticket=reserve(db,"a","Test User","test@example-co.com",claim,
                    now=T+timedelta(minutes=5))
     db.hold_orphaned_attempts()
-    assert db.queue_status(q)["state"]=="reserved"
+    reserved_status=db.queue_status(q)
+    assert reserved_status["state"]=="reserved"
+    assert reserved_status["next_action"]=="wait_or_prove_reserved_no_wire"
+    assert reserved_status["next_check_at"] is None
     with pytest.raises(OutreachHold,match="queue_version_or_state_changed"):
         db.repair_queue(q,expected_version=db.queue_status(q)["version"],
                         expected_state="held",variant_id="approved",digest="a"*64)
@@ -151,7 +157,10 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
     assert second["message_id"]!=ticket["message_id"]
     begin(db,second,now=T+timedelta(minutes=5))
     db.hold_orphaned_attempts()
-    assert db.queue_status(q)["state"]=="in_flight"
+    in_flight=db.queue_status(q)
+    assert in_flight["state"]=="in_flight"
+    assert in_flight["next_action"]=="owner_reconcile_uncertain"
+    assert in_flight["next_check_at"] is None
     another=intent(db,"b","Other User","other@example-co.com",
                    now=T+timedelta(minutes=7))["queue_id"]
     assert Ledger(s).claim_queue(now=T+timedelta(minutes=7)) is None
