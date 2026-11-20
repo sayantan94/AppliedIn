@@ -324,6 +324,16 @@ class Ledger:
                  now.timestamp(), now.timestamp(), now.timestamp()))
             return {"queue_id": queue_id, "state": state}
 
+    def queue_intent(self, queue_id):
+        """Private internal worker/owner-repair read, never a route response."""
+        if not isinstance(queue_id,str) or not re.fullmatch(r"[a-f0-9]{32}",queue_id):
+            raise OutreachHold("queue_id_invalid")
+        with self._tx() as db:
+            row = self._qrow(db,queue_id)
+            if not row:
+                raise OutreachHold("queue_id_not_found")
+            return row
+
     def queue_status(self, queue_id):
         """Non-identifying status for existing local-only report route."""
         if not isinstance(queue_id, str) or not re.fullmatch(r"[a-f0-9]{32}", queue_id):
@@ -348,33 +358,52 @@ class Ledger:
                     "reason": reason, "next_check_at": next_at, "next_action": action}
 
     def claim_queue(self, *, now=None):
-        """Never steal an unknown in-progress owner, even after restart."""
+        """Claim only a currently runnable intent; never steal live owner."""
         now = _time(now)
         with self._tx() as db:
-            self._window(now)
-            self._fence(db, now)
-            rows = db.execute("""SELECT id FROM email_queue
+            try:
+                self._window(now)
+            except OutreachHold as exc:
+                db.execute("""UPDATE email_queue SET state='held',reason=?,
+                    next_check_at=?,updated_at=?,version=version+1
+                    WHERE state IN ('queued','held') AND attempt_id IS NULL
+                      AND next_check_at<=? AND selected_variant IS NOT NULL""",
+                    (str(exc),now.timestamp()+300,now.timestamp(),now.timestamp()))
+                return None
+            # Keep disabled follow-ups held and visible, but never starve stage 0.
+            if not getattr(self.settings,"outreach_followups_auto",False):
+                db.execute("""UPDATE email_queue SET state='held',
+                    reason='outreach_followups_auto_disabled',next_check_at=?,
+                    updated_at=?,version=version+1 WHERE stage>0
+                    AND state IN ('queued','held') AND attempt_id IS NULL
+                    AND next_check_at<=?""",
+                    (now.timestamp()+300,now.timestamp(),now.timestamp()))
+            if not getattr(self.settings,"outreach_followups_expanded",False):
+                db.execute("""UPDATE email_queue SET state='held',
+                    reason='outreach_followups_expanded_disabled',next_check_at=?,
+                    updated_at=?,version=version+1 WHERE stage>2
+                    AND state IN ('queued','held') AND attempt_id IS NULL
+                    AND next_check_at<=?""",
+                    (now.timestamp()+300,now.timestamp(),now.timestamp()))
+            self._fence(db,now)
+            row = db.execute("""SELECT id FROM email_queue
                 WHERE state IN ('queued','held') AND attempt_id IS NULL
                   AND selected_variant IS NOT NULL AND selected_digest IS NOT NULL
-                  AND next_check_at<=?
-                ORDER BY created_at,id LIMIT 30""", (now.timestamp(),)).fetchall()
-            for (queue_id,) in rows:
-                item = self._qrow(db, queue_id)
-                try:
-                    self._stage_enabled(item["stage"])
-                except OutreachHold as exc:
-                    db.execute("""UPDATE email_queue SET state='held', reason=?,
-                        next_check_at=?,updated_at=?,version=version+1 WHERE id=?""",
-                        (str(exc), now.timestamp()+300, now.timestamp(), queue_id))
-                    continue
-                token = secrets.token_hex(24)
-                db.execute("""UPDATE email_queue SET state='claimed',owner_token=?,
-                    reason='',version=version+1,updated_at=? WHERE id=?""",
-                    (token, now.timestamp(), queue_id))
-                item["owner_token"] = token
-                item["state"] = "claimed"
-                return item
-            return None
+                  AND next_check_at<=? AND (stage=0 OR ?)
+                  AND (stage<=2 OR ?)
+                ORDER BY created_at,id LIMIT 1""",
+                (now.timestamp(),int(bool(getattr(self.settings,"outreach_followups_auto",False))),
+                 int(bool(getattr(self.settings,"outreach_followups_expanded",False))))).fetchone()
+            if not row:
+                return None
+            item = self._qrow(db,row[0])
+            token = secrets.token_hex(24)
+            db.execute("""UPDATE email_queue SET state='claimed',owner_token=?,
+                reason='',version=version+1,updated_at=? WHERE id=?""",
+                (token,now.timestamp(),row[0]))
+            item["owner_token"] = token
+            item["state"] = "claimed"
+            return item
 
     def release_claim(self, queue_id, token, reason, *, cancel=False, now=None):
         now = _time(now)
