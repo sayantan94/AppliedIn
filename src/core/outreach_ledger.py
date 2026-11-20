@@ -520,6 +520,21 @@ class Ledger:
                                 (str(uidvalidity), uid, classification))
             return cursor.rowcount == 1
 
+    def witnessed_suspected_dsn(self, uidvalidity, uid):
+        """Only a persisted IMAP suspicious-DSN UID may enter owner triage.
+
+        This does not authenticate the provider or the recipient: those require
+        a separate affirmative owner verification before confirming a bounce.
+        """
+        if (not re.fullmatch(r"[1-9]\\d*", str(uidvalidity))
+                or type(uid) is not int or uid <= 0):
+            raise OutreachHold("dsn_uid_unverified")
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT classification FROM inbound WHERE uidvalidity=? AND uid=?",
+                (str(uidvalidity), uid)).fetchone()
+        return row is not None and row[0] == "suspected_dsn"
+
     def _apply_bounce_pause(self, db, now):
         """Sticky global stop; re-enable requires explicit owner review."""
         count = db.execute("SELECT COUNT(*) FROM bounces WHERE observed_at>=?",
