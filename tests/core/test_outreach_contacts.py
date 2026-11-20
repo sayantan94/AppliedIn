@@ -103,3 +103,46 @@ def test_colliding_linkedin_names_refuse_auto_and_cost_distinct_manual_slots(tmp
     path.write_text(json.dumps(rows + [rows[0]]))
     repeated = read_linkedin(settings, strict=False, **keys)
     assert repeated.people == observed.people
+
+
+def test_shared_card_with_two_names_cannot_bind_only_mailbox():
+    """A one-mailto div naming two people is not an exact person/address link."""
+    shared = ("<div>Test User Other Person "
+              "<a href='mailto:test@example-co.com'>Contact</a></div>")
+    for name in ("Test User", "Other Person"):
+        with pytest.raises(ContactHold, match="named_person_exact_address_binding_missing"):
+            verify_published_contact(
+                company_domain="example-co.com",
+                source_url="https://example-co.com/team",
+                html=shared, address="test@example-co.com", name=name)
+    # An explicit exact-name anchor proves that one mailbox, even if its
+    # enclosing page also contains other people's names.
+    explicit = ("<div>Test User Other Person "
+                "<a href='mailto:test@example-co.com'>Other Person</a></div>")
+    assert verify_published_contact(
+        company_domain="example-co.com",
+        source_url="https://example-co.com/team", html=explicit,
+        address="test@example-co.com", name="Other Person").person_key == "name:other person"
+
+
+def test_same_name_without_profiles_refuses_auto_and_charges_two_manual_slots(tmp_path):
+    """Two independent contacted rows sharing a name cannot collapse to one."""
+    rows = [{
+        "org":"a"*32, "label":"Example Co", "domain":"example-co.com",
+        "name":"Test User", "url":"", "state":"contacted",
+    } for _ in range(2)]
+    path = tmp_path / "existing-linkedin.json"
+    path.write_text(json.dumps(rows))
+    settings = SimpleNamespace(local_dir=str(tmp_path),
+        outreach_linkedin_path=path.name, outreach_linkedin_fields=json.dumps({
+            "company_id":"org", "company_name":"label", "domain":"domain",
+            "person_name":"name", "profile":"url", "status":"state"}))
+    keys = dict(company_id="a"*32, company_name="Example Co",
+                company_domain="example-co.com")
+    with pytest.raises(ContactHold, match="linkedin_name_profile_collision_requires_review"):
+        read_linkedin(settings, **keys)
+    observed = read_linkedin(settings, strict=False, **keys)
+    assert len(observed.people) == 2
+    assert not observed.profiles
+    assert all(p.startswith("provisional:linkedin:") for p in observed.people)
+    assert "linkedin_name_profile_collision_requires_reconciliation" in observed.warnings
