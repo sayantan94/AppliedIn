@@ -389,7 +389,7 @@ def test_preflight_crossing_1700_releases_definite_no_wire_without_smtp(tmp_path
     with pytest.raises(OutreachHold,match="outreach_business_window_closed"):
         mail.send_approved(settings=settings,queue_id=claim["id"],
                            owner_token=claim["owner_token"],stores=object(),
-                           now=near_close,clock=lambda: next(instants),
+                           now=near_close,clock=lambda: next(instants,at_close),
                            smtp_factory=factory)
     assert not calls
     assert ledger.queue_status(queued["queue_id"])["state"]=="held"
