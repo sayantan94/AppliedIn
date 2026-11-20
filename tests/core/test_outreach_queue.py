@@ -257,3 +257,48 @@ def test_more_than_100_older_queued_stages_do_not_starve_later_eligible(tmp_path
     assert len(result)==1
     assert result[0]["company_id"]==f"{130:032x}"
     assert result[0]["stage"]==1
+
+
+def test_recorded_stop_cancels_unattempted_intents_before_window(tmp_path):
+    """A permanent stop cannot wait for a future business window to take effect."""
+    db=Ledger(cfg(tmp_path))
+    one=intent(db,"a","Test User","test@example-co.com")["queue_id"]
+    two=intent(db,"a","Other User","other@example-co.com")["queue_id"]
+    db.record_stop("a"*32,kind="application",now=T)
+    for queue_id in (one,two):
+        status=db.queue_status(queue_id)
+        assert status["state"]=="canceled"
+        assert status["reason"]=="recorded_company_or_recipient_stop"
+        with pytest.raises(OutreachHold,match="queue_version_or_state_changed"):
+            db.repair_queue(queue_id,expected_version=status["version"],
+                            expected_state="held",variant_id="approved",digest="a"*64)
+    with db._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==0
+
+
+def test_due_followup_producer_freezes_named_variant_without_smtp(tmp_path,monkeypatch):
+    """Accepted predecessor and stage mapping can create an uncharged queue row."""
+    from core import outreach_email as mail
+
+    s=cfg(tmp_path,outreach_followup_stage_variants=(
+        '{"1":{"named":"stage1-named","team":"stage1-team"}}'))
+    db=Ledger(s)
+    poll(db)
+    intent(db,"a","Test User","test@example-co.com")
+    first_claim=db.claim_queue(now=T)
+    first=reserve(db,"a","Test User","test@example-co.com",first_claim)
+    begin(db,first)
+    db.finish_wire(first["id"],accepted=True,now=T)
+    later=T+timedelta(days=7)
+    candidate=db.due_followups(now=later,limit=1)[0]
+    monkeypatch.setattr(mail,"approved_variant",lambda settings,variant_id,kind: {
+        "id":variant_id,"sha256":"b"*64,"subject":"Unused follow-up subject",
+        "body":"Approved synthetic text.","role_family":"PM"})
+    result=mail.enqueue_due_followup(settings=s,candidate=candidate,now=later)
+    q=db.queue_intent(result["queue_id"])
+    assert result["state"]=="queued"
+    assert q["stage"]==1
+    assert q["selected_variant"]=="stage1-named"
+    assert q["selected_digest"]=="b"*64
+    with db._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==1
