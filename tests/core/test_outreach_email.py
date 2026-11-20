@@ -399,6 +399,91 @@ def test_preflight_crossing_1700_releases_definite_no_wire_without_smtp(tmp_path
         assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
 
 
+def test_post_handoff_window_abort_releases_first_email_slot_for_repair(tmp_path, monkeypatch):
+    """A successful handoff with no SMTP transport must permit the same-intent retry."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings, _, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
+    near_close = datetime(2026, 11, 20, 16, 59, tzinfo=UTC)
+    at_close = datetime(2026, 11, 20, 17, tzinfo=UTC)
+    reopened = datetime(2026, 11, 23, 10, tzinfo=UTC)
+    ledger = Ledger(settings)
+    ledger.record_successful_poll(
+        uidvalidity="3", monitored_address=settings.outreach_sender, now=near_close)
+    queued = mail.enqueue_first(
+        settings=settings, company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com", person_name="Test User",
+        variant_id="synthetic-v1", now=near_close)
+    queue_id = queued["queue_id"]
+    claim = ledger.claim_queue(now=near_close)
+    assert claim and claim["id"] == queue_id
+
+    # The first three clocks cover preflight, reservation and begin_wire.
+    # The fourth closes the business window after durable handoff, before SMTP.
+    instants = iter((near_close, near_close, near_close, at_close))
+    gap = SimpleNamespace(randint=lambda lower, upper: 180)
+    with pytest.raises(OutreachHold, match="outreach_business_window_closed"):
+        mail.send_approved(
+            settings=settings, queue_id=queue_id,
+            owner_token=claim["owner_token"], stores=object(),
+            now=near_close, clock=lambda: next(instants, at_close),
+            smtp_factory=factory, gap_rng=gap)
+    assert not calls  # Not even the fake SMTP constructor was reached.
+    status = ledger.queue_status(queue_id)
+    assert status["state"] == "held"
+    assert status["reason"] == "owner_no_wire_repair_required"
+    with ledger._tx() as conn:
+        original = conn.execute(
+            "SELECT id,message_id,state FROM attempts WHERE queue_id=?",
+            (queue_id,)).fetchone()
+        assert original[2] == "definite_pre_wire_failure"
+        assert conn.execute(
+            "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+            ("a"*32, "name:test user")).fetchone() is None
+        assert conn.execute(
+            "SELECT active_attempt,last_handoff,next_not_before "
+            "FROM email_dispatch WHERE id=1").fetchone() == (
+                None, near_close.timestamp(), near_close.timestamp() + 180)
+
+    # Only positively proved no-wire, owner-selected repair may re-admit it.
+    with pytest.raises(OutreachHold, match="charged_or_unproved_wire"):
+        ledger.repair_queue(
+            queue_id, expected_version=status["version"], expected_state="held",
+            variant_id="synthetic-v1", digest="a"*64)
+    repaired = ledger.repair_queue(
+        queue_id, expected_version=status["version"], expected_state="held",
+        variant_id="synthetic-v1", digest="a"*64, owner_no_wire_proved=True,
+        now=reopened)
+    assert repaired["queue_id"] == queue_id
+    ledger.record_successful_poll(
+        uidvalidity="3", monitored_address=settings.outreach_sender, now=reopened)
+    retry_claim = ledger.claim_queue(now=reopened)
+    assert retry_claim and retry_claim["id"] == queue_id
+    result = mail.send_approved(
+        settings=settings, queue_id=queue_id,
+        owner_token=retry_claim["owner_token"], stores=object(),
+        now=reopened, smtp_factory=factory, gap_rng=gap)
+    assert result["state"] == "confirmed_smtp_accepted"
+    sent = [item for item in calls if item[0] == "message"]
+    assert len(sent) == 1
+    assert len([item for item in calls if item[0] == "constructed"]) == 1
+    with ledger._tx() as conn:
+        attempts = conn.execute(
+            "SELECT id,message_id,state FROM attempts WHERE queue_id=? "
+            "ORDER BY reserved_at", (queue_id,)).fetchall()
+        assert len(attempts) == 2
+        assert attempts[0] == original
+        assert attempts[1][0] != original[0]
+        assert attempts[1][1] != original[1]
+        assert attempts[1][2] == "confirmed_smtp_accepted"
+        assert conn.execute(
+            "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+            ("a"*32, "name:test user")).fetchone() == ("email",)
+    assert str(sent[0][1]["Message-ID"]) == attempts[1][1]
+
+
 def test_owner_approval_rotated_after_mime_before_handoff_is_no_wire(tmp_path,monkeypatch):
     """A locally assembled message is not permission to send revoked approved text."""
     from core import outreach_email as mail
