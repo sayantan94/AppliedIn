@@ -391,4 +391,4 @@ def test_non_numeric_pacing_deadline_stays_inspectable(tmp_path):
     assert status["state"]=="held"
     assert status["reason"]=="dispatch_clock_or_metadata_invalid"
     assert status["next_action"]=="owner_reconcile_dispatch_metadata"
-    assert isinstance(status["next_check_at"],float)
+    assert status["next_check_at"] is None  # Metadata requires owner repair, not timed retry.
