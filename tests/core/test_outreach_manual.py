@@ -191,3 +191,60 @@ def test_manual_name_on_page_not_bound_to_unrelated_icon_handle(tmp_path, monkey
     assert saved[0]["person_key"].startswith("provisional:manual:")
     report = manual.manual_report(settings=s, company_id=KEY, now=T)
     assert report["provisional"] == 1 and report["used"] == 1
+
+
+def test_manual_target_refuses_unrelated_evidence_final_domain(tmp_path, monkeypatch):
+    """A safe HTTPS third-party page may link to a handle but cannot speak for the employer."""
+    s = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(manual, "_official_page", lambda *_: (
+        "https://unrelated.example.test/links",
+        '<a href="https://x.com/fourth">X</a>'))
+    with pytest.raises(OutreachHold, match="manual_evidence_not_employer_published"):
+        queue(s, "x", "https://x.com/fourth", "Fourth Person")
+    assert Ledger(s).manual_rows(KEY) == []
+
+
+def test_first_email_route_is_local_explicit_and_not_manual_flag_dependent(tmp_path, monkeypatch):
+    """Only a CSRF-protected owner-selected first request can reach the existing sender."""
+    import asyncio
+    import httpx
+    from fastapi import FastAPI
+    from core import outreach_email
+
+    s = setup(tmp_path, monkeypatch)
+    s.outreach_manual_enabled = False
+    calls = []
+    monkeypatch.setattr("core.stores.make_stores", lambda *_: object())
+    monkeypatch.setattr(outreach_email, "send_approved", lambda **kw: (
+        calls.append(kw) or {"state":"confirmed_smtp_accepted"}))
+    app = FastAPI()
+    manual.register_routes(app, s)
+
+    async def loopback(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "server": ("127.0.0.1", 8788)}
+        await app(scope, receive, send)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=loopback, client=("127.0.0.1", 45555))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8788") as client:
+            csrf = (await client.get("/outreach/csrf")).json()["csrf"]
+            body = {"company_id":KEY, "contact_page_url":"https://example-co.com/team",
+                    "exact_address":"test@example-co.com", "person_name":"Test User",
+                    "variant_id":"approved-first"}
+            endpoint = "/outreach/email/first"
+            assert (await client.post(endpoint, json=body)).status_code == 403
+            assert (await client.post(endpoint, json=body, headers={
+                "Origin":"http://unrelated.example.test", "X-Outreach-CSRF":csrf})).status_code == 403
+            good = {"Origin":"http://127.0.0.1:8788", "X-Outreach-CSRF":csrf}
+            result = await client.post(endpoint, json=body, headers=good)
+            assert result.status_code == 200
+            assert result.json()["state"] == "confirmed_smtp_accepted"
+            assert (await client.post("/outreach/manual/queue", json=body,
+                                      headers=good)).status_code == 404
+            s.outreach_enabled = False
+            assert (await client.post(endpoint, json=body, headers=good)).status_code == 404
+    asyncio.run(exercise())
+    assert len(calls) == 1
+    assert calls[0]["stage"] == 0 and calls[0]["company_id"] == KEY
+    assert calls[0]["exact_address"] == "test@example-co.com"
