@@ -578,6 +578,56 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
     ledger.record_inbound_uid(validity, uid, classification)
 
 
+
+def owner_confirm_suspected_hard_bounce(settings, *, uidvalidity, uid, message_id,
+                                        failed_recipient, permanent_status,
+                                        owner_reviewed, provider_evidence_confirmed,
+                                        now=None):
+    """Privately confirm a *reviewed* permanent provider DSN, never a From guess.
+
+    Read-only IMAP exposes no authenticated provider transport attestation.
+    A suspicious exact-thread UID is only a triage candidate; the operator
+    must independently inspect the provider/source and failed recipient before
+    confirming an accepted attempt. This is not an automatic DSN classifier.
+    """
+    from core.outreach_contacts import LinkedInSnapshot, normalize_email
+    from core.outreach_ledger import Ledger, OutreachHold
+
+    if (getattr(settings, "mode", "") != "local"
+            or not getattr(settings, "outreach_enabled", False)
+            or not getattr(settings, "outreach_provider_dsn_verified", False)
+            or not getattr(settings, "outreach_dsn_sender_addresses", "").strip()):
+        raise OutreachHold("provider_dsn_triage_not_configured")
+    if owner_reviewed is not True or provider_evidence_confirmed is not True:
+        raise OutreachHold("owner_provider_dsn_confirmation_required")
+    if (not isinstance(permanent_status, str) or not re.fullmatch(
+            r"(?:5[0-9]{2}|5\.\d{1,3}\.\d{1,3})", permanent_status)):
+        raise OutreachHold("permanent_dsn_status_unverified")
+    if not _valid_message_id(message_id):
+        raise OutreachHold("dsn_outbound_message_id_unverified")
+    recipient = normalize_email(failed_recipient)
+    ledger = Ledger(settings)
+    if not ledger.witnessed_suspected_dsn(uidvalidity, uid):
+        raise OutreachHold("suspected_dsn_uid_not_persisted")
+    attempt = ledger.attempt_by_message_id(message_id)
+    if (not attempt or attempt["recipient"] != recipient
+            or attempt["state"] != "confirmed_smtp_accepted"):
+        raise OutreachHold("dsn_exact_accepted_recipient_mismatch")
+    # A suspicious inbound classification cannot be upgraded merely by
+    # supplying an unrelated Message-ID; require the affected company to
+    # remain in its email-only triage hold until the owner resolves it.
+    blank_linkedin = LinkedInSnapshot(frozenset(), frozenset())
+    state = ledger.report(attempt["company_id"], blank_linkedin, now=now)
+    if state["company_email_hold"] not in {
+            "suspected_dsn_needs_review", "confirmed_hard_bounce_review_required"}:
+        raise OutreachHold("dsn_company_not_held_for_review")
+    confirmed = ledger.confirm_hard_bounce(attempt["id"], now=now)
+    state = ledger.report(attempt["company_id"], blank_linkedin, now=now)
+    return {"confirmed": confirmed, "company_email_held": True,
+            "global_email_pause": state["global_email_pause"]}
+
+
+
 def ingest_pass(settings, credentials: dict | None = None, stores=None, transport=None,
                 classifier=None) -> int:
     if settings.mode != "local":
