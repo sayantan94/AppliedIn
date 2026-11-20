@@ -75,3 +75,31 @@ def test_named_mailto_requires_same_small_employer_published_container():
         "<div>Test User <a href='mailto:test@example-co.com'>Contact</a></div>"
     )
     assert verify_published_contact(html=exact, **common).person_key == "name:test user"
+
+
+def test_colliding_linkedin_names_refuse_auto_and_cost_distinct_manual_slots(tmp_path):
+    """Two independently verified /in/ URLs cannot merge on the same full name."""
+    rows = [{
+        "org":"a"*32, "label":"Example Co", "domain":"example-co.com",
+        "name":"Test User", "url":f"https://linkedin.com/in/test-user-{suffix}",
+        "state":"contacted",
+    } for suffix in ("one", "two")]
+    path = tmp_path / "existing-linkedin.json"
+    path.write_text(json.dumps(rows))
+    settings = SimpleNamespace(local_dir=str(tmp_path),
+        outreach_linkedin_path=path.name, outreach_linkedin_fields=json.dumps({
+            "company_id":"org", "company_name":"label", "domain":"domain",
+            "person_name":"name", "profile":"url", "status":"state"}))
+    keys = dict(company_id="a"*32, company_name="Example Co",
+                company_domain="example-co.com")
+    with pytest.raises(ContactHold, match="linkedin_name_profile_collision_requires_review"):
+        read_linkedin(settings, **keys)
+    observed = read_linkedin(settings, strict=False, **keys)
+    assert len(observed.profiles) == 2
+    assert len(observed.people) == 2
+    assert all(p.startswith("provisional:linkedin:") for p in observed.people)
+    assert "linkedin_name_profile_collision_requires_reconciliation" in observed.warnings
+    # One duplicate tracker row is not a third distinct person.
+    path.write_text(json.dumps(rows + [rows[0]]))
+    repeated = read_linkedin(settings, strict=False, **keys)
+    assert repeated.people == observed.people
