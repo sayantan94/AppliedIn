@@ -152,9 +152,14 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
     begin(db,second,now=T+timedelta(minutes=5))
     db.hold_orphaned_attempts()
     assert db.queue_status(q)["state"]=="in_flight"
-    with pytest.raises(OutreachHold,match="another_smtp_wire"):
-        Ledger(s).claim_queue(now=T+timedelta(minutes=7))
+    another=intent(db,"b","Other User","other@example-co.com",
+                   now=T+timedelta(minutes=7))["queue_id"]
+    assert Ledger(s).claim_queue(now=T+timedelta(minutes=7)) is None
     assert db.queue_status(q)["state"]=="in_flight"
+    blocked=db.queue_status(another)
+    assert blocked["state"]=="held"
+    assert blocked["reason"]=="another_smtp_wire_unresolved"
+    assert blocked["next_action"]=="wait_for_global_smtp_fence"
 
 
 def test_versioned_no_name_hold_repair_and_permanent_stop(tmp_path):
@@ -302,3 +307,17 @@ def test_due_followup_producer_freezes_named_variant_without_smtp(tmp_path,monke
     assert q["selected_digest"]=="b"*64
     with db._tx() as conn:
         assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==1
+
+
+def test_corrupt_global_dispatch_metadata_is_a_visible_hold(tmp_path):
+    """Corruption must fail closed with an inspectable private next action."""
+    db=Ledger(cfg(tmp_path))
+    queue_id=intent(db,"a","Test User","test@example-co.com")["queue_id"]
+    with db._tx() as conn:
+        conn.execute("UPDATE email_dispatch SET last_handoff=?,next_not_before=?",
+                     (T.timestamp()-100,T.timestamp()-90))
+    assert db.claim_queue(now=T) is None
+    status=db.queue_status(queue_id)
+    assert status["state"]=="held"
+    assert status["reason"]=="dispatch_clock_or_metadata_invalid"
+    assert status["next_action"]=="owner_reconcile_dispatch_metadata"
