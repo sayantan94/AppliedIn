@@ -586,30 +586,57 @@ class Ledger:
                 "tracking_mode": "not_tracked", "root_subject":root_subject}
 
     def begin_wire(self, attempt_id, *, source_checked: bool,
-                   no_application: bool, linkedin_checked: bool, now=None):
+                   no_application: bool, linkedin_checked: bool, now=None,
+                   gap_rng=None):
         """Last local stop/freshness check before irreversible SMTP work."""
         now = _time(now)
         if not (source_checked and no_application and linkedin_checked):
             raise OutreachHold("prewire_source_application_or_linkedin_unverified")
         with self._tx() as db:
-            row = db.execute("SELECT company_id,person_key,state FROM attempts WHERE id=?",
+            row = db.execute("SELECT company_id,person_key,state,queue_id FROM attempts WHERE id=?",
                              (attempt_id,)).fetchone()
             if row is None or row[2] != "reserved":
                 raise OutreachHold("attempt_not_reserved")
             self._fresh_poll(db, now)
             self._stopped(db, row[0], row[1])
+            if row[3] is not None:
+                q = self._qrow(db, row[3])
+                if not q or q["state"] != "reserved" or q["attempt_id"] != attempt_id:
+                    raise OutreachHold("linked_attempt_queue_mismatch")
+                self._stage_enabled(q["stage"])
+                self._window(now)
+                self._fence(db, now)
+                gap = secrets.randbelow(421)+180 if gap_rng is None else gap_rng.randint(180,600)
+                if type(gap) is not int or not 180 <= gap <= 600:
+                    raise OutreachHold("invalid_uniform_handoff_gap")
+                db.execute("UPDATE email_dispatch SET active_attempt=?,last_handoff=?,"
+                           "next_not_before=? WHERE id=1",
+                           (attempt_id,now.timestamp(),now.timestamp()+gap))
+                db.execute("""UPDATE email_queue SET state='in_flight',
+                    version=version+1,updated_at=? WHERE id=?""",
+                    (now.timestamp(),row[3]))
             db.execute("UPDATE attempts SET state='in_flight' WHERE id=?", (attempt_id,))
 
     def finish_wire(self, attempt_id, *, accepted: bool, now=None):
         """Only an unambiguous SMTP 250 acceptance is accepted; otherwise uncertain."""
         now = _time(now)
         with self._tx() as db:
-            row = db.execute("SELECT state FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            row = db.execute("SELECT state,queue_id FROM attempts WHERE id=?",
+                             (attempt_id,)).fetchone()
             if row is None or row[0] != "in_flight":
                 raise OutreachHold("wire_attempt_not_in_flight")
+            outcome = "confirmed_smtp_accepted" if accepted else "uncertain"
+            if row[1] is not None:
+                active = db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+                if not active or active[0] != attempt_id:
+                    raise OutreachHold("global_wire_owner_mismatch")
+                db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+                db.execute("""UPDATE email_queue SET state=?,reason=?,version=version+1,
+                    updated_at=?,owner_token=NULL WHERE id=? AND attempt_id=?""",
+                    (outcome, "" if accepted else "smtp_outcome_uncertain",
+                     now.timestamp(),row[1],attempt_id))
             db.execute("UPDATE attempts SET state=?, accepted_at=? WHERE id=?",
-                       ("confirmed_smtp_accepted" if accepted else "uncertain",
-                        now.timestamp() if accepted else None, attempt_id))
+                       (outcome,now.timestamp() if accepted else None,attempt_id))
             if accepted:
                 # The 30-message denominator can cross its minimum after a
                 # prior confirmed bounce. Review the persisted threshold at
@@ -619,12 +646,16 @@ class Ledger:
     def definite_no_wire(self, attempt_id):
         """Only permitted for reserved attempts *before* begin_wire."""
         with self._tx() as db:
-            row = db.execute("SELECT company_id,person_key,state FROM attempts WHERE id=?",
+            row = db.execute("SELECT company_id,person_key,state,queue_id FROM attempts WHERE id=?",
                              (attempt_id,)).fetchone()
             if not row or row[2] != "reserved":
                 raise OutreachHold("cannot_prove_no_wire_after_begin")
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
+            if row[3]:
+                db.execute("""UPDATE email_queue SET state='held',reason='owner_no_wire_repair_required',
+                    owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                    (_time().timestamp(),row[3]))
             db.execute("DELETE FROM pixel_events WHERE token_sha IN "
                        "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",
                        (attempt_id,))
@@ -636,6 +667,29 @@ class Ledger:
                 db.execute("DELETE FROM people WHERE company_id=? AND person_key=? "
                            "AND channel='email'", (row[0], row[1]))
 
+
+    def abort_handoff_before_transport(self, attempt_id, token, *, now=None):
+        """Only worker-owned and positively unwired handoff may clear active slot."""
+        now = _time(now)
+        with self._tx() as db:
+            row = db.execute("SELECT queue_id,state FROM attempts WHERE id=?",
+                             (attempt_id,)).fetchone()
+            if not row or row[1] != "in_flight" or not row[0]:
+                raise OutreachHold("no_wire_handoff_unproven")
+            q = self._qrow(db,row[0])
+            active = db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+            if not q or q["owner_token"] != token or not active or active[0] != attempt_id:
+                raise OutreachHold("handoff_owner_not_proven")
+            db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
+                       (attempt_id,))
+            db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+            db.execute("""UPDATE email_queue SET state='held',reason='owner_no_wire_repair_required',
+                owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                (now.timestamp(),row[0]))
+            db.execute("DELETE FROM pixel_events WHERE token_sha IN "
+                       "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",(attempt_id,))
+            db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?",(attempt_id,))
+            # The persisted handoff deadline survives even this proven no-wire.
 
     def earn_due(self, company_id, person_key, stage, calculated):
         """Persist earliest earned due even when a later quota check holds."""
@@ -706,8 +760,9 @@ class Ledger:
     def hold_orphaned_attempts(self):
         """Call on process startup, not during concurrent sends; never auto-replay."""
         with self._tx() as db:
+            # Another queue-linked sender may be live; never age-reclaim its wire.
             db.execute("UPDATE attempts SET state='uncertain' "
-                       "WHERE state IN ('reserved','in_flight')")
+                       "WHERE queue_id IS NULL AND state IN ('reserved','in_flight')")
 
     def record_stop(self, company_id, *, person_key="*", kind="human_reply", now=None):
         now = _time(now)
