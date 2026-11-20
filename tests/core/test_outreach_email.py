@@ -397,3 +397,35 @@ def test_preflight_crossing_1700_releases_definite_no_wire_without_smtp(tmp_path
         assert conn.execute("SELECT COUNT(*) FROM attempts WHERE "
                             "state!='definite_pre_wire_failure'").fetchone()[0]==0
         assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
+
+
+def test_owner_approval_rotated_after_mime_before_handoff_is_no_wire(tmp_path,monkeypatch):
+    """A locally assembled message is not permission to send revoked approved text."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,now,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    original=mail.approved_variant
+    rotated=[False]
+
+    def approval(*args):
+        item=original(*args)
+        return {**item,"sha256":("b" if rotated[0] else "a")*64}
+
+    def finish_mime_setup():
+        rotated[0]=True
+        return object()
+
+    monkeypatch.setattr(mail,"approved_variant",approval)
+    monkeypatch.setattr(mail.ssl,"create_default_context",finish_mime_setup)
+    with pytest.raises(OutreachHold,match="frozen_stage_approval_changed_before_wire"):
+        _send_fake(mail,settings=settings,company_id="a"*32,
+                   contact_page_url="https://example-co.com/team",
+                   exact_address="test@example-co.com",person_name="Test User",
+                   variant_id="synthetic-v1",stores=object(),now=now,
+                   smtp_factory=factory)
+    assert not calls
+    with Ledger(settings)._tx() as conn:
+        assert conn.execute("SELECT state FROM attempts").fetchone()[0] == (
+            "definite_pre_wire_failure")
+        assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
