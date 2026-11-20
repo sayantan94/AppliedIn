@@ -196,6 +196,7 @@ def read_linkedin(settings, *, company_id, company_name, company_domain, strict=
     except (OSError, ValueError, UnicodeError) as exc:
         raise ContactHold("linkedin_private_source_unreadable") from exc
     people, profiles, warnings = set(), set(), set()
+    identified_rows = []
     for row in records:
         if not isinstance(row, dict):
             raise ContactHold("linkedin_row_invalid")
@@ -215,10 +216,12 @@ def read_linkedin(settings, *, company_id, company_name, company_domain, strict=
         if status == "not_contacted":
             continue
         name, profile = row.get(fields["person_name"]), row.get(fields["profile"])
+        verified_profile = None
         try:
             identity = person_key(name)
             if profile:
-                profiles.add(profile_key(profile))
+                verified_profile = profile_key(profile)
+                profiles.add(verified_profile)
         except ContactHold:
             if strict:
                 raise
@@ -232,6 +235,25 @@ def read_linkedin(settings, *, company_id, company_name, company_domain, strict=
             identity = "provisional:linkedin:" + hashlib.sha256(
                 raw_key.encode("utf-8")).hexdigest()[:32]
             warnings.add("linkedin_identity_or_employer_join_unresolved")
+        identified_rows.append((identity, verified_profile))
+    # A normalized full name is not a unique identity when separate verified
+    # /in/ profiles share it. Strict SMTP must reconcile such joins; manual
+    # views conservatively charge each independently witnessed profile as one
+    # provisional person. Repeated rows of the same profile count only once.
+    name_profiles = {}
+    for identity, verified_profile in identified_rows:
+        if identity.startswith("name:") and verified_profile:
+            name_profiles.setdefault(identity, set()).add(verified_profile)
+    collisions = {name for name, ids in name_profiles.items() if len(ids) > 1}
+    if collisions and strict:
+        raise ContactHold("linkedin_name_profile_collision_requires_review")
+    if collisions:
+        warnings.add("linkedin_name_profile_collision_requires_reconciliation")
+    for identity, verified_profile in identified_rows:
+        if identity in collisions:
+            witness = verified_profile or identity + "|unbound-profile"
+            identity = "provisional:linkedin:" + hashlib.sha256(
+                witness.encode("utf-8")).hexdigest()[:32]
         people.add(identity)
     return LinkedInSnapshot(frozenset(people), frozenset(profiles),
                             frozenset(warnings))
