@@ -365,3 +365,35 @@ def test_followup_mime_subject_exactly_threads_saved_unicode_root(tmp_path,monke
     assert str(messages[1]["Subject"])=="Re: Résumé – exact original Subject"
     assert str(messages[1]["In-Reply-To"])==str(messages[0]["Message-ID"])
     assert str(messages[1]["References"])==str(messages[0]["Message-ID"])
+
+
+def test_preflight_crossing_1700_releases_definite_no_wire_without_smtp(tmp_path,monkeypatch):
+    """The last clock check must not dispatch an earlier 16:59 preflight at 17:00."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,_,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    near_close=datetime(2026,11,20,16,59,tzinfo=UTC)
+    at_close=datetime(2026,11,20,17,0,tzinfo=UTC)
+    ledger=Ledger(settings)
+    ledger.record_successful_poll(uidvalidity="3",
+                                   monitored_address=settings.outreach_sender,
+                                   now=near_close)
+    queued=mail.enqueue_first(
+        settings=settings,company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com",person_name="Test User",
+        variant_id="synthetic-v1",now=near_close)
+    claim=ledger.claim_queue(now=near_close)
+    instants=iter((near_close,near_close,at_close))
+    with pytest.raises(OutreachHold,match="outreach_business_window_closed"):
+        mail.send_approved(settings=settings,queue_id=claim["id"],
+                           owner_token=claim["owner_token"],stores=object(),
+                           now=near_close,clock=lambda: next(instants),
+                           smtp_factory=factory)
+    assert not calls
+    assert ledger.queue_status(queued["queue_id"])["state"]=="held"
+    with ledger._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts WHERE "
+                            "state!='definite_pre_wire_failure'").fetchone()[0]==0
+        assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
