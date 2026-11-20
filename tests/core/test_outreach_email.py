@@ -92,7 +92,13 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     monkeypatch.setattr(mail, "company_application_clear", lambda *args: True)
     monkeypatch.setattr(mail, "approved_variant", lambda *args: {
         "id": "synthetic-v1", "sha256": "a"*64})
-    monkeypatch.setattr(mail, "render_approved", lambda *args: ("Hello", "Synthetic approved email."))
+    def fake_render_approved(_variant, _lead, _contact, *, funding_fact=""):
+        # The no-fact SMTP fixture must accept the same keyword-only
+        # rendering contract as production. Any invented fact is a failure.
+        assert funding_fact == ""
+        return "Hello", "Synthetic approved email."
+
+    monkeypatch.setattr(mail, "render_approved", fake_render_approved)
     monkeypatch.setattr(mail, "original_seed_pdf", lambda _: b"%PDF-1.4 synthetic")
     return s, when, FakeSMTP, calls
 
