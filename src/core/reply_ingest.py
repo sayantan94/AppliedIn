@@ -529,17 +529,15 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
                  or "automatic reply" in str(msg.get("subject", "")).casefold()
                  or "vacation" in str(msg.get("subject", "")).casefold()
                  or any(msg.get(key) for key in
-                        ("x-autoreply", "x-autorespond", "x-auto-response-suppress",
+                        ("x-autoreply", "x-autorespond",
                          "x-ms-exchange-inbox-rules-loop")))
     indicators = (str(msg.get_content_type()).casefold() == "multipart/report"
                   and "delivery-status" in str(msg.get("content-type", "")).casefold()
                   or bool(msg.get("x-failed-recipients"))
                   or sender.split("@")[0] in {"postmaster", "mailer-daemon"})
-    listed_providers = {s.strip().casefold() for s in
-                        getattr(settings, "outreach_dsn_sender_addresses", "").split(",")
-                        if s.strip()}
-    provider_witness = (bool(getattr(settings, "outreach_provider_dsn_verified", False))
-                        and sender in listed_providers)
+    # Even a configured provider From is an unauthenticated mutable header.
+    # This IMAP read surface does not expose per-message transport attestation;
+    # a permanent status is therefore triage evidence, never a hard-bounce proof.
     possible_opt_out = bool(re.search(
         r"\b(?:unsubscribe|do not (?:email|contact|write)|stop emailing)\b", body, re.I))
 
@@ -550,20 +548,8 @@ def _cold_outreach_message(ledger, settings, headers: bytes, prefix: bytes,
         if indicators:
             # Never turn soft/unknown MIME, untrusted sender or generic
             # multipart/report into a confirmed permanent bounce.
-            failed = [addr.strip().casefold() for _, addr in
-                      getaddresses(msg.get_all("x-failed-recipients", []))]
-            permanent = bool(re.search(r"(?:Status:\s*5\.\d\.\d|"
-                                       r"Diagnostic-Code:\s*smtp;\s*5\d\d)", body, re.I))
-            exact_recipient = candidate["recipient"] in failed or bool(
-                re.search(r"(?<![\w.@])" + re.escape(candidate["recipient"]) +
-                          r"(?![\w.@])", body, re.I))
-            if (provider_witness and permanent and exact_recipient
-                    and candidate["state"] == "confirmed_smtp_accepted"):
-                ledger.confirm_hard_bounce(candidate["id"])
-                classification = "confirmed_hard_bounce"
-            else:
-                ledger.hold_company_email(company, "suspected_dsn_needs_review")
-                classification = "suspected_dsn"
+            ledger.hold_company_email(company, "suspected_dsn_needs_review")
+            classification = "suspected_dsn"
         elif automatic:
             classification = "automatic_not_human"
         elif sender_ok and sender == candidate["recipient"] and addressed:
@@ -664,6 +650,11 @@ def ingest_pass(settings, credentials: dict | None = None, stores=None, transpor
                 try:
                     prefix = client.fetch_text_prefix(uid)
                 except Exception:
+                    if cold_ledger is not None:
+                        # Unknown body may contain an exact outbound thread/stop.
+                        # Do not consume this UID or certify a fresh full poll.
+                        _mark_unresolved(path, key, validity, uid)
+                        continue
                     prefix = b""
                 decoded = _decode_text_prefix(raw, prefix[:4096]) if isinstance(prefix, bytes) and prefix else ""
                 if not _usable_prefix(decoded) and not _valid_message_id(fields["message_id"]):
