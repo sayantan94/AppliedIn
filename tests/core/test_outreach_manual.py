@@ -137,11 +137,24 @@ def test_csrf_host_origin_and_loopback_required_without_network(tmp_path, monkey
     monkeypatch.setattr("core.stores.make_stores", lambda *_: object())
     monkeypatch.setattr(manual, "act_on_target", lambda **_kwargs: {"state":"copied"})
 
+    async def listening_loopback_app(scope, receive, send):
+        # ASGITransport does not operate a listening socket. Model a concrete
+        # local listener so the strict Host:port == scope.server:port check is
+        # tested instead of depending on the transport's server default.
+        if scope["type"] == "http":
+            scope = {**scope, "server": ("127.0.0.1", 8788)}
+        await app(scope, receive, send)
+
     async def exercise():
-        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 45678))
+        transport = httpx.ASGITransport(
+            app=listening_loopback_app, client=("127.0.0.1", 45678))
         async with httpx.AsyncClient(
                 transport=transport, base_url="http://127.0.0.1:8788") as client:
-            csrf = (await client.get("/outreach/csrf")).json()["csrf"]
+            token_response = await client.get("/outreach/csrf")
+            assert token_response.status_code == 200, token_response.json()
+            csrf = token_response.json()["csrf"]
+            assert (await client.get("/outreach/csrf", headers={
+                "Host": "evil.example"})).status_code == 403
             body = {"company_id":KEY, "target_id":"synthetic", "version":1}
             assert (await client.post("/outreach/manual/copy", json=body)).status_code == 403
             wrong = {"Origin":"http://evil.example", "X-Outreach-CSRF":csrf}
@@ -153,7 +166,8 @@ def test_csrf_host_origin_and_loopback_required_without_network(tmp_path, monkey
             assert response.status_code == 200
             assert response.json()["state"] == "copied"
             assert response.headers["Cache-Control"] == "no-store"
-        remote = httpx.ASGITransport(app=app, client=("203.0.113.10", 45678))
+        remote = httpx.ASGITransport(
+            app=listening_loopback_app, client=("203.0.113.10", 45678))
         async with httpx.AsyncClient(
                 transport=remote, base_url="http://127.0.0.1:8788") as client:
             assert (await client.get("/outreach/csrf")).status_code == 403
