@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
 
-from core.outreach_contacts import (ContactHold, read_linkedin,
+from core.outreach_contacts import (ContactHold, VerifiedRecipient, read_linkedin,
                                     normalize_email, verify_published_contact)
 from core.outreach_ledger import Ledger, OutreachHold
 from core.outreach_sources import read_no_opening
@@ -251,6 +251,8 @@ def enqueue_first(*, settings, company_id, contact_page_url, exact_address,
     # Reject no-name placeholders and unapproved dynamic slots at enqueue.
     fact = (verified_funding_fact(settings,lead,now)
             if "{funding_fact}" in (variant["subject"]+variant["body"]) else "")
+    if not contact.name and "{first_name}" in (variant["subject"]+variant["body"]):
+        raise OutreachHold("verified_name_or_approved_team_variant_required")
     render_approved(variant,lead,contact,funding_fact=fact)
     return Ledger(settings).enqueue_email(lead,contact,stage=0,
         variant_id=variant["id"],digest=variant["sha256"],now=now)
@@ -355,6 +357,8 @@ def send_approved(*, settings, queue_id, owner_token, stores,
             raise OutreachHold("frozen_stage_approval_changed_requires_owner_choice")
         fact = (verified_funding_fact(settings,lead,current)
                 if "{funding_fact}" in (variant["subject"]+variant["body"]) else "")
+        if not contact.name and "{first_name}" in (variant["subject"]+variant["body"]):
+            raise OutreachHold("verified_name_or_approved_team_variant_required")
         logical_subject,body = render_approved(variant,lead,contact,funding_fact=fact)
         pdf = original_seed_pdf(settings)
         linkedin = read_linkedin(settings,company_id=lead.company_id,
