@@ -431,7 +431,7 @@ def send_approved(*, settings, queue_id, owner_token, stores,
                                  cancel=_terminal_stop(exc),now=_current_time(now,clock))
         elif not handed_off:
             # begin_wire never committed: positively proven no SMTP transport.
-            ledger.definite_no_wire(ticket["id"])
+            ledger.definite_no_wire(ticket["id"],owner_token=owner_token)
         raise
     # No source/network/PDF/template I/O after the durable final handoff.
     try:
