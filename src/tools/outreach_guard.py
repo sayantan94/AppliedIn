@@ -28,12 +28,12 @@ def _company_join(row, lead, names):
 
 
 def _blocking_application(row):
-    status = row.get("status")
-    if isinstance(status, Status):
-        status = status.value
-    status = str(status or "").strip().casefold()
-    gate_reason = str(row.get("gate_reason") or "").strip().casefold()
-    fail_kind = str(row.get("fail_kind") or "").strip().casefold()
+    def normalized(value):
+        return str(getattr(value, "value", value) or "").strip().casefold()
+
+    status = normalized(row.get("status"))
+    gate_reason = normalized(row.get("gate_reason"))
+    fail_kind = normalized(row.get("fail_kind"))
     return (status in {"applied", "applied_manual", "submitting", "rejected", "declined"}
             or gate_reason == "submit_uncertain"
             or (status in {"needs_human", "error", "failed"} and fail_kind == "uncertain")
@@ -56,7 +56,12 @@ def company_application_clear(stores, lead):
         # Query explicit committing states as well, preserving the old stop.
         rows = list(stores.tracking.all())
         for status in (Status.APPLIED, Status.APPLIED_MANUAL, Status.SUBMITTING):
-            rows.extend(stores.tracking.query_status(status))
+            for row in stores.tracking.query_status(status):
+                if not isinstance(row, dict):
+                    raise OutreachHold("application_tracker_row_unreadable")
+                # Query membership is status evidence even when a legacy row
+                # omits its status field in the returned projection.
+                rows.append({**row, "status": status.value})
         for row in rows:
             if not isinstance(row, dict):
                 raise OutreachHold("application_tracker_row_unreadable")
