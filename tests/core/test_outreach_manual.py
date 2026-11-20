@@ -248,3 +248,31 @@ def test_first_email_route_is_local_explicit_and_not_manual_flag_dependent(tmp_p
     assert len(calls) == 1
     assert calls[0]["stage"] == 0 and calls[0]["company_id"] == KEY
     assert calls[0]["exact_address"] == "test@example-co.com"
+
+
+def test_two_same_name_verified_profiles_consume_two_of_three_manual_slots(tmp_path, monkeypatch):
+    """Never grant a fourth contact because two existing people share a full name."""
+    import json
+    from core.outreach_contacts import read_linkedin
+    path = tmp_path / "existing-linkedin.json"
+    path.write_text(json.dumps([{
+        "org":KEY, "label":"Example Co", "domain":"example-co.com",
+        "name":"Test User", "url":f"https://linkedin.com/in/test-user-{suffix}",
+        "state":"contacted",
+    } for suffix in ("one", "two")]))
+    settings = SimpleNamespace(local_dir=str(tmp_path),
+        outreach_linkedin_path=path.name, outreach_linkedin_fields=json.dumps({
+            "company_id":"org", "company_name":"label", "domain":"domain",
+            "person_name":"name", "profile":"url", "status":"state"}))
+    snapshot = read_linkedin(settings, company_id=KEY, company_name="Example Co",
+                             company_domain="example-co.com", strict=False)
+    s = setup(tmp_path, monkeypatch, linkedin=snapshot)
+    third = queue(s, "x", "https://x.com/third", "")
+    manual.act_on_target(settings=s, company_id=KEY, target_id=third["id"],
+                         version=1, action="copy", stores=object(), now=T)
+    fourth = queue(s, "x", "https://x.com/fourth", "")
+    with pytest.raises(OutreachHold, match="hard_company_three_person_cap"):
+        manual.act_on_target(settings=s, company_id=KEY, target_id=fourth["id"],
+                             version=1, action="copy", stores=object(), now=T)
+    report = manual.manual_report(settings=s, company_id=KEY, now=T)
+    assert (report["used"], report["remaining"]) == (3, 0)
