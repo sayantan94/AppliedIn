@@ -400,6 +400,10 @@ class Ledger:
             if not row:
                 raise OutreachHold("queue_id_not_found")
             deadline = db.execute("SELECT next_not_before FROM email_dispatch WHERE id=1").fetchone()
+            # Corrupt pacing metadata must not break the private repair report.
+            raw_deadline = deadline[0] if deadline else None
+            safe_deadline = (raw_deadline if isinstance(raw_deadline,(int,float))
+                             and math.isfinite(raw_deadline) else 0)
             reason = row["reason"]
             action = ("not_retryable_canceled" if row["state"] == "canceled" else
                       "no_action_smtp_accepted" if row["state"] == "confirmed_smtp_accepted" else
@@ -417,8 +421,7 @@ class Ledger:
                       "wait_for_sender_recheck")
             next_at = (None if row["state"] in
                        {"canceled", "uncertain", "confirmed_smtp_accepted"} else
-                       max(row["next_check_at"],
-                           deadline[0] if deadline and deadline[0] is not None else 0))
+                       max(row["next_check_at"],safe_deadline))
             return {"queue_id": row["id"], "stage": row["stage"],
                     "state": row["state"], "version": row["version"],
                     "reason": reason, "next_check_at": next_at, "next_action": action}
