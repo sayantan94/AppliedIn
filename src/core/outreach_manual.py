@@ -276,14 +276,21 @@ def register_routes(app, settings):
         page, exact published address, immutable approval and private seed.
         """
         checked(request, mutate=True, manual=False)
-        from core.outreach_email import send_approved
-        return guarded(lambda: send_approved(
+        from core.outreach_email import enqueue_first, correct_queue_choice
+        if "queue_id" in body:
+            # Same guarded local endpoint, explicit versioned correction only.
+            return guarded(lambda: correct_queue_choice(
+                settings=settings, queue_id=body.get("queue_id"),
+                expected_version=body.get("expected_version"),
+                expected_state=body.get("expected_state"),
+                variant_id=body.get("variant_id"),
+                owner_no_wire_proved=body.get("owner_no_wire_proved",False)))
+        return guarded(lambda: enqueue_first(
             settings=settings, company_id=body.get("company_id"),
             contact_page_url=body.get("contact_page_url"),
             exact_address=body.get("exact_address"),
-            person_name=body.get("person_name", ""),
-            variant_id=body.get("variant_id"), stores=make_stores(settings),
-            stage=0))
+            person_name=body.get("person_name",""),
+            variant_id=body.get("variant_id")))
 
     @app.post("/outreach/email/confirm-bounce")
     def confirm_bounce(body: dict, request: Request):
@@ -302,9 +309,17 @@ def register_routes(app, settings):
             provider_evidence_confirmed=body.get("provider_evidence_confirmed")))
 
     @app.get("/outreach/report")
-    def report(company_id: str, request: Request):
+    def report(request: Request, company_id: str | None = None,
+               queue_id: str | None = None):
+        if queue_id is not None:
+            checked(request, manual=False)
+            if company_id is not None:
+                raise HTTPException(422,"Choose a queue or social report.")
+            return guarded(lambda: Ledger(settings).queue_status(queue_id))
         checked(request)
-        return guarded(lambda: manual_report(settings=settings, company_id=company_id))
+        if company_id is None:
+            raise HTTPException(422,"Company identifier required.")
+        return guarded(lambda: manual_report(settings=settings,company_id=company_id))
 
     @app.post("/outreach/manual/queue")
     def queue(body: dict, request: Request):
