@@ -714,12 +714,14 @@ def _outreach_sender_loop() -> None:
         settings=get_settings()
         if settings.mode=="local" and settings.outreach_enabled:
             try:
+                # A store construction fault must not strand an already-claimed
+                # queue row without an active sender.
+                stores=make_stores(settings)
                 ledger=Ledger(settings)
                 item=ledger.claim_queue()
                 if item is not None:
                     send_approved(settings=settings,queue_id=item["id"],
-                                  owner_token=item["owner_token"],
-                                  stores=make_stores(settings))
+                                  owner_token=item["owner_token"],stores=stores)
             except Exception:
                 # No claim stealing or uncertain replay: state remains in ledger.
                 log.warning("outreach sender held; inspect local private queue status")
