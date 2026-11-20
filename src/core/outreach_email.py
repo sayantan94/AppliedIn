@@ -212,124 +212,264 @@ def verified_funding_fact(settings, lead, now):
         raise OutreachHold("verified_private_funding_fact_required") from exc
 
 
-def send_approved(*, settings, company_id, contact_page_url, exact_address,
-                  person_name, variant_id, stores, stage=0, now=None,
-                  smtp_factory=None, expand_followups=False):
-    """Synchronous guarded first/follow-up send; never invoked by default.
+def _stage_variant_id(settings, stage, contact):
+    """Exact owner-configured named/team choice; never use legacy shared ID."""
+    if not isinstance(stage,int) or not 1<=stage<=5:
+        raise OutreachHold("followup_stage_invalid")
+    try:
+        mapping = json.loads(getattr(settings,"outreach_followup_stage_variants","") or "{}")
+        if not isinstance(mapping,dict) or any(
+                key not in {str(i) for i in range(1,6)} or
+                not isinstance(v,dict) or set(v)!={"named","team"} or
+                not all(isinstance(x,str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}",x)
+                        for x in v.values())
+                for key,v in mapping.items()):
+            raise ValueError
+        ids = [v[k] for v in mapping.values() for k in ("named","team")]
+        if len(ids)!=len(set(ids)):
+            raise ValueError
+    except (ValueError,TypeError,AttributeError) as exc:
+        raise OutreachHold("followup_stage_mapping_invalid") from exc
+    is_org = contact.kind == "organization" and contact.person_key == "org" and not contact.name
+    if not is_org and (contact.kind!="person" or not contact.name):
+        raise OutreachHold("verified_named_or_organizational_contact_required")
+    choice = mapping.get(str(stage),{}).get("team" if is_org else "named")
+    if not choice:
+        raise OutreachHold("followup_stage_approved_choice_missing")
+    return choice
 
-    The caller cannot supply pre-approved arbitrary body, résumé PDF, or a
-    pre-accepted contact object; each is revalidated here. No tracking pixel.
-    """
+
+def enqueue_first(*, settings, company_id, contact_page_url, exact_address,
+                  person_name, variant_id, now=None):
+    """Protected local producer: proves contact/approval then only enqueues."""
     now = now or datetime.now(UTC)
-    if settings.mode != "local" or not settings.outreach_enabled:
-        raise OutreachHold("outreach_disabled_or_not_local")
-    sender = _sender(settings)
-    lead = read_no_opening(settings, company_id, now=now)
-    url, contact_html = _official_page(settings, contact_page_url, now)
-    contact = verify_published_contact(company_domain=lead.domain, source_url=url,
-                                        html=contact_html, address=exact_address, name=person_name)
-    linkedin = read_linkedin(settings, company_id=lead.company_id,
-                             company_name=lead.name, company_domain=lead.domain)
-    if not company_application_clear(stores, lead):
-        raise OutreachHold("existing_company_application")
-    kind = "first" if stage == 0 else "followup"
-    variant = approved_variant(settings, variant_id, kind)
-    fact = (verified_funding_fact(settings, lead, now)
-            if "{funding_fact}" in (variant.get("subject", "") + variant.get("body", ""))
-            else "")
-    subject, body = render_approved(variant, lead, contact, funding_fact=fact)
-    pdf = original_seed_pdf(settings)
+    lead = read_no_opening(settings,company_id,now=now)
+    url,markup = _official_page(settings,contact_page_url,now)
+    contact = verify_published_contact(company_domain=lead.domain,source_url=url,
+                                       html=markup,address=exact_address,name=person_name)
+    variant = approved_variant(settings,variant_id,"first")
+    # Reject no-name placeholders and unapproved dynamic slots at enqueue.
+    fact = (verified_funding_fact(settings,lead,now)
+            if "{funding_fact}" in (variant["subject"]+variant["body"]) else "")
+    render_approved(variant,lead,contact,funding_fact=fact)
+    return Ledger(settings).enqueue_email(lead,contact,stage=0,
+        variant_id=variant["id"],digest=variant["sha256"],now=now)
+
+
+def enqueue_due_followup(*, settings, candidate, now=None):
+    """Candidate originates from the definitively accepted prior stage only."""
+    now = now or datetime.now(UTC)
+    lead = read_no_opening(settings,candidate["company_id"],now=now,require_fresh=False)
+    person = candidate["person_key"]
+    org = person == "org"
+    contact = VerifiedRecipient(
+        candidate["recipient"],person,candidate["person_name"],
+        "organization" if org else "person",candidate["contact_url"])
+    reason = ""
+    choice = digest = None
+    try:
+        choice = _stage_variant_id(settings,candidate["stage"],contact)
+        variant = approved_variant(settings,choice,"followup")
+        if not contact.name and "{first_name}" in (variant["subject"]+variant["body"]):
+            raise OutreachHold("verified_name_or_approved_team_variant_required")
+        digest = variant["sha256"]
+    except OutreachHold as exc:
+        choice = digest = None
+        reason = str(exc)
+    return Ledger(settings).enqueue_email(
+        lead,contact,stage=candidate["stage"],variant_id=choice,digest=digest,
+        reason=reason,now=now)
+
+
+def correct_queue_choice(*, settings, queue_id, expected_version,
+                         expected_state, variant_id, owner_no_wire_proved=False):
+    """Existing guarded POST mode; no send, new intent or automatic substitution."""
     ledger = Ledger(settings)
-    ticket = ledger.reserve_email(
-        lead, contact, linkedin, no_application=True, resume_seed_proved=True,
-        sender_proved=True, variant=variant["id"], digest=variant["sha256"],
-        stage=stage, now=now, expanded_followups=expand_followups)
-    image_url, tracking_mode = "", "not_tracked"
+    q = ledger.queue_intent(queue_id)
+    contact = VerifiedRecipient(q["recipient"],q["person_key"],q["contact_name"],
+        "organization" if q["person_key"]=="org" else "person",q["contact_url"])
+    if q["stage"]>0 and _stage_variant_id(settings,q["stage"],contact)!=variant_id:
+        raise OutreachHold("stage_specific_owner_choice_required")
+    item = approved_variant(settings,variant_id,
+                            "first" if q["stage"]==0 else "followup")
+    if not contact.name and "{first_name}" in (item["subject"]+item["body"]):
+        raise OutreachHold("verified_name_or_approved_team_variant_required")
+    return ledger.repair_queue(queue_id,expected_version=expected_version,
+        expected_state=expected_state,variant_id=item["id"],digest=item["sha256"],
+        owner_no_wire_proved=owner_no_wire_proved)
+
+
+def _current_time(now, clock):
+    instant = clock() if clock is not None else (now or datetime.now(UTC))
+    if not isinstance(instant,datetime) or instant.tzinfo is None:
+        raise OutreachHold("timezone_required")
+    return instant.astimezone(UTC)
+
+
+def _safe_recheck_reason(exc):
+    if isinstance(exc,OutreachHold):
+        return str(exc)
+    if isinstance(exc,ContactHold):
+        return "verified_contact_recheck_required"
+    return "source_or_preflight_recheck_required"
+
+
+def _terminal_stop(exc):
+    return isinstance(exc,OutreachHold) and str(exc) in {
+        "recorded_company_or_recipient_stop","existing_company_application",
+        "cross_channel_person_already_reserved_or_contacted",
+        "linkedin_already_contacted_person"}
+
+
+def send_approved(*, settings, queue_id, owner_token, stores,
+                  now=None, clock=None, smtp_factory=None, gap_rng=None):
+    """Worker-only SMTP: durable claim, linked reserve, global final handoff.
+
+    Direct unqueued sends no longer exist. Real SMTP occurs only after the
+    shared SQLite fence commits; no SQLite transaction spans transport.
+    """
+    ledger = Ledger(settings)
+    q = ledger.queue_intent(queue_id)
+    if (q["state"]!="claimed" or not owner_token
+            or q["owner_token"]!=owner_token or q["attempt_id"] is not None):
+        raise OutreachHold("queue_sender_claim_required")
+    ticket = None
+    handed_off = False
+    stage = q["stage"]
+    kind = "first" if stage==0 else "followup"
     try:
-        image_url, tracking_mode = register_pixel(settings, ledger, ticket["id"])
-    except (OSError, ValueError):
-        # The optional tracker must never prevent an otherwise safe message.
-        image_url, tracking_mode = "", "not_tracked"
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["Reply-To"] = sender
-    msg["To"] = contact.address
-    msg["Subject"] = subject
-    msg["Message-ID"] = ticket["message_id"]
-    if ticket["in_reply_to"]:
-        msg["In-Reply-To"] = ticket["in_reply_to"]
-        msg["References"] = " ".join(ticket["references"])
-    msg.set_content(body)
-    if image_url and pixel_base(settings) == image_url.split("/o/", 1)[0]:
-        # Only a private, enabled message gets an opaque image link. No
-        # identifiers are embedded in the URL, body or public log messages.
-        html_body = '<div style="white-space:pre-wrap">' + html.escape(body) + '</div>'
-        msg.add_alternative(html_body + '<img src="' + image_url +
-                            '" width="1" height="1" alt="" />', subtype="html")
-    else:
-        image_url, tracking_mode = "", "not_tracked"
-        ledger.disable_pixel(ticket["id"])
-    msg.add_attachment(pdf, maintype="application", subtype="pdf",
-                       filename="resume.pdf")
-    try:
-        # Always acquire fresh source and independent read-only LinkedIn state
-        # immediately before attempting the external commit.
-        # A slow contact-page fetch must not smuggle an old poll/source
-        # timestamp past the immediate pre-SMTP boundary. Injected fake SMTP
-        # keeps the explicitly supplied frozen clock for offline tests only.
-        prewire_now = datetime.now(UTC) if smtp_factory is None else now
-        current = read_no_opening(settings, company_id, now=prewire_now)
-        if current != lead:
-            raise OutreachHold("funding_identity_changed_before_wire")
-        latest_linkedin = read_linkedin(
-            settings, company_id=lead.company_id,
-            company_name=lead.name, company_domain=lead.domain)
-        if (contact.person_key in latest_linkedin.people
-                or ledger.report(lead.company_id, latest_linkedin)["used"] > 3):
-            raise OutreachHold("linkedin_duplicate_or_capacity_changed_before_wire")
-        if not company_application_clear(stores, lead):
+        current = _current_time(now,clock)
+        ledger._window(current)
+        ledger._stage_enabled(stage)
+        sender = _sender(settings)
+        lead = read_no_opening(settings,q["company_id"],now=current)
+        url,markup = _official_page(settings,q["contact_url"],current)
+        contact = verify_published_contact(
+            company_domain=lead.domain,source_url=url,html=markup,
+            address=q["recipient"],name=q["contact_name"])
+        if (contact.person_key!=q["person_key"] or contact.address!=q["recipient"]
+                or contact.evidence_url!=q["contact_url"]):
+            raise OutreachHold("queue_verified_contact_changed")
+        if stage>0 and _stage_variant_id(settings,stage,contact)!=q["selected_variant"]:
+            raise OutreachHold("stage_variant_mapping_changed_requires_owner_choice")
+        variant = approved_variant(settings,q["selected_variant"],kind)
+        if variant["sha256"]!=q["selected_digest"]:
+            raise OutreachHold("frozen_stage_approval_changed_requires_owner_choice")
+        fact = (verified_funding_fact(settings,lead,current)
+                if "{funding_fact}" in (variant["subject"]+variant["body"]) else "")
+        logical_subject,body = render_approved(variant,lead,contact,funding_fact=fact)
+        pdf = original_seed_pdf(settings)
+        linkedin = read_linkedin(settings,company_id=lead.company_id,
+                                 company_name=lead.name,company_domain=lead.domain)
+        if not company_application_clear(stores,lead):
             raise OutreachHold("existing_company_application")
-        # Approval and resume are mutable private files, even though a
-        # previously approved version/digest is immutable. Do not send a stale
-        # rendered message if either approval or original seed changed during
-        # the guarded contact lookup.
-        if (approved_variant(settings, variant_id, kind)["sha256"] != variant["sha256"]
-                or original_seed_pdf(settings) != pdf):
+        # Complete all slow source/contact/approval/seed reads before the
+        # reservation and final atomic SMTP handoff.
+        prewire = _current_time(now,clock)
+        current_lead = read_no_opening(settings,q["company_id"],now=prewire)
+        fresh_url,fresh_html = _official_page(settings,q["contact_url"],prewire)
+        fresh_contact = verify_published_contact(
+            company_domain=current_lead.domain,source_url=fresh_url,html=fresh_html,
+            address=q["recipient"],name=q["contact_name"])
+        fresh_linkedin = read_linkedin(settings,company_id=lead.company_id,
+            company_name=lead.name,company_domain=lead.domain)
+        if current_lead!=lead or fresh_contact!=contact:
+            raise OutreachHold("source_or_contact_changed_before_wire")
+        if (contact.person_key in fresh_linkedin.people or
+                ledger.report(lead.company_id,fresh_linkedin)["used"]>3):
+            raise OutreachHold("linkedin_duplicate_or_capacity_changed_before_wire")
+        if not company_application_clear(stores,lead):
+            raise OutreachHold("existing_company_application")
+        if (approved_variant(settings,q["selected_variant"],kind)["sha256"]!=variant["sha256"]
+                or original_seed_pdf(settings)!=pdf):
             raise OutreachHold("approved_variant_or_resume_changed_before_wire")
-        if fact and verified_funding_fact(settings, current, prewire_now) != fact:
+        if stage>0 and _stage_variant_id(settings,stage,contact)!=q["selected_variant"]:
+            raise OutreachHold("stage_variant_mapping_changed_requires_owner_choice")
+        if fact and verified_funding_fact(settings,lead,prewire)!=fact:
             raise OutreachHold("verified_funding_fact_changed_before_wire")
-        ledger.begin_wire(ticket["id"], source_checked=True, no_application=True,
-                          linkedin_checked=True, now=prewire_now)
+        ticket = ledger.reserve_email(lead,contact,fresh_linkedin,no_application=True,
+            resume_seed_proved=True,sender_proved=True,variant=variant["id"],
+            digest=variant["sha256"],stage=stage,now=prewire,
+            expanded_followups=getattr(settings,"outreach_followups_expanded",False),
+            queue_id=queue_id,owner_token=owner_token,
+            root_subject=logical_subject if stage==0 else None)
+        # The root is persisted on the original stage-0 attempt, not inferred
+        # from serialized or folded MIME headers or the follow-up template.
+        subject = logical_subject if stage==0 else "Re: "+ticket["root_subject"]
+        image_url,tracking_mode = "","not_tracked"
+        try:
+            image_url,tracking_mode = register_pixel(settings,ledger,ticket["id"])
+        except (OSError,ValueError):
+            image_url,tracking_mode = "","not_tracked"
+        msg = EmailMessage()
+        msg["From"] = sender
+        msg["Reply-To"] = sender
+        msg["To"] = contact.address
+        msg["Subject"] = subject
+        msg["Message-ID"] = ticket["message_id"]
+        if ticket["in_reply_to"]:
+            msg["In-Reply-To"] = ticket["in_reply_to"]
+            msg["References"] = " ".join(ticket["references"])
+        msg.set_content(body)
+        if image_url and pixel_base(settings)==image_url.split("/o/",1)[0]:
+            msg.add_alternative(
+                '<div style="white-space:pre-wrap">'+html.escape(body)+'</div>'+
+                '<img src="'+image_url+'" width="1" height="1" alt="" />',
+                subtype="html")
+        else:
+            tracking_mode="not_tracked"
+            ledger.disable_pixel(ticket["id"])
+        msg.add_attachment(pdf,maintype="application",subtype="pdf",filename="resume.pdf")
+        tls_context = ssl.create_default_context()
+        # The final transaction rechecks the current clock/window, stops,
+        # inbound poll and follow-up flags, and persists the global fence.
+        handoff = _current_time(now,clock)
+        ledger.begin_wire(ticket["id"],source_checked=True,no_application=True,
+                          linkedin_checked=True,now=handoff,gap_rng=gap_rng)
+        handed_off = True
+    except Exception as exc:
+        if ticket is None:
+            ledger.release_claim(queue_id,owner_token,_safe_recheck_reason(exc),
+                                 cancel=_terminal_stop(exc),now=_current_time(now,clock))
+        elif not handed_off:
+            # begin_wire never committed: positively proven no SMTP transport.
+            ledger.definite_no_wire(ticket["id"])
+        raise
+    # No source/network/PDF/template I/O after the durable final handoff.
+    try:
+        ledger._stage_enabled(stage)
+        ledger._window(_current_time(now,clock))
+        if settings.mode!="local" or not settings.outreach_enabled:
+            raise OutreachHold("outreach_disabled_or_not_local")
     except Exception:
-        # Only reserved/pre-wire state is provably no-wire here.
-        ledger.definite_no_wire(ticket["id"])
+        # Nothing has touched SMTP yet, including connection construction.
+        ledger.abort_handoff_before_transport(ticket["id"],owner_token,
+                                               now=_current_time(now,clock))
         raise
     try:
-        factory = smtp_factory
-        if factory is None:
-            factory = smtplib.SMTP_SSL if settings.outreach_smtp_port == 465 else smtplib.SMTP
-        if settings.outreach_smtp_port == 465:
-            connection_context = factory(settings.outreach_smtp_host,
-                                         settings.outreach_smtp_port, timeout=20,
-                                         context=ssl.create_default_context())
+        factory = smtp_factory or (smtplib.SMTP_SSL if settings.outreach_smtp_port==465
+                                   else smtplib.SMTP)
+        if settings.outreach_smtp_port==465:
+            connection_context=factory(settings.outreach_smtp_host,
+                                       settings.outreach_smtp_port,timeout=20,
+                                       context=tls_context)
         else:
-            connection_context = factory(settings.outreach_smtp_host,
-                                         settings.outreach_smtp_port, timeout=20)
+            connection_context=factory(settings.outreach_smtp_host,
+                                       settings.outreach_smtp_port,timeout=20)
         with connection_context as connection:
-            if settings.outreach_smtp_port == 587:
+            if settings.outreach_smtp_port==587:
                 connection.ehlo()
-                connection.starttls(context=ssl.create_default_context())
+                connection.starttls(context=tls_context)
                 connection.ehlo()
             connection.login(settings.outreach_smtp_username,
                              settings.outreach_smtp_password)
-            refused = connection.send_message(msg, from_addr=sender,
-                                              to_addrs=[contact.address])
+            refused=connection.send_message(msg,from_addr=sender,to_addrs=[contact.address])
             if refused:
-                # A partial/misleading acknowledgement is not proven no-wire.
                 raise OutreachHold("smtp_recipient_not_definitively_accepted")
     except Exception as exc:
-        ledger.finish_wire(ticket["id"], accepted=False)
+        ledger.finish_wire(ticket["id"],accepted=False,now=_current_time(now,clock))
         raise OutreachHold("smtp_wire_outcome_uncertain_reconcile_manually") from exc
-    ledger.finish_wire(ticket["id"], accepted=True)
-    return {"attempt_id":ticket["id"], "state":"confirmed_smtp_accepted",
-            "tracking":tracking_mode, "variant":variant["id"]}
+    ledger.finish_wire(ticket["id"],accepted=True,now=_current_time(now,clock))
+    return {"attempt_id":ticket["id"],"queue_id":queue_id,
+            "state":"confirmed_smtp_accepted","tracking":tracking_mode,
+            "variant":variant["id"]}
