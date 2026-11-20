@@ -575,3 +575,26 @@ def _run_discovery(only: list[str] | None, profile_id: str,
 
 def handler(event, context):  # noqa: ANN001 - Lambda signature (cloud cron)
     return run_discovery()
+
+
+def funded_apply_role_payload(settings, company_id: str, identity: dict,
+                              source_url: str, meta: dict, *, now=None) -> dict:
+    """Verified #386 -> *existing* apply-role POST, never a new worker/Submit lane.
+
+    Caller must derive `identity` from the posting URL and `meta` from the
+    existing source-verifying JD reader. The live POST repeats this verification
+    before it creates a tracked row or starts the ordinary scoring workflow.
+    No relevance waiver or actual HTTP/application send is performed here.
+    """
+    from core.outreach_sources import verify_funded_application_route
+
+    lead = verify_funded_application_route(
+        settings, company_id, identity, source_url, meta, now=now)
+    return {
+        "method": "POST", "path": "/actions/apply-role",
+        "body": {
+            "url": source_url, "funded_company_id": lead.company_id,
+            "discovery_source": "funded_no_opening",
+        },
+        "verified_employer": lead.name,
+    }

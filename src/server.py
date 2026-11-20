@@ -789,6 +789,8 @@ def create_app() -> FastAPI:
     from discovery.cosign_api import router as cosign_router
     app.include_router(cosign_router)
     settings = get_settings()
+    from core.outreach_manual import register_routes as register_outreach_routes
+    register_outreach_routes(app, settings)
     from tools import submit_review
 
     @app.get("/steering")
@@ -2122,6 +2124,9 @@ def create_app() -> FastAPI:
         from core.models import JobRecord
         from tools import jd, posting_guard as pg
 
+        funded_tag = (body or {}).get("discovery_source") == "funded_no_opening"
+        if (body or {}).get("discovery_source") not in (None, "", "funded_no_opening"):
+            return {"ok": False, "error": "unsupported_discovery_source"}
         url = ((body or {}).get("url") or "").strip()
         if url and not url.lower().startswith(("http://", "https://")):
             url = "https://" + url
@@ -2130,6 +2135,21 @@ def create_app() -> FastAPI:
         identity = _manual_role_identity(url)
         if not identity:
             return {"ok": False, "error": "posting_identity_unresolved"}
+        # The vendor tenant/domain label is a URL identity, not necessarily
+        # the verified employer's displayed name. Use #386's exact identity
+        # for tracking, but keep the parsed tenant as independent evidence for
+        # the later source-verifying gate.
+        parsed_identity = identity
+        funded_lead = None
+        if funded_tag:
+            from core.outreach_sources import SourceHold, read_no_opening
+            try:
+                funded_lead = read_no_opening(
+                    settings, (body or {}).get("funded_company_id"),
+                    require_fresh=False)
+            except SourceHold as exc:
+                return {"ok": False, "error": str(exc)}
+            identity = {**identity, "company": funded_lead.name}
         stores = make_stores(settings)
         row, ambiguous = _manual_existing_role(stores.tracking, identity, url)
         if ambiguous:
@@ -2169,6 +2189,19 @@ def create_app() -> FastAPI:
                  or (row or {}).get("title") or "Role from URL")
         if not isinstance(title, str):
             return {"ok": False, "error": "posting_title_invalid"}
+        if funded_tag:
+            from core.outreach_sources import SourceHold
+            from discovery.career_ops import funded_apply_role_handoff
+            try:
+                funded_apply_role_handoff(
+                    settings, (body or {}).get("funded_company_id"),
+                    parsed_identity, read_url, meta)
+            except SourceHold as exc:
+                return {"ok": False, "error": str(exc)}
+            if row and company.casefold() not in {
+                    funded_lead.name.casefold(),
+                    *(alias.casefold() for alias in funded_lead.aliases)}:
+                return {"ok": False, "error": "funded_existing_employer_mismatch"}
 
         if row:
             if not _commit_manual_posting(pk, stores, meta):
@@ -2188,7 +2221,8 @@ def create_app() -> FastAPI:
         job = JobRecord(company=company, job_id=identity["job_id"], title=title,
                         jd_url=read_url, jd_text=pending["text"],
                         posting_guard=pending["posting_guard"], ats=identity["ats"],
-                        posted_at=meta.get("posted_at") or "")
+                        posted_at=meta.get("posted_at") or "",
+                        discovery_source="funded_no_opening" if funded_tag else "")
         pk = job.pk
         if not stores.tracking.put_new(job):
             return {"ok": False, "error": "tracking_conflict"}

@@ -257,6 +257,35 @@ class Settings(BaseSettings):
     funding_pending_days: int = 60
     funding_active_days: int = 90
 
+    # #387: all lanes are separate opt-ins and remain operator-local.
+    outreach_enabled: bool = False
+    outreach_timezone: str = "UTC"
+    outreach_sender: str = ""
+    outreach_sender_authorized: bool = False
+    outreach_inbound_verified: bool = False
+    outreach_linkedin_path: str = ""
+    outreach_linkedin_fields: str = ""
+    outreach_approvals_file: str = "outreach-approved-templates.json"
+    outreach_funding_fact_manifest: str = ""  # optional private, source-checked
+    outreach_resume_manifest: str = "outreach-resume.json"
+    outreach_smtp_host: str = ""
+    outreach_smtp_port: int = 465
+    outreach_smtp_username: str = ""
+    outreach_smtp_password: str = ""
+    outreach_dsn_sender_addresses: str = ""
+    outreach_provider_dsn_verified: bool = False
+    outreach_followup_variant_id: str = ""
+    outreach_followups_auto: bool = False
+    outreach_followups_expanded: bool = False
+    outreach_manual_enabled: bool = False
+    outreach_application_handoff_enabled: bool = False
+    outreach_pixel_enabled: bool = False
+    outreach_pixel_healthy: bool = False
+    # Operator evidence: suppress token-bearing request URIs in ALL ingress logs.
+    outreach_pixel_ingress_logs_safe: bool = False
+    outreach_pixel_base: str = ""
+    outreach_pixel_loopback_port: int = 0
+
     aws_region: str = "us-east-1"
 
 

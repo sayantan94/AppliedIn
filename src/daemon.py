@@ -684,6 +684,70 @@ def _start_funding_poller(settings=None) -> bool:
     return True
 
 
+
+def _outreach_followup_loop() -> None:
+    """Opt-in local email-only schedule; every send still passes guards."""
+    from core.config import get_settings
+    from core.outreach_ledger import Ledger, OutreachHold
+    from core.outreach_email import send_approved
+
+    while True:
+        settings = get_settings()
+        if (settings.mode == "local" and settings.outreach_enabled
+                and settings.outreach_followups_auto):
+            try:
+                ledger = Ledger(settings)
+                stores = make_stores(settings)
+                if settings.outreach_followup_variant_id:
+                    for item in ledger.due_followups(limit=5):
+                        try:
+                            send_approved(
+                                settings=settings, company_id=item["company_id"],
+                                contact_page_url=item["contact_url"],
+                                exact_address=item["recipient"], person_name=item["person_name"],
+                                variant_id=settings.outreach_followup_variant_id,
+                                stores=stores, stage=item["stage"],
+                                expand_followups=settings.outreach_followups_expanded)
+                        except (OutreachHold, ValueError, OSError):
+                            log.warning("outreach follow-up held for operator review")
+            except Exception:
+                log.warning("outreach scheduler held; check private configuration")
+        time.sleep(300)
+
+
+def _start_outreach_followups(settings=None) -> bool:
+    from core.config import get_settings
+    from core.outreach_ledger import Ledger
+
+    settings = settings or get_settings()
+    if settings.mode != "local" or not settings.outreach_enabled:
+        return False
+    # Reconcile crash-orphan states even if automatic follow-ups are disabled.
+    Ledger(settings).hold_orphaned_attempts()
+    if not settings.outreach_followups_auto:
+        return False
+    threading.Thread(target=_outreach_followup_loop, daemon=True,
+                     name="outreach-followups").start()
+    return True
+
+
+def _start_outreach_pixel(settings=None) -> bool:
+    """Only an explicitly enabled operator-verified separate loopback service."""
+    from core.config import get_settings
+    from core.outreach_tracking import pixel_base, serve_pixel
+
+    settings = settings or get_settings()
+    if pixel_base(settings) is None:
+        return False
+    port = getattr(settings, "outreach_pixel_loopback_port", 0)
+    if type(port) is not int or not 1024 <= port <= 65535:
+        log.warning("outreach pixel disabled: dedicated loopback port is missing")
+        return False
+    threading.Thread(target=serve_pixel, args=(settings,), daemon=True,
+                     name="outreach-pixel-only").start()
+    return True
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
@@ -707,6 +771,8 @@ def main() -> None:
     from core.config import get_settings
     _start_imap_poller(stores, get_settings())
     _start_funding_poller(get_settings())
+    _start_outreach_followups(get_settings())
+    _start_outreach_pixel(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
         serve(port=WEB_PORT)

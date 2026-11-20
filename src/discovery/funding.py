@@ -1168,6 +1168,8 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
             state.count(row["source"], "added", now)
         else:
             row["reason"] = reason
+            if reason in {"no_openings", "no_relevant_openings"}:
+                row["last_successful_no_opening_recheck_at"] = now.isoformat()
             row["next_check"] = (now + timedelta(
                 days=settings.funding_recheck_days)).isoformat()
             if key in state.data["deals"]:
