@@ -259,7 +259,6 @@ def enqueue_first(*, settings, company_id, contact_page_url, exact_address,
 def enqueue_due_followup(*, settings, candidate, now=None):
     """Candidate originates from the definitively accepted prior stage only."""
     now = now or datetime.now(UTC)
-    lead = read_no_opening(settings,candidate["company_id"],now=now,require_fresh=False)
     person = candidate["person_key"]
     org = person == "org"
     contact = VerifiedRecipient(
@@ -276,9 +275,8 @@ def enqueue_due_followup(*, settings, candidate, now=None):
     except OutreachHold as exc:
         choice = digest = None
         reason = str(exc)
-    return Ledger(settings).enqueue_email(
-        lead,contact,stage=candidate["stage"],variant_id=choice,digest=digest,
-        reason=reason,now=now)
+    return Ledger(settings).enqueue_due_from_accepted(
+        candidate,variant_id=choice,digest=digest,reason=reason,now=now)
 
 
 def correct_queue_choice(*, settings, queue_id, expected_version,
