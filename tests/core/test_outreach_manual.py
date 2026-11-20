@@ -155,6 +155,9 @@ def test_csrf_host_origin_and_loopback_required_without_network(tmp_path, monkey
             csrf = token_response.json()["csrf"]
             assert (await client.get("/outreach/csrf", headers={
                 "Host": "evil.example"})).status_code == 403
+            # Correct loopback name but wrong listener port must also fail.
+            assert (await client.get("/outreach/csrf", headers={
+                "Host": "127.0.0.1:8789"})).status_code == 403
             body = {"company_id":KEY, "target_id":"synthetic", "version":1}
             assert (await client.post("/outreach/manual/copy", json=body)).status_code == 403
             wrong = {"Origin":"http://evil.example", "X-Outreach-CSRF":csrf}
