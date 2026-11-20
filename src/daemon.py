@@ -686,32 +686,43 @@ def _start_funding_poller(settings=None) -> bool:
 
 
 def _outreach_followup_loop() -> None:
-    """Opt-in local email-only schedule; every send still passes guards."""
+    """At most one newly due, unqueued stage per 300-second tick; never SMTP."""
     from core.config import get_settings
-    from core.outreach_ledger import Ledger, OutreachHold
+    from core.outreach_ledger import Ledger
+    from core.outreach_email import enqueue_due_followup
+
+    while True:
+        settings=get_settings()
+        if (settings.mode=="local" and settings.outreach_enabled
+                and settings.outreach_followups_auto):
+            try:
+                ledger=Ledger(settings)
+                for candidate in ledger.due_followups(limit=1):
+                    enqueue_due_followup(settings=settings,candidate=candidate)
+            except Exception:
+                log.warning("outreach follow-up enqueue held; check private queue status")
+        time.sleep(300)
+
+
+def _outreach_sender_loop() -> None:
+    """Only active SMTP owner. SQLite globally fences even a second process."""
+    from core.config import get_settings
+    from core.outreach_ledger import Ledger
     from core.outreach_email import send_approved
 
     while True:
-        settings = get_settings()
-        if (settings.mode == "local" and settings.outreach_enabled
-                and settings.outreach_followups_auto):
+        settings=get_settings()
+        if settings.mode=="local" and settings.outreach_enabled:
             try:
-                ledger = Ledger(settings)
-                stores = make_stores(settings)
-                if settings.outreach_followup_variant_id:
-                    for item in ledger.due_followups(limit=5):
-                        try:
-                            send_approved(
-                                settings=settings, company_id=item["company_id"],
-                                contact_page_url=item["contact_url"],
-                                exact_address=item["recipient"], person_name=item["person_name"],
-                                variant_id=settings.outreach_followup_variant_id,
-                                stores=stores, stage=item["stage"],
-                                expand_followups=settings.outreach_followups_expanded)
-                        except (OutreachHold, ValueError, OSError):
-                            log.warning("outreach follow-up held for operator review")
+                ledger=Ledger(settings)
+                item=ledger.claim_queue()
+                if item is not None:
+                    send_approved(settings=settings,queue_id=item["id"],
+                                  owner_token=item["owner_token"],
+                                  stores=make_stores(settings))
             except Exception:
-                log.warning("outreach scheduler held; check private configuration")
+                # No claim stealing or uncertain replay: state remains in ledger.
+                log.warning("outreach sender held; inspect local private queue status")
         time.sleep(300)
 
 
@@ -719,15 +730,17 @@ def _start_outreach_followups(settings=None) -> bool:
     from core.config import get_settings
     from core.outreach_ledger import Ledger
 
-    settings = settings or get_settings()
-    if settings.mode != "local" or not settings.outreach_enabled:
+    settings=settings or get_settings()
+    if settings.mode!="local" or not settings.outreach_enabled:
         return False
-    # Reconcile crash-orphan states even if automatic follow-ups are disabled.
+    # Only pre-queue legacy orphan handling. Queue-linked live owners are never
+    # assumed dead by a concurrent startup or elapsed lease.
     Ledger(settings).hold_orphaned_attempts()
-    if not settings.outreach_followups_auto:
-        return False
-    threading.Thread(target=_outreach_followup_loop, daemon=True,
-                     name="outreach-followups").start()
+    threading.Thread(target=_outreach_sender_loop,daemon=True,
+                     name="outreach-queued-sender").start()
+    # Always start a gated producer so a later enabled flag is observed.
+    threading.Thread(target=_outreach_followup_loop,daemon=True,
+                     name="outreach-followup-enqueue").start()
     return True
 
 
