@@ -52,7 +52,7 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     from core.outreach_contacts import LinkedInSnapshot
     from core.outreach_ledger import Ledger
     from datetime import timedelta
-    when = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    when = datetime(2026, 11, 20, 10, tzinfo=UTC)
     lead = FundedNoOpening("a"*32, "Example Co", "example-co.com",
                            "https://example-co.com", (), "synthetic", when, "no_openings")
     contact = VerifiedRecipient("test@example-co.com", "name:test user", "Test User",
@@ -78,7 +78,7 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     source_count = [0]
     def read_source(*args, **kwargs):
         source_count[0] += 1
-        if collision_after_lookup and source_count[0] > 1:
+        if collision_after_lookup and source_count[0] > 2:
             from dataclasses import replace
             return replace(lead, homepage="https://changed.example-co.com")
         return lead
@@ -91,7 +91,8 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     monkeypatch.setattr(mail, "verify_published_contact", lambda **kwargs: contact)
     monkeypatch.setattr(mail, "company_application_clear", lambda *args: True)
     monkeypatch.setattr(mail, "approved_variant", lambda *args: {
-        "id": "synthetic-v1", "sha256": "a"*64})
+        "id":"synthetic-v1","sha256":"a"*64,
+        "subject":"Hello","body":"Synthetic approved email.","role_family":"PM"})
     def fake_render_approved(_variant, _lead, _contact, *, funding_fact=""):
         # The no-fact SMTP fixture must accept the same keyword-only
         # rendering contract as production. Any invented fact is a failure.
@@ -103,10 +104,28 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     return s, when, FakeSMTP, calls
 
 
+def _send_fake(mail, **kwargs):
+    """All fake SMTP regressions use the persisted queue, never direct sends."""
+    from core.outreach_ledger import Ledger
+    settings=kwargs["settings"]
+    now=kwargs["now"]
+    intent=mail.enqueue_first(
+        settings=settings,company_id=kwargs["company_id"],
+        contact_page_url=kwargs["contact_page_url"],
+        exact_address=kwargs["exact_address"],person_name=kwargs["person_name"],
+        variant_id=kwargs["variant_id"],now=now)
+    assert intent["state"]=="queued"
+    claim=Ledger(settings).claim_queue(now=now)
+    assert claim is not None and claim["id"]==intent["queue_id"]
+    return mail.send_approved(
+        settings=settings,queue_id=claim["id"],owner_token=claim["owner_token"],
+        stores=kwargs["stores"],now=now,smtp_factory=kwargs["smtp_factory"])
+
+
 def test_fake_smtp_uses_persisted_message_id_and_zero_pixel(tmp_path, monkeypatch):
     from core import outreach_email as mail
     s, now, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32, contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
         variant_id="synthetic-v1", stores=object(), now=now,
@@ -125,8 +144,8 @@ def test_changed_funding_identity_blocks_fake_smtp_before_wire(tmp_path, monkeyp
     from core import outreach_email as mail
     s, now, factory, calls = _mail_fake_setup(
         tmp_path, monkeypatch, collision_after_lookup=True)
-    with pytest.raises(OutreachHold, match="funding_identity_changed"):
-        mail.send_approved(
+    with pytest.raises(OutreachHold, match="source_or_contact_changed_before_wire"):
+        _send_fake(mail,
             settings=s, company_id="a"*32,
             contact_page_url="https://example-co.com/team",
             exact_address="test@example-co.com", person_name="Test User",
@@ -141,16 +160,18 @@ def test_owner_approval_change_before_wire_blocks_fake_smtp(tmp_path, monkeypatc
     approvals = [0]
     def mutable_approval(*_args):
         approvals[0] += 1
-        return {"id": "synthetic-v1", "sha256": ("a" if approvals[0] == 1 else "b") * 64}
+        return {"id":"synthetic-v1",
+                "sha256":("a" if approvals[0] <= 2 else "b")*64,
+                "subject":"Hello","body":"Synthetic approved email.","role_family":"PM"}
     monkeypatch.setattr(mail, "approved_variant", mutable_approval)
     with pytest.raises(OutreachHold, match="approved_variant_or_resume_changed_before_wire"):
-        mail.send_approved(
+        _send_fake(mail,
             settings=s, company_id="a"*32,
             contact_page_url="https://example-co.com/team",
             exact_address="test@example-co.com", person_name="Test User",
             variant_id="synthetic-v1", stores=object(), now=now,
             smtp_factory=factory)
-    assert approvals[0] == 2
+    assert approvals[0] == 3
     assert not calls
 
 
@@ -186,7 +207,7 @@ def test_fake_smtp_optional_pixel_only_with_operator_safe_ingress(tmp_path, monk
     monkeypatch.setattr(mail, "render_approved",
                         lambda *_args, **_kwargs: (
                             "Hello", 'Synthetic <tag> & "body"'))
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32,
         contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
@@ -219,7 +240,7 @@ def test_pixel_ingress_unverified_still_sends_without_tracking(tmp_path, monkeyp
     s.outreach_pixel_healthy = True
     s.outreach_pixel_ingress_logs_safe = False
     s.outreach_pixel_base = "https://pixels.example-co.com"
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32,
         contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
