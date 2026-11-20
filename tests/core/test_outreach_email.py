@@ -182,6 +182,10 @@ def test_fake_smtp_optional_pixel_only_with_operator_safe_ingress(tmp_path, monk
     s.outreach_pixel_healthy = True
     s.outreach_pixel_ingress_logs_safe = True
     s.outreach_pixel_base = "https://pixels.example-co.com"
+    # Pixel HTML must escape approved text rather than interpret it as markup.
+    monkeypatch.setattr(mail, "render_approved",
+                        lambda *_args, **_kwargs: (
+                            "Hello", 'Synthetic <tag> & "body"'))
     result = mail.send_approved(
         settings=s, company_id="a"*32,
         contact_page_url="https://example-co.com/team",
@@ -195,6 +199,9 @@ def test_fake_smtp_optional_pixel_only_with_operator_safe_ingress(tmp_path, monk
     plain = email.get_body(preferencelist=("plain",)).get_content()
     image = email.get_body(preferencelist=("html",)).get_content()
     assert "pixels.example-co.com/o/" not in plain
+    assert 'Synthetic <tag> & "body"' in plain
+    assert "Synthetic &lt;tag&gt; &amp; &quot;body&quot;" in image
+    assert "Synthetic <tag>" not in image
     assert 'src="https://pixels.example-co.com/o/' in image
     assert "test@example-co.com" not in image
     assert email["Message-ID"].startswith("<")
