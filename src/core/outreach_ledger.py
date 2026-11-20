@@ -404,9 +404,15 @@ class Ledger:
             raw_deadline = deadline[0] if deadline else None
             safe_deadline = (raw_deadline if isinstance(raw_deadline,(int,float))
                              and math.isfinite(raw_deadline) else 0)
-            reason = row["reason"]
+            reason = row["reason"] or {
+                "claimed": "sender_claim_owner_unresolved",
+                "reserved": "linked_reserved_no_wire_proof_required",
+                "in_flight": "potential_smtp_wire_unresolved",
+            }.get(row["state"], "")
             action = ("not_retryable_canceled" if row["state"] == "canceled" else
                       "no_action_smtp_accepted" if row["state"] == "confirmed_smtp_accepted" else
+                      "wait_or_prove_sender_inactive" if row["state"] == "claimed" else
+                      "wait_or_prove_reserved_no_wire" if row["state"] == "reserved" else
                       "owner_reconcile_uncertain" if row["state"] in
                       {"in_flight", "uncertain"} else
                       "owner_reconcile_no_wire" if row["state"] == "held" and row["attempt_id"] else
@@ -419,9 +425,10 @@ class Ledger:
                       "owner_choose_stage_variant" if not row["selected_variant"] or
                       "approval" in reason or "variant" in reason else
                       "wait_for_sender_recheck")
-            next_at = (None if row["state"] in
-                       {"canceled", "uncertain", "confirmed_smtp_accepted"} else
-                       max(row["next_check_at"],safe_deadline))
+            # Owner-only reconciliation has no automatic retry deadline.
+            next_at = (max(row["next_check_at"],safe_deadline)
+                       if action in {"wait_for_sender_recheck",
+                                     "wait_for_global_smtp_fence"} else None)
             return {"queue_id": row["id"], "stage": row["stage"],
                     "state": row["state"], "version": row["version"],
                     "reason": reason, "next_check_at": next_at, "next_action": action}
