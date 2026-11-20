@@ -321,3 +321,50 @@ def test_corrupt_global_dispatch_metadata_is_a_visible_hold(tmp_path):
     assert status["state"]=="held"
     assert status["reason"]=="dispatch_clock_or_metadata_invalid"
     assert status["next_action"]=="owner_reconcile_dispatch_metadata"
+
+
+def test_potentially_accepted_crash_never_replays_queue_intent(tmp_path):
+    """An SMTP-accepted-before-result-commit crash is uncertain, not retryable."""
+    db=Ledger(cfg(tmp_path))
+    poll(db)
+    queue_id=intent(db,"a","Test User","test@example-co.com")["queue_id"]
+    claim=db.claim_queue(now=T)
+    ticket=reserve(db,"a","Test User","test@example-co.com",claim)
+    begin(db,ticket)
+    restarted=Ledger(db.settings)
+    status=restarted.queue_status(queue_id)
+    assert status["state"]=="in_flight"
+    with pytest.raises(OutreachHold,match="positive_owner_termination_required"):
+        restarted.reconcile_unresolved_wire(
+            queue_id,expected_version=status["version"],now=T+timedelta(minutes=3))
+    result=restarted.reconcile_unresolved_wire(
+        queue_id,expected_version=status["version"],
+        owner_terminated_proved=True,now=T+timedelta(minutes=3))
+    assert result["state"]=="uncertain"
+    assert intent(db,"a","Test User","test@example-co.com")["queue_id"]==queue_id
+    assert restarted.queue_status(queue_id)["next_action"]=="owner_reconcile_uncertain"
+    with db._tx() as conn:
+        assert conn.execute("SELECT state FROM attempts WHERE id=?",
+                            (ticket["id"],)).fetchone()[0]=="uncertain"
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==1
+        assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
+
+
+def test_configured_iana_zone_handles_dst_gap_fold_without_sending(tmp_path):
+    """UTC instants through US DST changes never fabricate a local send window."""
+    db=Ledger(cfg(tmp_path,outreach_timezone="America/New_York"))
+    for instant in (
+        datetime(2026,3,8,6,30,tzinfo=UTC),
+        datetime(2026,3,8,7,30,tzinfo=UTC),
+        datetime(2026,11,1,5,30,tzinfo=UTC),
+        datetime(2026,11,1,6,30,tzinfo=UTC)):
+        with pytest.raises(OutreachHold,match="business_window_closed"):
+            db._window(instant)
+    # First Monday after the spring jump: EDT 08:59 vs 09:00.
+    with pytest.raises(OutreachHold,match="business_window_closed"):
+        db._window(datetime(2026,3,9,12,59,tzinfo=UTC))
+    db._window(datetime(2026,3,9,13,0,tzinfo=UTC))
+    # First Monday after the autumn fold: EST 08:59 vs 09:00.
+    with pytest.raises(OutreachHold,match="business_window_closed"):
+        db._window(datetime(2026,11,2,13,59,tzinfo=UTC))
+    db._window(datetime(2026,11,2,14,0,tzinfo=UTC))
