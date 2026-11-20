@@ -551,6 +551,16 @@ class Ledger:
         return db.execute("SELECT 1 FROM stops WHERE company_id=? AND person_key IN ('*',?)",
                           (company_id,person_key)).fetchone() is not None
 
+    @staticmethod
+    def _cancel_unattempted_for_stop(db, company_id, person_key, now):
+        """Persist a terminal cancellation even while SMTP dispatch is closed."""
+        db.execute("""UPDATE email_queue
+            SET state='canceled',reason='recorded_company_or_recipient_stop',
+                version=version+1,updated_at=?,next_check_at=?
+            WHERE company_id=? AND (?='*' OR person_key=?)
+              AND state IN ('queued','held') AND attempt_id IS NULL""",
+            (now.timestamp(),now.timestamp(),company_id,person_key,person_key))
+
     def reserve_email(self, lead: FundedNoOpening, contact: VerifiedRecipient,
                       linkedin: LinkedInSnapshot, *, no_application: bool,
                       resume_seed_proved: bool, sender_proved: bool,
@@ -914,6 +924,7 @@ class Ledger:
             db.execute("INSERT INTO stops VALUES (?,?,?,?) "
                        "ON CONFLICT(company_id,person_key) DO NOTHING",
                        (company_id, person_key, kind, now.timestamp()))
+            self._cancel_unattempted_for_stop(db,company_id,person_key,now)
 
     def record_matched_human_response(self, attempt_id, *, opt_out=False, now=None):
         """Atomically stop the company and dedup the human-response numerator.
@@ -934,6 +945,7 @@ class Ledger:
                        "ON CONFLICT(company_id,person_key) DO NOTHING",
                        (company, "*", "opt_out" if opt_out else "human_reply",
                         now.timestamp()))
+            self._cancel_unattempted_for_stop(db,company,"*",now)
             accepted_first = db.execute(
                 "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
                 "AND stage=0 AND state='confirmed_smtp_accepted'",
@@ -1012,6 +1024,7 @@ class Ledger:
                 return False
             db.execute("INSERT OR IGNORE INTO stops VALUES (?,?,?,?)",
                        (row[0], row[1], "hard_bounce", now.timestamp()))
+            self._cancel_unattempted_for_stop(db,row[0],row[1],now)
             db.execute("INSERT OR IGNORE INTO email_holds VALUES (?,?,?)",
                        (row[0], "confirmed_hard_bounce_review_required", now.timestamp()))
             self._apply_bounce_pause(db, now)
