@@ -52,7 +52,7 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     from core.outreach_contacts import LinkedInSnapshot
     from core.outreach_ledger import Ledger
     from datetime import timedelta
-    when = datetime(2026, 11, 20, 8, tzinfo=UTC)
+    when = datetime(2026, 11, 20, 10, tzinfo=UTC)
     lead = FundedNoOpening("a"*32, "Example Co", "example-co.com",
                            "https://example-co.com", (), "synthetic", when, "no_openings")
     contact = VerifiedRecipient("test@example-co.com", "name:test user", "Test User",
@@ -78,7 +78,7 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     source_count = [0]
     def read_source(*args, **kwargs):
         source_count[0] += 1
-        if collision_after_lookup and source_count[0] > 1:
+        if collision_after_lookup and source_count[0] > 2:
             from dataclasses import replace
             return replace(lead, homepage="https://changed.example-co.com")
         return lead
@@ -91,7 +91,8 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     monkeypatch.setattr(mail, "verify_published_contact", lambda **kwargs: contact)
     monkeypatch.setattr(mail, "company_application_clear", lambda *args: True)
     monkeypatch.setattr(mail, "approved_variant", lambda *args: {
-        "id": "synthetic-v1", "sha256": "a"*64})
+        "id":"synthetic-v1","sha256":"a"*64,
+        "subject":"Hello","body":"Synthetic approved email.","role_family":"PM"})
     def fake_render_approved(_variant, _lead, _contact, *, funding_fact=""):
         # The no-fact SMTP fixture must accept the same keyword-only
         # rendering contract as production. Any invented fact is a failure.
@@ -103,10 +104,28 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     return s, when, FakeSMTP, calls
 
 
+def _send_fake(mail, **kwargs):
+    """All fake SMTP regressions use the persisted queue, never direct sends."""
+    from core.outreach_ledger import Ledger
+    settings=kwargs["settings"]
+    now=kwargs["now"]
+    intent=mail.enqueue_first(
+        settings=settings,company_id=kwargs["company_id"],
+        contact_page_url=kwargs["contact_page_url"],
+        exact_address=kwargs["exact_address"],person_name=kwargs["person_name"],
+        variant_id=kwargs["variant_id"],now=now)
+    assert intent["state"]=="queued"
+    claim=Ledger(settings).claim_queue(now=now)
+    assert claim is not None and claim["id"]==intent["queue_id"]
+    return mail.send_approved(
+        settings=settings,queue_id=claim["id"],owner_token=claim["owner_token"],
+        stores=kwargs["stores"],now=now,smtp_factory=kwargs["smtp_factory"])
+
+
 def test_fake_smtp_uses_persisted_message_id_and_zero_pixel(tmp_path, monkeypatch):
     from core import outreach_email as mail
     s, now, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32, contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
         variant_id="synthetic-v1", stores=object(), now=now,
@@ -125,8 +144,8 @@ def test_changed_funding_identity_blocks_fake_smtp_before_wire(tmp_path, monkeyp
     from core import outreach_email as mail
     s, now, factory, calls = _mail_fake_setup(
         tmp_path, monkeypatch, collision_after_lookup=True)
-    with pytest.raises(OutreachHold, match="funding_identity_changed"):
-        mail.send_approved(
+    with pytest.raises(OutreachHold, match="source_or_contact_changed_before_wire"):
+        _send_fake(mail,
             settings=s, company_id="a"*32,
             contact_page_url="https://example-co.com/team",
             exact_address="test@example-co.com", person_name="Test User",
@@ -141,16 +160,18 @@ def test_owner_approval_change_before_wire_blocks_fake_smtp(tmp_path, monkeypatc
     approvals = [0]
     def mutable_approval(*_args):
         approvals[0] += 1
-        return {"id": "synthetic-v1", "sha256": ("a" if approvals[0] == 1 else "b") * 64}
+        return {"id":"synthetic-v1",
+                "sha256":("a" if approvals[0] <= 2 else "b")*64,
+                "subject":"Hello","body":"Synthetic approved email.","role_family":"PM"}
     monkeypatch.setattr(mail, "approved_variant", mutable_approval)
     with pytest.raises(OutreachHold, match="approved_variant_or_resume_changed_before_wire"):
-        mail.send_approved(
+        _send_fake(mail,
             settings=s, company_id="a"*32,
             contact_page_url="https://example-co.com/team",
             exact_address="test@example-co.com", person_name="Test User",
             variant_id="synthetic-v1", stores=object(), now=now,
             smtp_factory=factory)
-    assert approvals[0] == 2
+    assert approvals[0] == 3
     assert not calls
 
 
@@ -186,7 +207,7 @@ def test_fake_smtp_optional_pixel_only_with_operator_safe_ingress(tmp_path, monk
     monkeypatch.setattr(mail, "render_approved",
                         lambda *_args, **_kwargs: (
                             "Hello", 'Synthetic <tag> & "body"'))
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32,
         contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
@@ -219,7 +240,7 @@ def test_pixel_ingress_unverified_still_sends_without_tracking(tmp_path, monkeyp
     s.outreach_pixel_healthy = True
     s.outreach_pixel_ingress_logs_safe = False
     s.outreach_pixel_base = "https://pixels.example-co.com"
-    result = mail.send_approved(
+    result = _send_fake(mail,
         settings=s, company_id="a"*32,
         contact_page_url="https://example-co.com/team",
         exact_address="test@example-co.com", person_name="Test User",
@@ -275,3 +296,221 @@ def test_private_approved_funding_quote_requires_exact_public_witness(tmp_path, 
     private.write_text(json.dumps({**proof, "quote": "Example Co raised $999 billion."}))
     with pytest.raises(OutreachHold, match="verified_private_funding_fact_required"):
         mail.verified_funding_fact(settings, lead, datetime(2026, 11, 20, tzinfo=UTC))
+
+
+def test_unnamed_official_organization_mailbox_requires_no_name_template(tmp_path,monkeypatch):
+    """An officially published org inbox is not proof of a person's first name."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    now=datetime(2026,11,20,10,tzinfo=UTC)
+    lead=FundedNoOpening("a"*32,"Example Co","example-co.com",
+                         "https://example-co.com",(),"synthetic",now,"no_openings")
+    s=SimpleNamespace(mode="local",outreach_enabled=True,local_dir=str(tmp_path))
+    page="https://example-co.com/contact"
+    markup='<a href="mailto:hello@example-co.com">Contact</a>'
+    monkeypatch.setattr(mail,"read_no_opening",lambda *args,**kwargs: lead)
+    monkeypatch.setattr(mail,"_official_page",lambda *args: (page,markup))
+    variant={"id":"team","sha256":"a"*64,"subject":"Hello {first_name}",
+             "body":"Hi from {company_name}","role_family":"PM"}
+    monkeypatch.setattr(mail,"approved_variant",lambda *args: variant)
+    fields=dict(settings=s,company_id=lead.company_id,contact_page_url=page,
+                exact_address="hello@example-co.com",person_name="",
+                variant_id="team",now=now)
+    with pytest.raises(OutreachHold,match="verified_name_or_approved_team_variant_required"):
+        mail.enqueue_first(**fields)
+    assert not (tmp_path/"outreach-ledger.sqlite3").exists()
+
+    variant["subject"]="Hello"
+    result=mail.enqueue_first(**fields)
+    assert result["state"]=="queued"
+    with Ledger(s)._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]==0
+
+
+def test_followup_mime_subject_exactly_threads_saved_unicode_root(tmp_path,monkeypatch):
+    """An approved follow-up body must never replace the first logical Subject."""
+    from datetime import timedelta
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,now,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    settings.outreach_followups_auto=True
+    settings.outreach_followup_stage_variants=(
+        '{"1":{"named":"stage1-named","team":"stage1-team"}}')
+    monkeypatch.setattr(mail,"approved_variant",lambda settings,variant_id,kind: {
+        "id":variant_id,"sha256":"a"*64,"subject":"Unrelated follow-up",
+        "body":"Owner-approved synthetic text.","role_family":"PM"})
+    monkeypatch.setattr(mail,"render_approved",lambda item,*args,**kwargs: (
+        "Résumé – exact original Subject" if item["id"]=="synthetic-v1"
+        else "Unrelated follow-up","Synthetic approved body."))
+    _send_fake(mail,settings=settings,company_id="a"*32,
+               contact_page_url="https://example-co.com/team",
+               exact_address="test@example-co.com",person_name="Test User",
+               variant_id="synthetic-v1",stores=object(),now=now,smtp_factory=factory)
+    later=now+timedelta(days=7)
+    ledger=Ledger(settings)
+    ledger.record_successful_poll(uidvalidity="3",
+                                   monitored_address=settings.outreach_sender,now=later)
+    due=ledger.due_followups(now=later,limit=1)[0]
+    queued=mail.enqueue_due_followup(settings=settings,candidate=due,now=later)
+    claimed=ledger.claim_queue(now=later)
+    assert claimed and claimed["id"]==queued["queue_id"]
+    mail.send_approved(settings=settings,queue_id=claimed["id"],
+                       owner_token=claimed["owner_token"],stores=object(),
+                       now=later,smtp_factory=factory)
+    messages=[call[1] for call in calls if call[0]=="message"]
+    assert len(messages)==2
+    assert str(messages[0]["Subject"])=="Résumé – exact original Subject"
+    assert str(messages[1]["Subject"])=="Re: Résumé – exact original Subject"
+    assert str(messages[1]["In-Reply-To"])==str(messages[0]["Message-ID"])
+    assert str(messages[1]["References"])==str(messages[0]["Message-ID"])
+
+
+def test_preflight_crossing_1700_releases_definite_no_wire_without_smtp(tmp_path,monkeypatch):
+    """The last clock check must not dispatch an earlier 16:59 preflight at 17:00."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,_,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    near_close=datetime(2026,11,20,16,59,tzinfo=UTC)
+    at_close=datetime(2026,11,20,17,0,tzinfo=UTC)
+    ledger=Ledger(settings)
+    ledger.record_successful_poll(uidvalidity="3",
+                                   monitored_address=settings.outreach_sender,
+                                   now=near_close)
+    queued=mail.enqueue_first(
+        settings=settings,company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com",person_name="Test User",
+        variant_id="synthetic-v1",now=near_close)
+    claim=ledger.claim_queue(now=near_close)
+    instants=iter((near_close,near_close,at_close))
+    with pytest.raises(OutreachHold,match="outreach_business_window_closed"):
+        mail.send_approved(settings=settings,queue_id=claim["id"],
+                           owner_token=claim["owner_token"],stores=object(),
+                           now=near_close,clock=lambda: next(instants,at_close),
+                           smtp_factory=factory)
+    assert not calls
+    assert ledger.queue_status(queued["queue_id"])["state"]=="held"
+    with ledger._tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attempts WHERE "
+                            "state!='definite_pre_wire_failure'").fetchone()[0]==0
+        assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
+
+
+def test_post_handoff_window_abort_releases_first_email_slot_for_repair(tmp_path, monkeypatch):
+    """A successful handoff with no SMTP transport must permit the same-intent retry."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings, _, factory, calls = _mail_fake_setup(tmp_path, monkeypatch)
+    near_close = datetime(2026, 11, 20, 16, 59, tzinfo=UTC)
+    at_close = datetime(2026, 11, 20, 17, tzinfo=UTC)
+    reopened = datetime(2026, 11, 23, 10, tzinfo=UTC)
+    ledger = Ledger(settings)
+    ledger.record_successful_poll(
+        uidvalidity="3", monitored_address=settings.outreach_sender, now=near_close)
+    queued = mail.enqueue_first(
+        settings=settings, company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com", person_name="Test User",
+        variant_id="synthetic-v1", now=near_close)
+    queue_id = queued["queue_id"]
+    claim = ledger.claim_queue(now=near_close)
+    assert claim and claim["id"] == queue_id
+
+    # The first three clocks cover preflight, reservation and begin_wire.
+    # The fourth closes the business window after durable handoff, before SMTP.
+    instants = iter((near_close, near_close, near_close, at_close))
+    gap = SimpleNamespace(randint=lambda lower, upper: 180)
+    with pytest.raises(OutreachHold, match="outreach_business_window_closed"):
+        mail.send_approved(
+            settings=settings, queue_id=queue_id,
+            owner_token=claim["owner_token"], stores=object(),
+            now=near_close, clock=lambda: next(instants, at_close),
+            smtp_factory=factory, gap_rng=gap)
+    assert not calls  # Not even the fake SMTP constructor was reached.
+    status = ledger.queue_status(queue_id)
+    assert status["state"] == "held"
+    assert status["reason"] == "owner_no_wire_repair_required"
+    with ledger._tx() as conn:
+        original = conn.execute(
+            "SELECT id,message_id,state FROM attempts WHERE queue_id=?",
+            (queue_id,)).fetchone()
+        assert original[2] == "definite_pre_wire_failure"
+        assert conn.execute(
+            "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+            ("a"*32, "name:test user")).fetchone() is None
+        assert conn.execute(
+            "SELECT active_attempt,last_handoff,next_not_before "
+            "FROM email_dispatch WHERE id=1").fetchone() == (
+                None, near_close.timestamp(), near_close.timestamp() + 180)
+
+    # Only positively proved no-wire, owner-selected repair may re-admit it.
+    with pytest.raises(OutreachHold, match="charged_or_unproved_wire"):
+        ledger.repair_queue(
+            queue_id, expected_version=status["version"], expected_state="held",
+            variant_id="synthetic-v1", digest="a"*64)
+    repaired = ledger.repair_queue(
+        queue_id, expected_version=status["version"], expected_state="held",
+        variant_id="synthetic-v1", digest="a"*64, owner_no_wire_proved=True,
+        now=reopened)
+    assert repaired["queue_id"] == queue_id
+    ledger.record_successful_poll(
+        uidvalidity="3", monitored_address=settings.outreach_sender, now=reopened)
+    retry_claim = ledger.claim_queue(now=reopened)
+    assert retry_claim and retry_claim["id"] == queue_id
+    result = mail.send_approved(
+        settings=settings, queue_id=queue_id,
+        owner_token=retry_claim["owner_token"], stores=object(),
+        now=reopened, smtp_factory=factory, gap_rng=gap)
+    assert result["state"] == "confirmed_smtp_accepted"
+    sent = [item for item in calls if item[0] == "message"]
+    assert len(sent) == 1
+    assert len([item for item in calls if item[0] == "constructed"]) == 1
+    with ledger._tx() as conn:
+        attempts = conn.execute(
+            "SELECT id,message_id,state FROM attempts WHERE queue_id=? "
+            "ORDER BY reserved_at", (queue_id,)).fetchall()
+        assert len(attempts) == 2
+        assert attempts[0] == original
+        assert attempts[1][0] != original[0]
+        assert attempts[1][1] != original[1]
+        assert attempts[1][2] == "confirmed_smtp_accepted"
+        assert conn.execute(
+            "SELECT channel FROM people WHERE company_id=? AND person_key=?",
+            ("a"*32, "name:test user")).fetchone() == ("email",)
+    assert str(sent[0][1]["Message-ID"]) == attempts[1][1]
+
+
+def test_owner_approval_rotated_after_mime_before_handoff_is_no_wire(tmp_path,monkeypatch):
+    """A locally assembled message is not permission to send revoked approved text."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings,now,factory,calls=_mail_fake_setup(tmp_path,monkeypatch)
+    original=mail.approved_variant
+    rotated=[False]
+
+    def approval(*args):
+        item=original(*args)
+        return {**item,"sha256":("b" if rotated[0] else "a")*64}
+
+    def finish_mime_setup():
+        rotated[0]=True
+        return object()
+
+    monkeypatch.setattr(mail,"approved_variant",approval)
+    monkeypatch.setattr(mail.ssl,"create_default_context",finish_mime_setup)
+    with pytest.raises(OutreachHold,match="frozen_stage_approval_changed_before_wire"):
+        _send_fake(mail,settings=settings,company_id="a"*32,
+                   contact_page_url="https://example-co.com/team",
+                   exact_address="test@example-co.com",person_name="Test User",
+                   variant_id="synthetic-v1",stores=object(),now=now,
+                   smtp_factory=factory)
+    assert not calls
+    with Ledger(settings)._tx() as conn:
+        assert conn.execute("SELECT state FROM attempts").fetchone()[0] == (
+            "definite_pre_wire_failure")
+        assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None

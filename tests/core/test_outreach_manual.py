@@ -205,7 +205,7 @@ def test_manual_target_refuses_unrelated_evidence_final_domain(tmp_path, monkeyp
 
 
 def test_first_email_route_is_local_explicit_and_not_manual_flag_dependent(tmp_path, monkeypatch):
-    """Only a CSRF-protected owner-selected first request can reach the existing sender."""
+    """The local first POST enqueues; neither this route nor repair sends SMTP."""
     import asyncio
     import httpx
     from fastapi import FastAPI
@@ -215,8 +215,14 @@ def test_first_email_route_is_local_explicit_and_not_manual_flag_dependent(tmp_p
     s.outreach_manual_enabled = False
     calls = []
     monkeypatch.setattr("core.stores.make_stores", lambda *_: object())
-    monkeypatch.setattr(outreach_email, "send_approved", lambda **kw: (
-        calls.append(kw) or {"state":"confirmed_smtp_accepted"}))
+    monkeypatch.setattr(outreach_email, "enqueue_first", lambda **kw: (
+        calls.append(("first",kw)) or {"queue_id":"f"*32,"state":"queued"}))
+    monkeypatch.setattr(outreach_email, "correct_queue_choice", lambda **kw: (
+        calls.append(("repair",kw)) or {"queue_id":"f"*32,"state":"queued","version":2}))
+    monkeypatch.setattr(manual.Ledger, "queue_status", lambda self, queue_id: {
+        "queue_id":queue_id,"stage":0,"state":"held","version":1,
+        "reason":"approved_variant_missing","next_check_at":0,
+        "next_action":"owner_choose_stage_variant"})
     app = FastAPI()
     manual.register_routes(app, s)
 
@@ -239,15 +245,25 @@ def test_first_email_route_is_local_explicit_and_not_manual_flag_dependent(tmp_p
             good = {"Origin":"http://127.0.0.1:8788", "X-Outreach-CSRF":csrf}
             result = await client.post(endpoint, json=body, headers=good)
             assert result.status_code == 200
-            assert result.json()["state"] == "confirmed_smtp_accepted"
+            assert result.json()=={"queue_id":"f"*32,"state":"queued"}
+            status=await client.get("/outreach/report",params={"queue_id":"f"*32})
+            assert status.status_code==200
+            assert status.json()["reason"]=="approved_variant_missing"
+            assert status.headers["Cache-Control"]=="no-store"
+            repair={"queue_id":"f"*32,"expected_version":1,"expected_state":"held",
+                    "variant_id":"owner-approved-team"}
+            assert (await client.post(endpoint,json=repair)).status_code==403
+            fixed=await client.post(endpoint,json=repair,headers=good)
+            assert fixed.status_code==200 and fixed.json()["version"]==2
             assert (await client.post("/outreach/manual/queue", json=body,
                                       headers=good)).status_code == 404
             s.outreach_enabled = False
             assert (await client.post(endpoint, json=body, headers=good)).status_code == 404
     asyncio.run(exercise())
-    assert len(calls) == 1
-    assert calls[0]["stage"] == 0 and calls[0]["company_id"] == KEY
-    assert calls[0]["exact_address"] == "test@example-co.com"
+    assert [kind for kind,_ in calls]==["first","repair"]
+    assert calls[0][1]["company_id"]==KEY
+    assert calls[0][1]["exact_address"]=="test@example-co.com"
+    assert calls[1][1]["queue_id"]=="f"*32
 
 
 def test_two_same_name_verified_profiles_consume_two_of_three_manual_slots(tmp_path, monkeypatch):

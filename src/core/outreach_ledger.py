@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -110,9 +112,31 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS expanded_followups (
                     company_id TEXT NOT NULL, person_key TEXT NOT NULL,
                     earned_at REAL NOT NULL, PRIMARY KEY(company_id, person_key));
+                CREATE TABLE IF NOT EXISTS email_queue (
+                    id TEXT PRIMARY KEY, company_id TEXT NOT NULL,
+                    person_key TEXT NOT NULL, recipient TEXT NOT NULL,
+                    contact_url TEXT NOT NULL, contact_name TEXT NOT NULL,
+                    stage INTEGER NOT NULL, selected_variant TEXT, selected_digest TEXT,
+                    state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL, next_check_at REAL NOT NULL,
+                    attempt_id TEXT, owner_token TEXT,
+                    UNIQUE(company_id,person_key,stage));
+                CREATE INDEX IF NOT EXISTS email_queue_ready
+                    ON email_queue(state,next_check_at,created_at,id);
+                CREATE TABLE IF NOT EXISTS email_dispatch (
+                    id INTEGER PRIMARY KEY CHECK(id=1), active_attempt TEXT,
+                    last_handoff REAL, next_not_before REAL);
             """.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+            if "queue_id" not in columns:
+                db.execute("ALTER TABLE attempts ADD COLUMN queue_id TEXT")
+            if "root_subject" not in columns:
+                db.execute("ALTER TABLE attempts ADD COLUMN root_subject TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS attempts_queue_id ON attempts(queue_id)")
+            db.execute("INSERT OR IGNORE INTO email_dispatch(id) VALUES (1)")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -207,11 +231,373 @@ class Ledger:
         if self._meta(db, "global_email_pause") == "1":
             raise OutreachHold("global_email_bounce_pause")
 
+
+    def _window(self, now):
+        """#386 has no recipient-local timezone witness; only configured IANA."""
+        name = getattr(self.settings, "outreach_timezone", None)
+        if not isinstance(name, str) or not name or name.strip() != name:
+            raise OutreachHold("outreach_timezone_required")
+        try:
+            zone = ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+            raise OutreachHold("outreach_timezone_invalid") from exc
+        start = getattr(self.settings, "outreach_send_start_hour", 9)
+        end = getattr(self.settings, "outreach_send_end_hour", 17)
+        if (type(start) is not int or type(end) is not int
+                or not 0 <= start < end <= 24):
+            raise OutreachHold("outreach_window_invalid")
+        local = now.astimezone(zone)
+        if local.weekday() >= 5 or not start <= local.hour < end:
+            raise OutreachHold("outreach_business_window_closed")
+
+    @staticmethod
+    def _fence(db, now):
+        row = db.execute("SELECT active_attempt,last_handoff,next_not_before "
+                         "FROM email_dispatch WHERE id=1").fetchone()
+        if not row:
+            raise OutreachHold("dispatch_metadata_missing")
+        active, last, deadline = row
+        if active:
+            raise OutreachHold("another_smtp_wire_unresolved")
+        if (last is None) != (deadline is None):
+            raise OutreachHold("dispatch_metadata_corrupt")
+        if last is not None:
+            if (not all(isinstance(x, (int, float)) and math.isfinite(x)
+                        for x in (last, deadline))
+                    or not 180 <= round(deadline - last, 6) <= 600
+                    or now.timestamp() < last):
+                raise OutreachHold("dispatch_clock_or_metadata_invalid")
+            if now.timestamp() < deadline:
+                raise OutreachHold("dispatch_gap_not_elapsed")
+        if db.execute("SELECT 1 FROM attempts WHERE state='in_flight' LIMIT 1").fetchone():
+            raise OutreachHold("unresolved_prior_wire")
+
+    @staticmethod
+    def _qrow(db, queue_id):
+        cols = ("id", "company_id", "person_key", "recipient", "contact_url",
+                "contact_name", "stage", "selected_variant", "selected_digest",
+                "state", "reason", "version", "next_check_at", "attempt_id",
+                "owner_token")
+        row = db.execute("SELECT " + ",".join(cols) +
+                         " FROM email_queue WHERE id=?", (queue_id,)).fetchone()
+        return dict(zip(cols, row)) if row else None
+
+    def _stage_enabled(self, stage):
+        if stage > 0 and not getattr(self.settings, "outreach_followups_auto", False):
+            raise OutreachHold("outreach_followups_auto_disabled")
+        if stage > 2 and not getattr(self.settings, "outreach_followups_expanded", False):
+            raise OutreachHold("outreach_followups_expanded_disabled")
+
+    def enqueue_email(self, lead, contact, *, stage, variant_id=None, digest=None,
+                      reason="", now=None):
+        """Unique durable intent. No SMTP attempt or quota reservation."""
+        now = _time(now)
+        if (not isinstance(lead, FundedNoOpening)
+                or not isinstance(contact, VerifiedRecipient)
+                or type(stage) is not int or not 0 <= stage <= 5
+                or (variant_id is None) != (digest is None)):
+            raise OutreachHold("queue_intent_unverified")
+        if variant_id is not None and (not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", variant_id)
+                                       or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+            raise OutreachHold("queue_approval_invalid")
+        if (contact.kind not in {"person", "organization"}
+                or (contact.kind == "organization") != (contact.person_key == "org")
+                or normalize_email(contact.address).rsplit("@", 1)[1] != lead.domain):
+            raise OutreachHold("queue_contact_binding_invalid")
+        with self._tx() as db:
+            row = db.execute("SELECT id,recipient FROM email_queue WHERE "
+                             "company_id=? AND person_key=? AND stage=?",
+                             (lead.company_id, contact.person_key, stage)).fetchone()
+            if row:
+                if row[1] != contact.address:
+                    raise OutreachHold("queue_recipient_identity_changed")
+                return {"queue_id": row[0], "state": self._qrow(db, row[0])["state"]}
+            queue_id = uuid.uuid4().hex
+            state = "held" if not variant_id else "queued"
+            db.execute("""INSERT INTO email_queue
+                (id,company_id,person_key,recipient,contact_url,contact_name,stage,
+                 selected_variant,selected_digest,state,reason,created_at,updated_at,next_check_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (queue_id, lead.company_id, contact.person_key, contact.address,
+                 contact.evidence_url, contact.name, stage, variant_id, digest,
+                 state, reason if state == "held" else "",
+                 now.timestamp(), now.timestamp(), now.timestamp()))
+            return {"queue_id": queue_id, "state": state}
+
+    def enqueue_due_from_accepted(self, candidate, *, variant_id=None, digest=None,
+                                  reason="", now=None):
+        """Only persisted accepted predecessor evidence authorizes follow-up intent.
+
+        A temporarily unreadable/stale #386 source must not let the first due
+        person starve everybody behind them. All source proof is read fresh
+        by the worker, not by this uncharged producer.
+        """
+        now=_time(now)
+        if (not isinstance(candidate,dict) or type(candidate.get("stage")) is not int
+                or not 1<=candidate["stage"]<=5
+                or (variant_id is None)!=(digest is None)):
+            raise OutreachHold("followup_queue_candidate_invalid")
+        if variant_id is not None and (not re.fullmatch(r"[A-Za-z0-9_-]{1,80}",variant_id)
+                                       or not re.fullmatch(r"[a-f0-9]{64}",digest)):
+            raise OutreachHold("followup_queue_approval_invalid")
+        keys=("company_id","person_key","recipient","contact_url","person_name")
+        if any(not isinstance(candidate.get(k),str) for k in keys):
+            raise OutreachHold("followup_queue_candidate_invalid")
+        with self._tx() as db:
+            prior=db.execute("""SELECT accepted_at FROM attempts WHERE company_id=?
+                AND person_key=? AND recipient=? AND contact_url=? AND contact_name=?
+                AND stage=? AND state='confirmed_smtp_accepted'""",
+                (candidate["company_id"],candidate["person_key"],candidate["recipient"],
+                 candidate["contact_url"],candidate["person_name"],
+                 candidate["stage"]-1)).fetchone()
+            if not prior or now.timestamp()-prior[0]<48*3600:
+                raise OutreachHold("followup_predecessor_not_accepted_or_too_recent")
+            due=db.execute("""SELECT due_at FROM earned_due
+                WHERE company_id=? AND person_key=? AND stage=?""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone()
+            if not due or now.timestamp()<due[0]:
+                raise OutreachHold("followup_not_yet_earned")
+            if db.execute("""SELECT 1 FROM attempts WHERE company_id=? AND person_key=?
+                AND stage>=? AND state!='definite_pre_wire_failure'""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone():
+                raise OutreachHold("followup_stage_already_attempted")
+            existing=db.execute("""SELECT id,recipient,state FROM email_queue
+                WHERE company_id=? AND person_key=? AND stage=?""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone()
+            if existing:
+                if existing[1]!=candidate["recipient"]:
+                    raise OutreachHold("queue_recipient_identity_changed")
+                return {"queue_id":existing[0],"state":existing[2]}
+            queue_id=uuid.uuid4().hex
+            state="queued" if variant_id else "held"
+            db.execute("""INSERT INTO email_queue
+                (id,company_id,person_key,recipient,contact_url,contact_name,stage,
+                 selected_variant,selected_digest,state,reason,
+                 created_at,updated_at,next_check_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (queue_id,candidate["company_id"],candidate["person_key"],
+                 candidate["recipient"],candidate["contact_url"],candidate["person_name"],
+                 candidate["stage"],variant_id,digest,state,reason if not variant_id else "",
+                 now.timestamp(),now.timestamp(),now.timestamp()))
+            return {"queue_id":queue_id,"state":state}
+
+    def queue_intent(self, queue_id):
+        """Private internal worker/owner-repair read, never a route response."""
+        if not isinstance(queue_id,str) or not re.fullmatch(r"[a-f0-9]{32}",queue_id):
+            raise OutreachHold("queue_id_invalid")
+        with self._tx() as db:
+            row = self._qrow(db,queue_id)
+            if not row:
+                raise OutreachHold("queue_id_not_found")
+            return row
+
+    def queue_status(self, queue_id):
+        """Non-identifying status for existing local-only report route."""
+        if not isinstance(queue_id, str) or not re.fullmatch(r"[a-f0-9]{32}", queue_id):
+            raise OutreachHold("queue_id_invalid")
+        with self._tx() as db:
+            row = self._qrow(db, queue_id)
+            if not row:
+                raise OutreachHold("queue_id_not_found")
+            deadline = db.execute("SELECT next_not_before FROM email_dispatch WHERE id=1").fetchone()
+            # Corrupt pacing metadata must not break the private repair report.
+            raw_deadline = deadline[0] if deadline else None
+            safe_deadline = (raw_deadline if isinstance(raw_deadline,(int,float))
+                             and math.isfinite(raw_deadline) else 0)
+            reason = row["reason"] or {
+                "claimed": "sender_claim_owner_unresolved",
+                "reserved": "linked_reserved_no_wire_proof_required",
+                "in_flight": "potential_smtp_wire_unresolved",
+            }.get(row["state"], "")
+            action = ("not_retryable_canceled" if row["state"] == "canceled" else
+                      "no_action_smtp_accepted" if row["state"] == "confirmed_smtp_accepted" else
+                      "wait_or_prove_sender_inactive" if row["state"] == "claimed" else
+                      "wait_or_prove_reserved_no_wire" if row["state"] == "reserved" else
+                      "owner_reconcile_uncertain" if row["state"] in
+                      {"in_flight", "uncertain"} else
+                      "owner_reconcile_no_wire" if row["state"] == "held" and row["attempt_id"] else
+                      "owner_reconcile_dispatch_metadata" if reason in
+                      {"dispatch_metadata_missing", "dispatch_metadata_corrupt",
+                       "dispatch_clock_or_metadata_invalid"} else
+                      "wait_for_global_smtp_fence" if reason in
+                      {"another_smtp_wire_unresolved", "unresolved_prior_wire",
+                       "dispatch_gap_not_elapsed"} else
+                      "owner_choose_stage_variant" if not row["selected_variant"] or
+                      "approval" in reason or "variant" in reason else
+                      "wait_for_sender_recheck")
+            # Owner-only reconciliation has no automatic retry deadline.
+            next_at = (max(row["next_check_at"],safe_deadline)
+                       if action in {"wait_for_sender_recheck",
+                                     "wait_for_global_smtp_fence"} else None)
+            return {"queue_id": row["id"], "stage": row["stage"],
+                    "state": row["state"], "version": row["version"],
+                    "reason": reason, "next_check_at": next_at, "next_action": action}
+
+    def claim_queue(self, *, now=None):
+        """Claim only a currently runnable intent; never steal live owner."""
+        now = _time(now)
+        with self._tx() as db:
+            try:
+                self._window(now)
+            except OutreachHold as exc:
+                db.execute("""UPDATE email_queue SET state='held',reason=?,
+                    next_check_at=?,updated_at=?,version=version+1
+                    WHERE state IN ('queued','held') AND attempt_id IS NULL
+                      AND next_check_at<=? AND selected_variant IS NOT NULL""",
+                    (str(exc),now.timestamp()+300,now.timestamp(),now.timestamp()))
+                return None
+            # Keep disabled follow-ups held and visible, but never starve stage 0.
+            if not getattr(self.settings,"outreach_followups_auto",False):
+                db.execute("""UPDATE email_queue SET state='held',
+                    reason='outreach_followups_auto_disabled',next_check_at=?,
+                    updated_at=?,version=version+1 WHERE stage>0
+                    AND state IN ('queued','held') AND attempt_id IS NULL
+                    AND next_check_at<=?""",
+                    (now.timestamp()+300,now.timestamp(),now.timestamp()))
+            if not getattr(self.settings,"outreach_followups_expanded",False):
+                db.execute("""UPDATE email_queue SET state='held',
+                    reason='outreach_followups_expanded_disabled',next_check_at=?,
+                    updated_at=?,version=version+1 WHERE stage>2
+                    AND state IN ('queued','held') AND attempt_id IS NULL
+                    AND next_check_at<=?""",
+                    (now.timestamp()+300,now.timestamp(),now.timestamp()))
+            try:
+                self._fence(db,now)
+            except OutreachHold as exc:
+                # Surface a busy or corrupt global fence in the private report.
+                db.execute("""UPDATE email_queue SET state='held',reason=?,
+                    next_check_at=?,updated_at=?,version=version+1
+                    WHERE state IN ('queued','held') AND attempt_id IS NULL
+                      AND selected_variant IS NOT NULL AND next_check_at<=?
+                      AND (stage=0 OR ?) AND (stage<=2 OR ?)""",
+                    (str(exc),now.timestamp()+300,now.timestamp(),now.timestamp(),
+                     int(bool(getattr(self.settings,"outreach_followups_auto",False))),
+                     int(bool(getattr(self.settings,"outreach_followups_expanded",False)))))
+                return None
+            row = db.execute("""SELECT id FROM email_queue
+                WHERE state IN ('queued','held') AND attempt_id IS NULL
+                  AND selected_variant IS NOT NULL AND selected_digest IS NOT NULL
+                  AND next_check_at<=? AND (stage=0 OR ?)
+                  AND (stage<=2 OR ?)
+                ORDER BY next_check_at,created_at,id LIMIT 1""",
+                (now.timestamp(),int(bool(getattr(self.settings,"outreach_followups_auto",False))),
+                 int(bool(getattr(self.settings,"outreach_followups_expanded",False))))).fetchone()
+            if not row:
+                return None
+            item = self._qrow(db,row[0])
+            token = secrets.token_hex(24)
+            db.execute("""UPDATE email_queue SET state='claimed',owner_token=?,
+                reason='',version=version+1,updated_at=? WHERE id=?""",
+                (token,now.timestamp(),row[0]))
+            item["owner_token"] = token
+            item["state"] = "claimed"
+            return item
+
+    def release_claim(self, queue_id, token, reason, *, cancel=False, now=None):
+        now = _time(now)
+        with self._tx() as db:
+            row = self._qrow(db, queue_id)
+            if not row or row["state"] != "claimed" or row["owner_token"] != token:
+                raise OutreachHold("claim_owner_changed")
+            db.execute("""UPDATE email_queue SET state=?,reason=?,owner_token=NULL,
+                next_check_at=?,updated_at=?,version=version+1 WHERE id=?""",
+                ("canceled" if cancel else "held", str(reason)[:160],
+                 now.timestamp() + (0 if cancel else 300), now.timestamp(), queue_id))
+
+    def repair_queue(self, queue_id, *, expected_version, expected_state,
+                     variant_id, digest, owner_no_wire_proved=False, now=None):
+        """Owner-selected immutable variant; never repair a potentially wired row."""
+        now = _time(now)
+        if (not isinstance(queue_id, str) or not re.fullmatch(r"[a-f0-9]{32}", queue_id)
+                or type(expected_version) is not int or expected_state != "held"
+                or not isinstance(variant_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", variant_id)
+                or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+            raise OutreachHold("queue_correction_invalid")
+        with self._tx() as db:
+            row = self._qrow(db, queue_id)
+            if not row or row["version"] != expected_version or row["state"] != "held":
+                raise OutreachHold("queue_version_or_state_changed")
+            if db.execute("SELECT 1 FROM stops WHERE company_id=? "
+                          "AND person_key IN ('*',?)", (row["company_id"],row["person_key"])).fetchone():
+                raise OutreachHold("recorded_stop_cannot_be_repaired")
+            if row["attempt_id"]:
+                old = db.execute("SELECT state FROM attempts WHERE id=? AND queue_id=?",
+                                 (row["attempt_id"], queue_id)).fetchone()
+                if not old or old[0] != "definite_pre_wire_failure" or owner_no_wire_proved is not True:
+                    raise OutreachHold("charged_or_unproved_wire_cannot_be_repaired")
+            db.execute("""UPDATE email_queue SET selected_variant=?,selected_digest=?,
+                state='queued',reason='',next_check_at=?,attempt_id=NULL,
+                owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                (variant_id, digest, now.timestamp(), now.timestamp(), queue_id))
+            return {"queue_id": queue_id, "state": "queued",
+                    "version": expected_version+1}
+
+    def recover_claim_with_owner_proof(self, queue_id, *, expected_version,
+                                       owner_inactive_proved=False, now=None):
+        """Operator-only positive proof: never reclaim by claim age or PID TTL."""
+        now = _time(now)
+        if owner_inactive_proved is not True:
+            raise OutreachHold("positive_owner_termination_required")
+        with self._tx() as db:
+            row = self._qrow(db, queue_id)
+            if (not row or row["version"] != expected_version or row["state"] != "claimed"
+                    or row["attempt_id"]):
+                raise OutreachHold("claimed_owner_or_attempt_not_proven_inactive")
+            db.execute("""UPDATE email_queue SET state='held',reason='owner_recheck_required',
+                owner_token=NULL,version=version+1,next_check_at=?,updated_at=? WHERE id=?""",
+                (now.timestamp()+300,now.timestamp(),queue_id))
+
+    def reconcile_unresolved_wire(self, queue_id, *, expected_version,
+                                  owner_terminated_proved=False, now=None):
+        """Positive external owner-termination proof only; never infer no wire.
+
+        A crashed sender may have reached SMTP before recording acceptance.
+        Its reservation stays charged and uncertain; the global fence clears
+        only by explicit reconciliation, keeping the original handoff deadline.
+        """
+        now=_time(now)
+        if owner_terminated_proved is not True or type(expected_version) is not int:
+            raise OutreachHold("positive_owner_termination_required")
+        with self._tx() as db:
+            q=self._qrow(db,queue_id)
+            if (not q or q["version"]!=expected_version
+                    or q["state"]!="in_flight" or not q["attempt_id"]):
+                raise OutreachHold("queue_wire_state_changed")
+            active=db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+            attempt=db.execute("SELECT state FROM attempts WHERE id=? AND queue_id=?",
+                               (q["attempt_id"],queue_id)).fetchone()
+            if not active or active[0]!=q["attempt_id"] or not attempt or attempt[0]!="in_flight":
+                raise OutreachHold("global_wire_state_unresolved")
+            db.execute("UPDATE attempts SET state='uncertain' WHERE id=?",(q["attempt_id"],))
+            db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+            db.execute("""UPDATE email_queue SET state='uncertain',
+                reason='wire_terminated_without_definitive_smtp_outcome',
+                owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                (now.timestamp(),queue_id))
+            return {"queue_id":queue_id,"state":"uncertain"}
+
+    @staticmethod
+    def _recorded_stop(db,company_id,person_key):
+        return db.execute("SELECT 1 FROM stops WHERE company_id=? AND person_key IN ('*',?)",
+                          (company_id,person_key)).fetchone() is not None
+
+    @staticmethod
+    def _cancel_unattempted_for_stop(db, company_id, person_key, now):
+        """Persist a terminal cancellation even while SMTP dispatch is closed."""
+        db.execute("""UPDATE email_queue
+            SET state='canceled',reason='recorded_company_or_recipient_stop',
+                version=version+1,updated_at=?,next_check_at=?
+            WHERE company_id=? AND (?='*' OR person_key=?)
+              AND state IN ('queued','held') AND attempt_id IS NULL""",
+            (now.timestamp(),now.timestamp(),company_id,person_key,person_key))
+
     def reserve_email(self, lead: FundedNoOpening, contact: VerifiedRecipient,
                       linkedin: LinkedInSnapshot, *, no_application: bool,
                       resume_seed_proved: bool, sender_proved: bool,
                       variant: str, digest: str, stage=0, now=None,
-                      expanded_followups=False):
+                      expanded_followups=False, queue_id=None, owner_token=None,
+                      root_subject=None):
         """One atomic admission. Caller must re-read sources at pre-wire.
 
         Distinct first-email person keys are matched to the read-only LinkedIn
@@ -238,6 +624,22 @@ class Ledger:
         if type(stage) is not int or stage < 0 or stage > 5:
             raise OutreachHold("invalid_followup_stage")
         with self._tx() as db:
+            if queue_id is not None:
+                q = self._qrow(db, queue_id)
+                if (not q or q["state"] != "claimed" or q["owner_token"] != owner_token
+                        or q["attempt_id"] or q["company_id"] != lead.company_id
+                        or q["person_key"] != contact.person_key
+                        or q["recipient"] != contact.address or q["stage"] != stage
+                        or q["selected_variant"] != variant
+                        or q["selected_digest"] != digest):
+                    raise OutreachHold("queue_claim_or_frozen_approval_mismatch")
+                self._stage_enabled(stage)
+                self._window(now)
+                self._fence(db, now)
+                if stage == 0 and (not isinstance(root_subject, str)
+                                   or not root_subject or len(root_subject) > 180
+                                   or "\r" in root_subject or "\n" in root_subject):
+                    raise OutreachHold("first_logical_subject_missing")
             self._fresh_poll(db, now)
             self._stopped(db, lead.company_id, contact.person_key)
             day, day_cap = self._day(db, now)
@@ -305,6 +707,14 @@ class Ledger:
                     raise OutreachHold("followup_not_yet_due")
                 references = [row[3] for row in existing]
                 prior_id = references[-1]
+                if queue_id is not None:
+                    root = db.execute(
+                        "SELECT root_subject FROM attempts WHERE id=? AND stage=0 "
+                        "AND state='confirmed_smtp_accepted'",
+                        (existing[0][5],)).fetchone()
+                    if not root or not root[0]:
+                        raise OutreachHold("legacy_first_subject_unproven")
+                    root_subject = root[0]
             if contact.person_key == "org":
                 prior_org = db.execute("SELECT 1 FROM attempts WHERE company_id=? AND person_key='org' "
                                        "AND stage=0 AND state != 'definite_pre_wire_failure'",
@@ -321,57 +731,101 @@ class Ledger:
             db.execute("""INSERT INTO attempts
                 (id,company_id,person_key,recipient,contact_url,contact_name,
                  message_id,stage,state,approved_variant,approved_digest,
-                 reserved_at,day,prior_id,references_json)
-                VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?)""",
+                 reserved_at,day,prior_id,references_json,queue_id,root_subject)
+                VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?)""",
                 (attempt_id, lead.company_id, contact.person_key, contact.address,
                  contact.evidence_url, contact.name, message_id, stage,
                  variant, digest, now.timestamp(), day, prior_id,
-                 json.dumps(references)))
+                 json.dumps(references),queue_id,root_subject))
+            if queue_id is not None:
+                db.execute("""UPDATE email_queue SET state='reserved',
+                    attempt_id=?,version=version+1,updated_at=? WHERE id=?""",
+                    (attempt_id,now.timestamp(),queue_id))
         return {"id": attempt_id, "message_id": message_id, "to": contact.address,
                 "in_reply_to": prior_id, "references": references,
                 "stage": stage, "variant": variant, "digest": digest,
-                "tracking_mode": "not_tracked"}
+                "tracking_mode": "not_tracked", "root_subject":root_subject}
 
     def begin_wire(self, attempt_id, *, source_checked: bool,
-                   no_application: bool, linkedin_checked: bool, now=None):
+                   no_application: bool, linkedin_checked: bool, now=None,
+                   gap_rng=None):
         """Last local stop/freshness check before irreversible SMTP work."""
         now = _time(now)
         if not (source_checked and no_application and linkedin_checked):
             raise OutreachHold("prewire_source_application_or_linkedin_unverified")
         with self._tx() as db:
-            row = db.execute("SELECT company_id,person_key,state FROM attempts WHERE id=?",
+            row = db.execute("SELECT company_id,person_key,state,queue_id FROM attempts WHERE id=?",
                              (attempt_id,)).fetchone()
             if row is None or row[2] != "reserved":
                 raise OutreachHold("attempt_not_reserved")
             self._fresh_poll(db, now)
             self._stopped(db, row[0], row[1])
+            if row[3] is not None:
+                q = self._qrow(db, row[3])
+                if not q or q["state"] != "reserved" or q["attempt_id"] != attempt_id:
+                    raise OutreachHold("linked_attempt_queue_mismatch")
+                self._stage_enabled(q["stage"])
+                self._window(now)
+                self._fence(db, now)
+                gap = secrets.randbelow(421)+180 if gap_rng is None else gap_rng.randint(180,600)
+                if type(gap) is not int or not 180 <= gap <= 600:
+                    raise OutreachHold("invalid_uniform_handoff_gap")
+                db.execute("UPDATE email_dispatch SET active_attempt=?,last_handoff=?,"
+                           "next_not_before=? WHERE id=1",
+                           (attempt_id,now.timestamp(),now.timestamp()+gap))
+                db.execute("""UPDATE email_queue SET state='in_flight',
+                    version=version+1,updated_at=? WHERE id=?""",
+                    (now.timestamp(),row[3]))
             db.execute("UPDATE attempts SET state='in_flight' WHERE id=?", (attempt_id,))
 
     def finish_wire(self, attempt_id, *, accepted: bool, now=None):
         """Only an unambiguous SMTP 250 acceptance is accepted; otherwise uncertain."""
         now = _time(now)
         with self._tx() as db:
-            row = db.execute("SELECT state FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            row = db.execute("SELECT state,queue_id FROM attempts WHERE id=?",
+                             (attempt_id,)).fetchone()
             if row is None or row[0] != "in_flight":
                 raise OutreachHold("wire_attempt_not_in_flight")
+            outcome = "confirmed_smtp_accepted" if accepted else "uncertain"
+            if row[1] is not None:
+                active = db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+                if not active or active[0] != attempt_id:
+                    raise OutreachHold("global_wire_owner_mismatch")
+                db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+                db.execute("""UPDATE email_queue SET state=?,reason=?,version=version+1,
+                    updated_at=?,owner_token=NULL WHERE id=? AND attempt_id=?""",
+                    (outcome, "" if accepted else "smtp_outcome_uncertain",
+                     now.timestamp(),row[1],attempt_id))
             db.execute("UPDATE attempts SET state=?, accepted_at=? WHERE id=?",
-                       ("confirmed_smtp_accepted" if accepted else "uncertain",
-                        now.timestamp() if accepted else None, attempt_id))
+                       (outcome,now.timestamp() if accepted else None,attempt_id))
             if accepted:
                 # The 30-message denominator can cross its minimum after a
                 # prior confirmed bounce. Review the persisted threshold at
                 # acceptance too, not only when a DSN arrives.
                 self._apply_bounce_pause(db, now)
 
-    def definite_no_wire(self, attempt_id):
-        """Only permitted for reserved attempts *before* begin_wire."""
+    def definite_no_wire(self, attempt_id, *, owner_token=None,
+                         owner_inactive_proved=False):
+        """Reserved-only no-wire; queue-linked owners cannot be stolen by age."""
         with self._tx() as db:
-            row = db.execute("SELECT company_id,person_key,state FROM attempts WHERE id=?",
+            row = db.execute("SELECT company_id,person_key,state,queue_id FROM attempts WHERE id=?",
                              (attempt_id,)).fetchone()
             if not row or row[2] != "reserved":
                 raise OutreachHold("cannot_prove_no_wire_after_begin")
+            if row[3]:
+                q=self._qrow(db,row[3])
+                if (not q or q["state"]!="reserved" or q["attempt_id"]!=attempt_id
+                        or (q["owner_token"]!=owner_token and owner_inactive_proved is not True)):
+                    raise OutreachHold("positive_no_wire_owner_evidence_required")
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
+            if row[3]:
+                stopped=self._recorded_stop(db,row[0],row[1])
+                db.execute("""UPDATE email_queue SET state=?,reason=?,
+                    owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                    ("canceled" if stopped else "held",
+                     "recorded_company_or_recipient_stop" if stopped
+                     else "owner_no_wire_repair_required",_time().timestamp(),row[3]))
             db.execute("DELETE FROM pixel_events WHERE token_sha IN "
                        "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",
                        (attempt_id,))
@@ -383,6 +837,41 @@ class Ledger:
                 db.execute("DELETE FROM people WHERE company_id=? AND person_key=? "
                            "AND channel='email'", (row[0], row[1]))
 
+
+    def abort_handoff_before_transport(self, attempt_id, token, *, now=None):
+        """Only worker-owned and positively unwired handoff may clear active slot."""
+        now = _time(now)
+        with self._tx() as db:
+            row = db.execute("SELECT queue_id,state FROM attempts WHERE id=?",
+                             (attempt_id,)).fetchone()
+            if not row or row[1] != "in_flight" or not row[0]:
+                raise OutreachHold("no_wire_handoff_unproven")
+            q = self._qrow(db,row[0])
+            active = db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+            if not q or q["owner_token"] != token or not active or active[0] != attempt_id:
+                raise OutreachHold("handoff_owner_not_proven")
+            db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
+                       (attempt_id,))
+            db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+            stopped=self._recorded_stop(db,q["company_id"],q["person_key"])
+            db.execute("""UPDATE email_queue SET state=?,reason=?,
+                owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                ("canceled" if stopped else "held",
+                 "recorded_company_or_recipient_stop" if stopped
+                 else "owner_no_wire_repair_required",now.timestamp(),row[0]))
+            db.execute("DELETE FROM pixel_events WHERE token_sha IN "
+                       "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",(attempt_id,))
+            db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?",(attempt_id,))
+            # As with reserved-only definite_no_wire, a proved no-transport
+            # stage-0 handoff must not strand its email person reservation.
+            # Another non-definite attempt still owns the slot if present.
+            if q["person_key"] != "org" and not db.execute(
+                    "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
+                    "AND state!='definite_pre_wire_failure'",
+                    (q["company_id"], q["person_key"])).fetchone():
+                db.execute("DELETE FROM people WHERE company_id=? AND person_key=? "
+                           "AND channel='email'", (q["company_id"], q["person_key"]))
+            # The persisted handoff deadline survives even this proven no-wire.
 
     def earn_due(self, company_id, person_key, stage, calculated):
         """Persist earliest earned due even when a later quota check holds."""
@@ -398,44 +887,54 @@ class Ledger:
                               (company_id, person_key, stage)).fetchone()[0]
 
     def due_followups(self, *, now=None, limit=10):
-        """Only complete accepted threads, not uncertain/recovered sends."""
+        """Exclude queued/held/terminal successors in SQL before each bounded page.
+
+        Effective earned due is a pixel-dependent value, not necessarily ordered
+        by predecessor acceptance. Compare *all* unblocked, keyset-paged candidates.
+        """
         now = _time(now)
-        limit = max(1, min(int(limit), 25))
-        max_stage = 5 if getattr(self.settings, "outreach_followups_expanded", False) else 2
-        with self._tx() as db:
-            rows = db.execute("""
-                SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
-                       a.contact_name,a.stage,a.accepted_at,a.id,a.tracking_mode
-                FROM attempts a
-                WHERE a.state='confirmed_smtp_accepted'
-                  AND a.stage < ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM attempts b
-                      WHERE b.company_id=a.company_id
-                        AND b.person_key=a.person_key
-                        AND b.state!='definite_pre_wire_failure'
-                        AND b.stage>a.stage)
-                ORDER BY a.accepted_at ASC LIMIT 100
-            """, (max_stage,)).fetchall()
-        result = []
-        for company, person, recipient, url, name, stage, accepted_at, attempt_id, mode in rows:
+        limit = max(1,min(int(limit),25))
+        max_stage = 5 if getattr(self.settings,"outreach_followups_expanded",False) else 2
+        cursor = None
+        eligible = []
+        while True:
             with self._tx() as db:
-                opens = self._qualified_opens(db, attempt_id)
-            if stage >= 2:
-                with self._tx() as db:
-                    if not self._ever_qualified_three(db, company, person):
-                        continue
-            accepted = datetime.fromtimestamp(accepted_at, UTC)
-            earned = self.earn_due(
-                company, person, stage+1,
-                due_for_band(accepted, opens=opens, tracked=mode == "pixel_enabled"))
-            if earned <= now.timestamp():
-                result.append({"company_id": company, "person_key": person,
-                               "recipient": recipient, "contact_url": url,
-                               "person_name": name, "stage": stage+1})
-            if len(result) >= limit:
+                rows = db.execute("""
+                    SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
+                           a.contact_name,a.stage,a.accepted_at,a.id,a.tracking_mode
+                    FROM attempts a
+                    WHERE a.state='confirmed_smtp_accepted' AND a.stage<?
+                      AND NOT EXISTS (SELECT 1 FROM attempts b
+                          WHERE b.company_id=a.company_id AND b.person_key=a.person_key
+                            AND b.stage>a.stage AND b.state!='definite_pre_wire_failure')
+                      AND NOT EXISTS (SELECT 1 FROM email_queue q
+                          WHERE q.company_id=a.company_id AND q.person_key=a.person_key
+                            AND q.stage=a.stage+1)
+                      AND (? IS NULL OR
+                           (a.accepted_at,a.company_id,a.person_key,a.stage) > (?,?,?,?))
+                    ORDER BY a.accepted_at,a.company_id,a.person_key,a.stage LIMIT 100
+                """, (max_stage,None if cursor is None else 1,
+                      *(cursor or (0,"","",-1)))).fetchall()
+            if not rows:
                 break
-        return result
+            for company,person,recipient,url,name,stage,accepted_at,attempt_id,mode in rows:
+                cursor = (accepted_at,company,person,stage)
+                with self._tx() as db:
+                    if stage >= 2 and not self._ever_qualified_three(db,company,person):
+                        continue
+                    opens = self._qualified_opens(db,attempt_id)
+                accepted = datetime.fromtimestamp(accepted_at,UTC)
+                earned = self.earn_due(company,person,stage+1,due_for_band(
+                    accepted,opens=opens,tracked=mode=="pixel_enabled"))
+                if (earned <= now.timestamp()
+                        and now.timestamp()-accepted_at >= 48*3600):
+                    eligible.append((earned,accepted_at,company,person,stage+1,{
+                        "company_id":company,"person_key":person,"recipient":recipient,
+                        "contact_url":url,"person_name":name,"stage":stage+1}))
+            if len(rows)<100:
+                break
+        eligible.sort(key=lambda row:row[:5])
+        return [item[-1] for item in eligible[:limit]]
 
     def clear_reviewed_email_hold(self, company_id, *, reviewed=False):
         if reviewed is not True:
@@ -453,8 +952,9 @@ class Ledger:
     def hold_orphaned_attempts(self):
         """Call on process startup, not during concurrent sends; never auto-replay."""
         with self._tx() as db:
+            # Another queue-linked sender may be live; never age-reclaim its wire.
             db.execute("UPDATE attempts SET state='uncertain' "
-                       "WHERE state IN ('reserved','in_flight')")
+                       "WHERE queue_id IS NULL AND state IN ('reserved','in_flight')")
 
     def record_stop(self, company_id, *, person_key="*", kind="human_reply", now=None):
         now = _time(now)
@@ -464,6 +964,7 @@ class Ledger:
             db.execute("INSERT INTO stops VALUES (?,?,?,?) "
                        "ON CONFLICT(company_id,person_key) DO NOTHING",
                        (company_id, person_key, kind, now.timestamp()))
+            self._cancel_unattempted_for_stop(db,company_id,person_key,now)
 
     def record_matched_human_response(self, attempt_id, *, opt_out=False, now=None):
         """Atomically stop the company and dedup the human-response numerator.
@@ -484,6 +985,7 @@ class Ledger:
                        "ON CONFLICT(company_id,person_key) DO NOTHING",
                        (company, "*", "opt_out" if opt_out else "human_reply",
                         now.timestamp()))
+            self._cancel_unattempted_for_stop(db,company,"*",now)
             accepted_first = db.execute(
                 "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
                 "AND stage=0 AND state='confirmed_smtp_accepted'",
@@ -562,6 +1064,7 @@ class Ledger:
                 return False
             db.execute("INSERT OR IGNORE INTO stops VALUES (?,?,?,?)",
                        (row[0], row[1], "hard_bounce", now.timestamp()))
+            self._cancel_unattempted_for_stop(db,row[0],row[1],now)
             db.execute("INSERT OR IGNORE INTO email_holds VALUES (?,?,?)",
                        (row[0], "confirmed_hard_bounce_review_required", now.timestamp()))
             self._apply_bounce_pause(db, now)
