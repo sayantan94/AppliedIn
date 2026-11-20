@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
+from fastapi import Request
+
 from core.outreach_contacts import (ContactHold, LinkedInSnapshot, VerifiedRecipient,
                                     person_key, read_linkedin)
 from core.outreach_email import _official_page, approved_variant, render_approved
@@ -210,7 +212,7 @@ def register_routes(app, settings):
     import hmac
     import ipaddress
     import secrets
-    from fastapi import HTTPException, Request
+    from fastapi import HTTPException
     from fastapi.responses import JSONResponse
     from core.stores import make_stores
 
