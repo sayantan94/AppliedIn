@@ -107,19 +107,29 @@ class _PublishedPersonBinding(HTMLParser):
     def binds(self, full_name):
         required = " ".join(full_name.casefold().split())
         boundary = re.compile(r"(?<!\w)" + re.escape(required) + r"(?!\w)")
+
+        def uniquely_named(text):
+            # A single mailto cannot prove which person owns it in a shared
+            # card listing more than one person's full name.
+            if not boundary.search(text) or len(text) > 400:
+                return False
+            rest = boundary.sub(" ", text, count=1)
+            rest = re.sub(r"[^a-z0-9]+", " ", rest).strip()
+            return rest in {"", "contact", "email", "contact me", "email me",
+                            "send email", "send message", "get in touch"}
+
         for anchor in self.anchors:
             if anchor["mail"] != self.target:
                 continue
             label = " ".join(" ".join(anchor["text"]).casefold().split())
-            if boundary.search(label):
+            if uniquely_named(label):
                 return True
             parent = anchor["parent"]
             if parent is not None and parent["emails"] == {self.target}:
                 context = " ".join(" ".join(parent["text"]).casefold().split())
-                if len(context) <= 400 and boundary.search(context):
+                if uniquely_named(context):
                     return True
         return False
-
 
 @dataclass(frozen=True)
 class VerifiedRecipient:
@@ -197,7 +207,7 @@ def read_linkedin(settings, *, company_id, company_name, company_domain, strict=
         raise ContactHold("linkedin_private_source_unreadable") from exc
     people, profiles, warnings = set(), set(), set()
     identified_rows = []
-    for row in records:
+    for row_index, row in enumerate(records):
         if not isinstance(row, dict):
             raise ContactHold("linkedin_row_invalid")
         status = row.get(fields["status"])
@@ -233,25 +243,28 @@ def read_linkedin(settings, *, company_id, company_name, company_domain, strict=
             # pretending an unmapped record frees a company slot.
             raw_key = json.dumps(row, sort_keys=True, ensure_ascii=True)
             identity = "provisional:linkedin:" + hashlib.sha256(
-                raw_key.encode("utf-8")).hexdigest()[:32]
+                (raw_key + "|" + str(row_index)).encode("utf-8")).hexdigest()[:32]
             warnings.add("linkedin_identity_or_employer_join_unresolved")
-        identified_rows.append((identity, verified_profile))
-    # A normalized full name is not a unique identity when separate verified
-    # /in/ profiles share it. Strict SMTP must reconcile such joins; manual
-    # views conservatively charge each independently witnessed profile as one
-    # provisional person. Repeated rows of the same profile count only once.
+        identified_rows.append((identity, verified_profile, row_index))
+    # A full name is not a unique identity when two contact records have no
+    # verified profile. Conservatively count independent rows as provisional
+    # people for manual capacity; duplicate verified profile URLs deduplicate.
     name_profiles = {}
-    for identity, verified_profile in identified_rows:
-        if identity.startswith("name:") and verified_profile:
-            name_profiles.setdefault(identity, set()).add(verified_profile)
-    collisions = {name for name, ids in name_profiles.items() if len(ids) > 1}
+    for identity, verified_profile, _index in identified_rows:
+        if identity.startswith("name:"):
+            name_profiles.setdefault(identity, []).append(verified_profile)
+    collisions = {
+        name for name, ids in name_profiles.items()
+        if len(set(profile for profile in ids if profile)) > 1
+        or (len(ids) > 1 and any(profile is None for profile in ids))
+    }
     if collisions and strict:
         raise ContactHold("linkedin_name_profile_collision_requires_review")
     if collisions:
         warnings.add("linkedin_name_profile_collision_requires_reconciliation")
-    for identity, verified_profile in identified_rows:
+    for identity, verified_profile, row_index in identified_rows:
         if identity in collisions:
-            witness = verified_profile or identity + "|unbound-profile"
+            witness = verified_profile or identity + "|unbound-row:" + str(row_index)
             identity = "provisional:linkedin:" + hashlib.sha256(
                 witness.encode("utf-8")).hexdigest()[:32]
         people.add(identity)
