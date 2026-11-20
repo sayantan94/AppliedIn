@@ -401,15 +401,24 @@ class Ledger:
                 raise OutreachHold("queue_id_not_found")
             deadline = db.execute("SELECT next_not_before FROM email_dispatch WHERE id=1").fetchone()
             reason = row["reason"]
-            action = ("recorded_stop_not_retryable" if row["state"] == "canceled" else
+            action = ("not_retryable_canceled" if row["state"] == "canceled" else
+                      "no_action_smtp_accepted" if row["state"] == "confirmed_smtp_accepted" else
                       "owner_reconcile_uncertain" if row["state"] in
                       {"in_flight", "uncertain"} else
                       "owner_reconcile_no_wire" if row["state"] == "held" and row["attempt_id"] else
+                      "owner_reconcile_dispatch_metadata" if reason in
+                      {"dispatch_metadata_missing", "dispatch_metadata_corrupt",
+                       "dispatch_clock_or_metadata_invalid"} else
+                      "wait_for_global_smtp_fence" if reason in
+                      {"another_smtp_wire_unresolved", "unresolved_prior_wire",
+                       "dispatch_gap_not_elapsed"} else
                       "owner_choose_stage_variant" if not row["selected_variant"] or
                       "approval" in reason or "variant" in reason else
                       "wait_for_sender_recheck")
-            next_at = max(row["next_check_at"],
-                          deadline[0] if deadline and deadline[0] is not None else 0)
+            next_at = (None if row["state"] in
+                       {"canceled", "uncertain", "confirmed_smtp_accepted"} else
+                       max(row["next_check_at"],
+                           deadline[0] if deadline and deadline[0] is not None else 0))
             return {"queue_id": row["id"], "stage": row["stage"],
                     "state": row["state"], "version": row["version"],
                     "reason": reason, "next_check_at": next_at, "next_action": action}
@@ -442,7 +451,19 @@ class Ledger:
                     AND state IN ('queued','held') AND attempt_id IS NULL
                     AND next_check_at<=?""",
                     (now.timestamp()+300,now.timestamp(),now.timestamp()))
-            self._fence(db,now)
+            try:
+                self._fence(db,now)
+            except OutreachHold as exc:
+                # Surface a busy or corrupt global fence in the private report.
+                db.execute("""UPDATE email_queue SET state='held',reason=?,
+                    next_check_at=?,updated_at=?,version=version+1
+                    WHERE state IN ('queued','held') AND attempt_id IS NULL
+                      AND selected_variant IS NOT NULL AND next_check_at<=?
+                      AND (stage=0 OR ?) AND (stage<=2 OR ?)""",
+                    (str(exc),now.timestamp()+300,now.timestamp(),now.timestamp(),
+                     int(bool(getattr(self.settings,"outreach_followups_auto",False))),
+                     int(bool(getattr(self.settings,"outreach_followups_expanded",False)))))
+                return None
             row = db.execute("""SELECT id FROM email_queue
                 WHERE state IN ('queued','held') AND attempt_id IS NULL
                   AND selected_variant IS NOT NULL AND selected_digest IS NOT NULL
