@@ -146,3 +146,14 @@ def test_same_name_without_profiles_refuses_auto_and_charges_two_manual_slots(tm
     assert not observed.profiles
     assert all(p.startswith("provisional:linkedin:") for p in observed.people)
     assert "linkedin_name_profile_collision_requires_reconciliation" in observed.warnings
+
+
+def test_nested_second_person_cannot_disappear_from_mailbox_context():
+    """Closing a nested div must not erase another person's competing name."""
+    nested = ("<div>Test User <div>Other Person</div> "
+              "<a href='mailto:test@example-co.com'>Contact</a></div>")
+    with pytest.raises(ContactHold, match="named_person_exact_address_binding_missing"):
+        verify_published_contact(
+            company_domain="example-co.com",
+            source_url="https://example-co.com/team",
+            html=nested, address="test@example-co.com", name="Test User")
