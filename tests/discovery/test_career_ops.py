@@ -1912,8 +1912,18 @@ def test_funded_application_handoff_reuses_existing_post_and_refuses_indexes(tmp
         {"title": "Talent Pool", "text": "Submit your CV through this official form."},
         now=current)
     assert official["body"]["discovery_source"] == "funded_no_opening"
-    with pytest.raises(SourceHold, match="custom_cv_form_unverified"):
+    foreign_url = "https://foreign.example/jobs/cv"
+    # Parser identity mismatches are an earlier, independent refusal. To
+    # exercise the official employer-domain guard, supply the exact identity
+    # the existing URL parser actually derives from the forged URL.
+    with pytest.raises(SourceHold, match="identity_unverified"):
         co.funded_apply_role_handoff(
             settings, key, {"ats": "custom", "company": "Example Co"},
-            "https://foreign.example/jobs/cv",
+            foreign_url, {"title": "Talent Pool", "text": "Submit your CV."},
+            now=current)
+    foreign_identity = _manual_role_identity(foreign_url)
+    assert foreign_identity and foreign_identity["ats"] == "custom"
+    with pytest.raises(SourceHold, match="custom_cv_form_unverified"):
+        co.funded_apply_role_handoff(
+            settings, key, foreign_identity, foreign_url,
             {"title": "Talent Pool", "text": "Submit your CV."}, now=current)
