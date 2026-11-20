@@ -705,44 +705,54 @@ class Ledger:
                               (company_id, person_key, stage)).fetchone()[0]
 
     def due_followups(self, *, now=None, limit=10):
-        """Only complete accepted threads, not uncertain/recovered sends."""
+        """Exclude queued/held/terminal successors in SQL before each bounded page.
+
+        Effective earned due is a pixel-dependent value, not necessarily ordered
+        by predecessor acceptance. Compare *all* unblocked, keyset-paged candidates.
+        """
         now = _time(now)
-        limit = max(1, min(int(limit), 25))
-        max_stage = 5 if getattr(self.settings, "outreach_followups_expanded", False) else 2
-        with self._tx() as db:
-            rows = db.execute("""
-                SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
-                       a.contact_name,a.stage,a.accepted_at,a.id,a.tracking_mode
-                FROM attempts a
-                WHERE a.state='confirmed_smtp_accepted'
-                  AND a.stage < ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM attempts b
-                      WHERE b.company_id=a.company_id
-                        AND b.person_key=a.person_key
-                        AND b.state!='definite_pre_wire_failure'
-                        AND b.stage>a.stage)
-                ORDER BY a.accepted_at ASC LIMIT 100
-            """, (max_stage,)).fetchall()
-        result = []
-        for company, person, recipient, url, name, stage, accepted_at, attempt_id, mode in rows:
+        limit = max(1,min(int(limit),25))
+        max_stage = 5 if getattr(self.settings,"outreach_followups_expanded",False) else 2
+        cursor = None
+        eligible = []
+        while True:
             with self._tx() as db:
-                opens = self._qualified_opens(db, attempt_id)
-            if stage >= 2:
-                with self._tx() as db:
-                    if not self._ever_qualified_three(db, company, person):
-                        continue
-            accepted = datetime.fromtimestamp(accepted_at, UTC)
-            earned = self.earn_due(
-                company, person, stage+1,
-                due_for_band(accepted, opens=opens, tracked=mode == "pixel_enabled"))
-            if earned <= now.timestamp():
-                result.append({"company_id": company, "person_key": person,
-                               "recipient": recipient, "contact_url": url,
-                               "person_name": name, "stage": stage+1})
-            if len(result) >= limit:
+                rows = db.execute("""
+                    SELECT a.company_id,a.person_key,a.recipient,a.contact_url,
+                           a.contact_name,a.stage,a.accepted_at,a.id,a.tracking_mode
+                    FROM attempts a
+                    WHERE a.state='confirmed_smtp_accepted' AND a.stage<?
+                      AND NOT EXISTS (SELECT 1 FROM attempts b
+                          WHERE b.company_id=a.company_id AND b.person_key=a.person_key
+                            AND b.stage>a.stage AND b.state!='definite_pre_wire_failure')
+                      AND NOT EXISTS (SELECT 1 FROM email_queue q
+                          WHERE q.company_id=a.company_id AND q.person_key=a.person_key
+                            AND q.stage=a.stage+1)
+                      AND (? IS NULL OR
+                           (a.accepted_at,a.company_id,a.person_key,a.stage) > (?,?,?,?))
+                    ORDER BY a.accepted_at,a.company_id,a.person_key,a.stage LIMIT 100
+                """, (max_stage,None if cursor is None else 1,
+                      *(cursor or (0,"","",-1)))).fetchall()
+            if not rows:
                 break
-        return result
+            for company,person,recipient,url,name,stage,accepted_at,attempt_id,mode in rows:
+                cursor = (accepted_at,company,person,stage)
+                with self._tx() as db:
+                    if stage >= 2 and not self._ever_qualified_three(db,company,person):
+                        continue
+                    opens = self._qualified_opens(db,attempt_id)
+                accepted = datetime.fromtimestamp(accepted_at,UTC)
+                earned = self.earn_due(company,person,stage+1,due_for_band(
+                    accepted,opens=opens,tracked=mode=="pixel_enabled"))
+                if (earned <= now.timestamp()
+                        and now.timestamp()-accepted_at >= 48*3600):
+                    eligible.append((earned,accepted_at,company,person,stage+1,{
+                        "company_id":company,"person_key":person,"recipient":recipient,
+                        "contact_url":url,"person_name":name,"stage":stage+1}))
+            if len(rows)<100:
+                break
+        eligible.sort(key=lambda row:row[:5])
+        return [item[-1] for item in eligible[:limit]]
 
     def clear_reviewed_email_hold(self, company_id, *, reviewed=False):
         if reviewed is not True:
