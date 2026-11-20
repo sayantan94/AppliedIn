@@ -862,6 +862,15 @@ class Ledger:
             db.execute("DELETE FROM pixel_events WHERE token_sha IN "
                        "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",(attempt_id,))
             db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?",(attempt_id,))
+            # As with reserved-only definite_no_wire, a proved no-transport
+            # stage-0 handoff must not strand its email person reservation.
+            # Another non-definite attempt still owns the slot if present.
+            if q["person_key"] != "org" and not db.execute(
+                    "SELECT 1 FROM attempts WHERE company_id=? AND person_key=? "
+                    "AND state!='definite_pre_wire_failure'",
+                    (q["company_id"], q["person_key"])).fetchone():
+                db.execute("DELETE FROM people WHERE company_id=? AND person_key=? "
+                           "AND channel='email'", (q["company_id"], q["person_key"]))
             # The persisted handoff deadline survives even this proven no-wire.
 
     def earn_due(self, company_id, person_key, stage, calculated):
