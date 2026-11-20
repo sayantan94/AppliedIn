@@ -763,13 +763,19 @@ class Ledger:
                 # acceptance too, not only when a DSN arrives.
                 self._apply_bounce_pause(db, now)
 
-    def definite_no_wire(self, attempt_id):
-        """Only permitted for reserved attempts *before* begin_wire."""
+    def definite_no_wire(self, attempt_id, *, owner_token=None,
+                         owner_inactive_proved=False):
+        """Reserved-only no-wire; queue-linked owners cannot be stolen by age."""
         with self._tx() as db:
             row = db.execute("SELECT company_id,person_key,state,queue_id FROM attempts WHERE id=?",
                              (attempt_id,)).fetchone()
             if not row or row[2] != "reserved":
                 raise OutreachHold("cannot_prove_no_wire_after_begin")
+            if row[3]:
+                q=self._qrow(db,row[3])
+                if (not q or q["state"]!="reserved" or q["attempt_id"]!=attempt_id
+                        or (q["owner_token"]!=owner_token and owner_inactive_proved is not True)):
+                    raise OutreachHold("positive_no_wire_owner_evidence_required")
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
             if row[3]:
