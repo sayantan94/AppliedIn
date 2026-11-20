@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from discovery import funding as funding_producer
 from discovery.funding import State
 from core.outreach_sources import SourceHold, read_no_opening
 
@@ -206,3 +207,117 @@ def test_official_custom_cv_form_can_use_shorter_domain_label(tmp_path):
         {"title":"Talent Pool", "text":"Please submit your CV via this official form."},
         now=NOW)
     assert route.name == "Example Co Incorporated"
+
+
+def _due_pending_recheck(tmp_path, *, prior_success=None):
+    """Synthetic due employer; no feeds, browser, mailbox or owner data."""
+    settings = source(tmp_path, seen=NOW - timedelta(days=8))
+    state = State(tmp_path / "funded-watchlist.yaml")
+    row = state.data["pending"][KEY]
+    row["next_check"] = (NOW - timedelta(minutes=1)).isoformat()
+    if prior_success is not None:
+        row["last_successful_no_opening_recheck_at"] = prior_success.isoformat()
+    state.save()
+    limits = SimpleNamespace(
+        funding_max_candidates_per_pass=3,
+        funding_daily_new_companies=20,
+        funding_recheck_days=7,
+    )
+    return settings, state, limits
+
+
+@pytest.mark.parametrize("reason", ["no_openings", "no_relevant_openings"])
+def test_successful_no_opening_recheck_refreshes_proof_without_changing_seen_at(
+        tmp_path, monkeypatch, reason):
+    settings, state, limits = _due_pending_recheck(tmp_path)
+    original_seen = state.data["pending"][KEY]["seen_at"]
+    original_deal_seen = state.data["deals"][KEY]["seen_at"]
+    monkeypatch.setattr(
+        funding_producer, "_preview_verified",
+        lambda *args, **kwargs: (reason, None))
+    assert funding_producer._recheck_pending(
+        state, limits, object(), NOW) == 1
+    saved = State(tmp_path / "funded-watchlist.yaml").data
+    row = saved["pending"][KEY]
+    assert row["reason"] == reason
+    assert saved["deals"][KEY]["reason"] == reason
+    assert row["last_successful_no_opening_recheck_at"] == NOW.isoformat()
+    assert row["seen_at"] == original_seen
+    assert saved["deals"][KEY]["seen_at"] == original_deal_seen
+    lead = read_no_opening(settings, KEY, now=NOW + timedelta(days=6))
+    assert lead.verified_at == NOW
+
+
+@pytest.mark.parametrize("prior_success", [None, NOW - timedelta(days=2)])
+@pytest.mark.parametrize(
+    "outcome",
+    ["failed_read", "consumer_guard_refused", "relevance_budget",
+     "daily_addition_deferred"],
+)
+def test_failed_or_partial_recheck_never_changes_success_proof(
+        tmp_path, monkeypatch, prior_success, outcome):
+    settings, state, limits = _due_pending_recheck(
+        tmp_path, prior_success=prior_success)
+    original_seen = state.data["pending"][KEY]["seen_at"]
+    original_deal_seen = state.data["deals"][KEY]["seen_at"]
+
+    if outcome == "failed_read":
+        def preview(*args, **kwargs):
+            raise funding_producer.FundingRefusal("synthetic_read_failure")
+    elif outcome == "daily_addition_deferred":
+        def preview(*args, **kwargs):
+            return "admissible", {"name": "Example Co"}
+        monkeypatch.setattr(state, "reserve", lambda *args, **kwargs: False)
+    else:
+        def preview(*args, **kwargs):
+            return outcome, None
+
+    monkeypatch.setattr(funding_producer, "_preview_verified", preview)
+    assert funding_producer._recheck_pending(
+        state, limits, object(), NOW) == 1
+    saved = State(tmp_path / "funded-watchlist.yaml").data
+    row = saved["pending"][KEY]
+    assert row["reason"] == (
+        "pending_recheck_failed" if outcome == "failed_read" else outcome)
+    assert row["seen_at"] == original_seen
+    assert saved["deals"][KEY]["seen_at"] == original_deal_seen
+    if prior_success is None:
+        assert "last_successful_no_opening_recheck_at" not in row
+    else:
+        assert row["last_successful_no_opening_recheck_at"] == prior_success.isoformat()
+    with pytest.raises(SourceHold, match="not_proved_no_matching_opening"):
+        read_no_opening(settings, KEY, now=NOW)
+
+
+@pytest.mark.parametrize("age_days, permitted", [(6, True), (8, False)])
+def test_absent_recheck_timestamp_uses_seen_at_and_holds_stale_sources(
+        tmp_path, age_days, permitted):
+    seen = NOW - timedelta(days=age_days)
+    settings = source(tmp_path, seen=seen)
+    row = State(tmp_path / "funded-watchlist.yaml").data["pending"][KEY]
+    assert "last_successful_no_opening_recheck_at" not in row
+    if permitted:
+        assert read_no_opening(settings, KEY, now=NOW).verified_at == seen
+    else:
+        with pytest.raises(SourceHold, match="fresh_successful_funding_recheck_required"):
+            read_no_opening(settings, KEY, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "invalid_value, hold_reason",
+    [("not-a-date", "invalid_funding_recheck_time"),
+     (NOW.replace(tzinfo=None).isoformat(), "funding_recheck_timezone_missing"),
+     (None, "missing_funding_recheck_time"),
+     ((NOW + timedelta(days=1)).isoformat(), "funded_source_not_current")],
+)
+def test_present_invalid_recheck_witness_fails_closed_even_when_seen_at_fresh(
+        tmp_path, invalid_value, hold_reason):
+    settings = source(tmp_path)
+    state = State(tmp_path / "funded-watchlist.yaml")
+    state.data["pending"][KEY][
+        "last_successful_no_opening_recheck_at"] = invalid_value
+    state.save()
+    for require_fresh in (True, False):
+        with pytest.raises(SourceHold, match=hold_reason):
+            read_no_opening(
+                settings, KEY, now=NOW, require_fresh=require_fresh)
