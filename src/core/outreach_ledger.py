@@ -517,6 +517,40 @@ class Ledger:
                 owner_token=NULL,version=version+1,next_check_at=?,updated_at=? WHERE id=?""",
                 (now.timestamp()+300,now.timestamp(),queue_id))
 
+    def reconcile_unresolved_wire(self, queue_id, *, expected_version,
+                                  owner_terminated_proved=False, now=None):
+        """Positive external owner-termination proof only; never infer no wire.
+
+        A crashed sender may have reached SMTP before recording acceptance.
+        Its reservation stays charged and uncertain; the global fence clears
+        only by explicit reconciliation, keeping the original handoff deadline.
+        """
+        now=_time(now)
+        if owner_terminated_proved is not True or type(expected_version) is not int:
+            raise OutreachHold("positive_owner_termination_required")
+        with self._tx() as db:
+            q=self._qrow(db,queue_id)
+            if (not q or q["version"]!=expected_version
+                    or q["state"]!="in_flight" or not q["attempt_id"]):
+                raise OutreachHold("queue_wire_state_changed")
+            active=db.execute("SELECT active_attempt FROM email_dispatch WHERE id=1").fetchone()
+            attempt=db.execute("SELECT state FROM attempts WHERE id=? AND queue_id=?",
+                               (q["attempt_id"],queue_id)).fetchone()
+            if not active or active[0]!=q["attempt_id"] or not attempt or attempt[0]!="in_flight":
+                raise OutreachHold("global_wire_state_unresolved")
+            db.execute("UPDATE attempts SET state='uncertain' WHERE id=?",(q["attempt_id"],))
+            db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
+            db.execute("""UPDATE email_queue SET state='uncertain',
+                reason='wire_terminated_without_definitive_smtp_outcome',
+                owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
+                (now.timestamp(),queue_id))
+            return {"queue_id":queue_id,"state":"uncertain"}
+
+    @staticmethod
+    def _recorded_stop(db,company_id,person_key):
+        return db.execute("SELECT 1 FROM stops WHERE company_id=? AND person_key IN ('*',?)",
+                          (company_id,person_key)).fetchone() is not None
+
     def reserve_email(self, lead: FundedNoOpening, contact: VerifiedRecipient,
                       linkedin: LinkedInSnapshot, *, no_application: bool,
                       resume_seed_proved: bool, sender_proved: bool,
@@ -739,9 +773,12 @@ class Ledger:
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
             if row[3]:
-                db.execute("""UPDATE email_queue SET state='held',reason='owner_no_wire_repair_required',
+                stopped=self._recorded_stop(db,row[0],row[1])
+                db.execute("""UPDATE email_queue SET state=?,reason=?,
                     owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
-                    (_time().timestamp(),row[3]))
+                    ("canceled" if stopped else "held",
+                     "recorded_company_or_recipient_stop" if stopped
+                     else "owner_no_wire_repair_required",_time().timestamp(),row[3]))
             db.execute("DELETE FROM pixel_events WHERE token_sha IN "
                        "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",
                        (attempt_id,))
@@ -769,9 +806,12 @@ class Ledger:
             db.execute("UPDATE attempts SET state='definite_pre_wire_failure' WHERE id=?",
                        (attempt_id,))
             db.execute("UPDATE email_dispatch SET active_attempt=NULL WHERE id=1")
-            db.execute("""UPDATE email_queue SET state='held',reason='owner_no_wire_repair_required',
+            stopped=self._recorded_stop(db,q["company_id"],q["person_key"])
+            db.execute("""UPDATE email_queue SET state=?,reason=?,
                 owner_token=NULL,version=version+1,updated_at=? WHERE id=?""",
-                (now.timestamp(),row[0]))
+                ("canceled" if stopped else "held",
+                 "recorded_company_or_recipient_stop" if stopped
+                 else "owner_no_wire_repair_required",now.timestamp(),row[0]))
             db.execute("DELETE FROM pixel_events WHERE token_sha IN "
                        "(SELECT token_sha FROM pixel_tokens WHERE attempt_id=?)",(attempt_id,))
             db.execute("DELETE FROM pixel_tokens WHERE attempt_id=?",(attempt_id,))
