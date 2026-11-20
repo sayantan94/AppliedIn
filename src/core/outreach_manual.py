@@ -14,6 +14,7 @@ from core.outreach_contacts import (ContactHold, LinkedInSnapshot, VerifiedRecip
 from core.outreach_email import _official_page, approved_variant, render_approved
 from core.outreach_ledger import Ledger, OutreachHold
 from core.outreach_sources import SourceHold, read_no_opening
+from discovery.funding import registrable
 from tools.outreach_guard import company_application_clear
 
 
@@ -100,6 +101,8 @@ def queue_target(*, settings, company_id: str, channel: str, target_url: str,
     if not _social_link(channel, target_url):
         raise OutreachHold("manual_social_url_unverified")
     url, html = _official_page(settings, evidence_url, now)
+    if registrable(url) != lead.domain:
+        raise OutreachHold("manual_evidence_not_employer_published")
     if not isinstance(html, str) or len(html.encode("utf-8")) > 256000:
         raise OutreachHold("manual_evidence_page_unbounded")
     links = _PublicLinks()
@@ -218,10 +221,10 @@ def register_routes(app, settings):
 
     csrf_secret = secrets.token_urlsafe(32)
 
-    def checked(request: Request, *, mutate=False):
+    def checked(request: Request, *, mutate=False, manual=True):
         if (settings.mode != "local" or not settings.outreach_enabled
-                or not getattr(settings, "outreach_manual_enabled", False)):
-            raise HTTPException(404, "Local outreach manual lane is disabled.")
+                or (manual and not getattr(settings, "outreach_manual_enabled", False))):
+            raise HTTPException(404, "Local outreach lane is disabled.")
         try:
             if not ipaddress.ip_address(request.client.host).is_loopback:
                 raise ValueError
@@ -262,8 +265,25 @@ def register_routes(app, settings):
 
     @app.get("/outreach/csrf")
     def csrf(request: Request):
-        checked(request)
+        checked(request, manual=False)
         return reply({"csrf": csrf_secret})
+
+    @app.post("/outreach/email/first")
+    def first_email(body: dict, request: Request):
+        """Owner-selected first recipient, verified again by the SMTP admission path.
+
+        No background contact guessing: every call requires a fresh official
+        page, exact published address, immutable approval and private seed.
+        """
+        checked(request, mutate=True, manual=False)
+        from core.outreach_email import send_approved
+        return guarded(lambda: send_approved(
+            settings=settings, company_id=body.get("company_id"),
+            contact_page_url=body.get("contact_page_url"),
+            exact_address=body.get("exact_address"),
+            person_name=body.get("person_name", ""),
+            variant_id=body.get("variant_id"), stores=make_stores(settings),
+            stage=0))
 
     @app.get("/outreach/report")
     def report(company_id: str, request: Request):
