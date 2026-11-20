@@ -324,6 +324,63 @@ class Ledger:
                  now.timestamp(), now.timestamp(), now.timestamp()))
             return {"queue_id": queue_id, "state": state}
 
+    def enqueue_due_from_accepted(self, candidate, *, variant_id=None, digest=None,
+                                  reason="", now=None):
+        """Only persisted accepted predecessor evidence authorizes follow-up intent.
+
+        A temporarily unreadable/stale #386 source must not let the first due
+        person starve everybody behind them. All source proof is read fresh
+        by the worker, not by this uncharged producer.
+        """
+        now=_time(now)
+        if (not isinstance(candidate,dict) or type(candidate.get("stage")) is not int
+                or not 1<=candidate["stage"]<=5
+                or (variant_id is None)!=(digest is None)):
+            raise OutreachHold("followup_queue_candidate_invalid")
+        if variant_id is not None and (not re.fullmatch(r"[A-Za-z0-9_-]{1,80}",variant_id)
+                                       or not re.fullmatch(r"[a-f0-9]{64}",digest)):
+            raise OutreachHold("followup_queue_approval_invalid")
+        keys=("company_id","person_key","recipient","contact_url","person_name")
+        if any(not isinstance(candidate.get(k),str) for k in keys):
+            raise OutreachHold("followup_queue_candidate_invalid")
+        with self._tx() as db:
+            prior=db.execute("""SELECT accepted_at FROM attempts WHERE company_id=?
+                AND person_key=? AND recipient=? AND contact_url=? AND contact_name=?
+                AND stage=? AND state='confirmed_smtp_accepted'""",
+                (candidate["company_id"],candidate["person_key"],candidate["recipient"],
+                 candidate["contact_url"],candidate["person_name"],
+                 candidate["stage"]-1)).fetchone()
+            if not prior or now.timestamp()-prior[0]<48*3600:
+                raise OutreachHold("followup_predecessor_not_accepted_or_too_recent")
+            due=db.execute("""SELECT due_at FROM earned_due
+                WHERE company_id=? AND person_key=? AND stage=?""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone()
+            if not due or now.timestamp()<due[0]:
+                raise OutreachHold("followup_not_yet_earned")
+            if db.execute("""SELECT 1 FROM attempts WHERE company_id=? AND person_key=?
+                AND stage>=? AND state!='definite_pre_wire_failure'""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone():
+                raise OutreachHold("followup_stage_already_attempted")
+            existing=db.execute("""SELECT id,recipient,state FROM email_queue
+                WHERE company_id=? AND person_key=? AND stage=?""",
+                (candidate["company_id"],candidate["person_key"],candidate["stage"])).fetchone()
+            if existing:
+                if existing[1]!=candidate["recipient"]:
+                    raise OutreachHold("queue_recipient_identity_changed")
+                return {"queue_id":existing[0],"state":existing[2]}
+            queue_id=uuid.uuid4().hex
+            state="queued" if variant_id else "held"
+            db.execute("""INSERT INTO email_queue
+                (id,company_id,person_key,recipient,contact_url,contact_name,stage,
+                 selected_variant,selected_digest,state,reason,
+                 created_at,updated_at,next_check_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (queue_id,candidate["company_id"],candidate["person_key"],
+                 candidate["recipient"],candidate["contact_url"],candidate["person_name"],
+                 candidate["stage"],variant_id,digest,state,reason if not variant_id else "",
+                 now.timestamp(),now.timestamp(),now.timestamp()))
+            return {"queue_id":queue_id,"state":state}
+
     def queue_intent(self, queue_id):
         """Private internal worker/owner-repair read, never a route response."""
         if not isinstance(queue_id,str) or not re.fullmatch(r"[a-f0-9]{32}",queue_id):
@@ -391,7 +448,7 @@ class Ledger:
                   AND selected_variant IS NOT NULL AND selected_digest IS NOT NULL
                   AND next_check_at<=? AND (stage=0 OR ?)
                   AND (stage<=2 OR ?)
-                ORDER BY created_at,id LIMIT 1""",
+                ORDER BY next_check_at,created_at,id LIMIT 1""",
                 (now.timestamp(),int(bool(getattr(self.settings,"outreach_followups_auto",False))),
                  int(bool(getattr(self.settings,"outreach_followups_expanded",False))))).fetchone()
             if not row:
