@@ -526,7 +526,7 @@ class Ledger:
         This does not authenticate the provider or the recipient: those require
         a separate affirmative owner verification before confirming a bounce.
         """
-        if (not re.fullmatch(r"[1-9]\\d*", str(uidvalidity))
+        if (not re.fullmatch(r"[1-9]\d*", str(uidvalidity))
                 or type(uid) is not int or uid <= 0):
             raise OutreachHold("dsn_uid_unverified")
         with self._tx() as db:
