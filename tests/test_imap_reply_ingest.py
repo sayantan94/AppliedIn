@@ -963,7 +963,7 @@ def test_cold_thread_auto_reply_not_human_and_provider_dsn_must_be_permanent(tmp
     assert report["global_email_pause"] is False
 
 
-def test_cold_provider_confirmed_permanent_bounce_is_contact_scoped(tmp_path):
+def test_cold_configured_provider_from_does_not_authenticate_permanent_bounce(tmp_path):
     from core.outreach_contacts import LinkedInSnapshot
     s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
     dsn = (f"From: mailer-daemon@example-co.com\r\n"
@@ -975,7 +975,8 @@ def test_cold_provider_confirmed_permanent_bounce_is_contact_scoped(tmp_path):
         ledger, s, dsn, b"Final-Recipient: rfc822; test@example-co.com\r\nStatus: 5.1.1",
         "7", 14)
     report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
-    assert report["company_email_hold"] == "confirmed_hard_bounce_review_required"
+    assert report["company_email_hold"] == "suspected_dsn_needs_review"
+    assert report["bounced_attempts"] == 0
     assert report["global_email_pause"] is False
 
 
@@ -1078,3 +1079,71 @@ def test_cold_conflicting_persisted_references_hold_both_threads(tmp_path):
     assert first_report["company_email_hold"] == "unthreaded_or_ambiguous_reply"
     assert second_report["company_email_hold"] == "unthreaded_or_ambiguous_reply"
     assert first_report["matched_human_threads"] == 0
+
+
+def test_cold_human_opt_out_with_auto_response_suppress_is_still_a_stop(tmp_path):
+    """Suppression instructions on inbound mail do not prove an auto-reply."""
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    headers = (f"From: Test User <test@example-co.com>\r\n"
+               f"To: sender@example-co.com\r\n"
+               f"Message-ID: <human-suppress@example-co.com>\r\n"
+               f"In-Reply-To: {ticket['message_id']}\r\n"
+               f"X-Auto-Response-Suppress: All\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(
+        ledger, s, headers, b"Please do not contact me.", "7", 90)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_stop"] == "opt_out"
+    assert report["matched_human_threads"] == 1
+
+
+def test_outreach_failed_prefix_keeps_uid_and_revokes_poll_until_retry(tmp_path, monkeypatch):
+    """A valid inbound Message-ID is not proof that the missing body had no stop."""
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    monkeypatch.setattr("core.rotation.aliases", lambda: [])
+    headers = {77: (b"From: test@example-co.com\r\n"
+                    b"To: sender@example-co.com\r\n"
+                    b"Message-ID: <unthreaded-reply@example-co.com>\r\n"
+                    b"Subject: Reply\r\n\r\n")}
+    class Broken(FakeClient):
+        def fetch_text_prefix(self, uid):
+            raise OSError("synthetic IMAP body-read failure")
+    assert reply_ingest.ingest_pass(
+        s, fake_credentials(), fake_stores(), Broken("7", [77], headers),
+        classifier=lambda *_: "other") == 0
+    path = tmp_path / reply_ingest.STATE_NAME
+    account = json.loads(path.read_text())["accounts"][
+        reply_ingest._account_key(fake_credentials())]
+    assert account["unresolved_uids"] == [77]
+    assert "7:77" not in account["processed"]
+    with ledger._tx() as db:
+        assert ledger._meta(db, "poll") == ""
+    class Recovered(FakeClient):
+        def fetch_text_prefix(self, uid):
+            return (f"{ticket['message_id']} Please do not contact me.").encode()
+    assert reply_ingest.ingest_pass(
+        s, fake_credentials(), fake_stores(), Recovered("7", [77], headers),
+        classifier=lambda *_: "other") == 1
+    account = json.loads(path.read_text())["accounts"][
+        reply_ingest._account_key(fake_credentials())]
+    assert account["unresolved_uids"] == []
+    assert ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))[
+        "company_stop"] == "opt_out"
+
+
+def test_forged_configured_dsn_sender_cannot_confirm_bounce_or_global_pause(tmp_path):
+    """Even with provider toggle on, mutable RFC 5322 From cannot prove transport origin."""
+    from core.outreach_contacts import LinkedInSnapshot
+    s, ledger, lead, ticket = _synthetic_outreach_ticket(tmp_path)
+    forged = (f"From: mailer-daemon@example-co.com\r\n"
+              f"To: sender@example-co.com\r\n"
+              f"Message-ID: <forged-dsn@example-co.com>\r\n"
+              f"X-Failed-Recipients: test@example-co.com\r\n"
+              f"In-Reply-To: {ticket['message_id']}\r\n\r\n").encode()
+    reply_ingest._cold_outreach_message(
+        ledger, s, forged, b"Status: 5.1.1 test@example-co.com", "7", 91)
+    report = ledger.report(lead.company_id, LinkedInSnapshot(frozenset(), frozenset()))
+    assert report["company_email_hold"] == "suspected_dsn_needs_review"
+    assert report["bounced_attempts"] == 0
+    assert report["global_email_pause"] is False
