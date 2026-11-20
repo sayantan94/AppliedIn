@@ -130,7 +130,7 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
                    now=T+timedelta(minutes=5))
     db.hold_orphaned_attempts()
     assert db.queue_status(q)["state"]=="reserved"
-    with pytest.raises(OutreachHold,match="charged_or_unproved"):
+    with pytest.raises(OutreachHold,match="queue_version_or_state_changed"):
         db.repair_queue(q,expected_version=db.queue_status(q)["version"],
                         expected_state="held",variant_id="approved",digest="a"*64)
     db.definite_no_wire(ticket["id"])
@@ -165,7 +165,7 @@ def test_versioned_no_name_hold_repair_and_permanent_stop(tmp_path):
         db.repair_queue(q["queue_id"],expected_version=99,expected_state="held",
                         variant_id="approved",digest="a"*64)
     fixed=db.repair_queue(q["queue_id"],expected_version=status["version"],
-                          expected_state="held",variant_id="approved",digest="a"*64)
+                          expected_state="held",variant_id="approved",digest="a"*64,now=T)
     assert fixed["queue_id"]==q["queue_id"]
     claim=db.claim_queue(now=T)
     db.release_claim(q["queue_id"],claim["owner_token"],
