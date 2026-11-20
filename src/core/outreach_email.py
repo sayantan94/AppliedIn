@@ -225,9 +225,9 @@ def send_approved(*, settings, company_id, contact_page_url, exact_address,
         raise OutreachHold("outreach_disabled_or_not_local")
     sender = _sender(settings)
     lead = read_no_opening(settings, company_id, now=now)
-    url, html = _official_page(settings, contact_page_url, now)
+    url, contact_html = _official_page(settings, contact_page_url, now)
     contact = verify_published_contact(company_domain=lead.domain, source_url=url,
-                                        html=html, address=exact_address, name=person_name)
+                                        html=contact_html, address=exact_address, name=person_name)
     linkedin = read_linkedin(settings, company_id=lead.company_id,
                              company_name=lead.name, company_domain=lead.domain)
     if not company_application_clear(stores, lead):
