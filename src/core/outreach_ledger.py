@@ -435,7 +435,8 @@ class Ledger:
                       linkedin: LinkedInSnapshot, *, no_application: bool,
                       resume_seed_proved: bool, sender_proved: bool,
                       variant: str, digest: str, stage=0, now=None,
-                      expanded_followups=False):
+                      expanded_followups=False, queue_id=None, owner_token=None,
+                      root_subject=None):
         """One atomic admission. Caller must re-read sources at pre-wire.
 
         Distinct first-email person keys are matched to the read-only LinkedIn
@@ -462,6 +463,22 @@ class Ledger:
         if type(stage) is not int or stage < 0 or stage > 5:
             raise OutreachHold("invalid_followup_stage")
         with self._tx() as db:
+            if queue_id is not None:
+                q = self._qrow(db, queue_id)
+                if (not q or q["state"] != "claimed" or q["owner_token"] != owner_token
+                        or q["attempt_id"] or q["company_id"] != lead.company_id
+                        or q["person_key"] != contact.person_key
+                        or q["recipient"] != contact.address or q["stage"] != stage
+                        or q["selected_variant"] != variant
+                        or q["selected_digest"] != digest):
+                    raise OutreachHold("queue_claim_or_frozen_approval_mismatch")
+                self._stage_enabled(stage)
+                self._window(now)
+                self._fence(db, now)
+                if stage == 0 and (not isinstance(root_subject, str)
+                                   or not root_subject or len(root_subject) > 180
+                                   or "\r" in root_subject or "\n" in root_subject):
+                    raise OutreachHold("first_logical_subject_missing")
             self._fresh_poll(db, now)
             self._stopped(db, lead.company_id, contact.person_key)
             day, day_cap = self._day(db, now)
@@ -529,6 +546,14 @@ class Ledger:
                     raise OutreachHold("followup_not_yet_due")
                 references = [row[3] for row in existing]
                 prior_id = references[-1]
+                if queue_id is not None:
+                    root = db.execute(
+                        "SELECT root_subject FROM attempts WHERE id=? AND stage=0 "
+                        "AND state='confirmed_smtp_accepted'",
+                        (existing[0][5],)).fetchone()
+                    if not root or not root[0]:
+                        raise OutreachHold("legacy_first_subject_unproven")
+                    root_subject = root[0]
             if contact.person_key == "org":
                 prior_org = db.execute("SELECT 1 FROM attempts WHERE company_id=? AND person_key='org' "
                                        "AND stage=0 AND state != 'definite_pre_wire_failure'",
@@ -545,16 +570,20 @@ class Ledger:
             db.execute("""INSERT INTO attempts
                 (id,company_id,person_key,recipient,contact_url,contact_name,
                  message_id,stage,state,approved_variant,approved_digest,
-                 reserved_at,day,prior_id,references_json)
-                VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?)""",
+                 reserved_at,day,prior_id,references_json,queue_id,root_subject)
+                VALUES (?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?)""",
                 (attempt_id, lead.company_id, contact.person_key, contact.address,
                  contact.evidence_url, contact.name, message_id, stage,
                  variant, digest, now.timestamp(), day, prior_id,
-                 json.dumps(references)))
+                 json.dumps(references),queue_id,root_subject))
+            if queue_id is not None:
+                db.execute("""UPDATE email_queue SET state='reserved',
+                    attempt_id=?,version=version+1,updated_at=? WHERE id=?""",
+                    (attempt_id,now.timestamp(),queue_id))
         return {"id": attempt_id, "message_id": message_id, "to": contact.address,
                 "in_reply_to": prior_id, "references": references,
                 "stage": stage, "variant": variant, "digest": digest,
-                "tracking_mode": "not_tracked"}
+                "tracking_mode": "not_tracked", "root_subject":root_subject}
 
     def begin_wire(self, attempt_id, *, source_checked: bool,
                    no_application: bool, linkedin_checked: bool, now=None):
