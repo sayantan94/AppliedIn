@@ -73,3 +73,20 @@ def test_ats_tenant_label_matching_domain_is_unresolved_not_assumed_distinct():
     # A distinct other employer with no verified join does not cause a global hold.
     row["company"] = "Unrelated Business"
     assert company_application_clear(stores, lead)
+
+
+def test_enum_submit_uncertain_and_status_set_only_are_still_stops():
+    from core.models import GateReason
+    lead = SimpleNamespace(name="Example Co", aliases=(), domain="example-co.com")
+    uncertain = {"company":"Example Co", "status":"needs_human",
+                 "gate_reason":GateReason.SUBMIT_UNCERTAIN}
+    source = SimpleNamespace(tracking=SimpleNamespace(
+        all=lambda: [uncertain], query_status=lambda _status: []))
+    assert not company_application_clear(source, lead)
+    # An explicit applied-status index is authoritative even if the row's
+    # legacy projection omitted the status field itself.
+    tracked = {"company":"Example Co", "jd_url":"https://example-co.com/jobs/42"}
+    source = SimpleNamespace(tracking=SimpleNamespace(
+        all=lambda: [],
+        query_status=lambda status: [tracked] if status == Status.APPLIED else []))
+    assert not company_application_clear(source, lead)
