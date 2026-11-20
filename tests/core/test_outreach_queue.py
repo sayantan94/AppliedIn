@@ -89,9 +89,11 @@ def test_global_atomic_fence_distinct_queue_rows_and_persisted_gap(tmp_path, gap
         intent(db,"b","Other User","other@example-co.com")["queue_id"]]
     a=db.claim_queue(now=T)
     b=db.claim_queue(now=T)
-    assert {a["id"],b["id"]}==set(ids)
-    first=reserve(db,"a","Test User","test@example-co.com",a)
-    second=reserve(db,"b","Other User","other@example-co.com",b)
+    # Identical fake timestamps do not define which UUID sorts first.
+    claims={a["id"]:a,b["id"]:b}
+    assert set(claims)==set(ids)
+    first=reserve(db,"a","Test User","test@example-co.com",claims[ids[0]])
+    second=reserve(db,"b","Other User","other@example-co.com",claims[ids[1]])
     # Handoff 1 is immediately eligible; SQLite commits before fake network.
     begin(db,first,gap=gap)
     with Ledger(s)._tx() as other_connection:
@@ -133,7 +135,7 @@ def test_crash_boundaries_have_no_claim_steal_and_no_wire_replay(tmp_path):
     with pytest.raises(OutreachHold,match="queue_version_or_state_changed"):
         db.repair_queue(q,expected_version=db.queue_status(q)["version"],
                         expected_state="held",variant_id="approved",digest="a"*64)
-    db.definite_no_wire(ticket["id"])
+    db.definite_no_wire(ticket["id"],owner_token=claim["owner_token"])
     status=db.queue_status(q)
     assert status["state"]=="held"
     with pytest.raises(OutreachHold,match="charged_or_unproved"):
