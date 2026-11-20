@@ -267,12 +267,15 @@ class Ledger:
                     {contact.person_key}) > 3)):
                 raise OutreachHold("hard_company_three_person_cap")
             if stage == 0:
+                # Distinguish a replay of our own first email from a reservation
+                # in another channel. Both remain hard refusals; classification
+                # must not hide a definitively accepted or uncertain attempt.
+                if existing:
+                    raise OutreachHold("duplicate_first_contact")
                 if contact.person_key != "org" and contact.person_key in existing_keys:
                     raise OutreachHold("cross_channel_person_already_reserved_or_contacted")
                 if contact.person_key != "org" and contact.person_key in linked:
                     raise OutreachHold("linkedin_already_contacted_person")
-                if existing:
-                    raise OutreachHold("duplicate_first_contact")
                 references, prior_id = [], None
             else:
                 if (not existing or any(row[1] != "confirmed_smtp_accepted" for row in existing)
