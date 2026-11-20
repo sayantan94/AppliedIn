@@ -276,3 +276,49 @@ def test_two_same_name_verified_profiles_consume_two_of_three_manual_slots(tmp_p
                              version=1, action="copy", stores=object(), now=T)
     report = manual.manual_report(settings=s, company_id=KEY, now=T)
     assert (report["used"], report["remaining"]) == (3, 0)
+
+
+def test_confirmed_bounce_triage_route_requires_owner_local_csrf(tmp_path, monkeypatch):
+    """A suspicious inbound UID needs the same protected local action as email."""
+    import asyncio
+    import httpx
+    from fastapi import FastAPI
+    from core import reply_ingest
+
+    s = setup(tmp_path, monkeypatch)
+    s.outreach_manual_enabled = False
+    recorded = []
+    monkeypatch.setattr(reply_ingest, "owner_confirm_suspected_hard_bounce",
+                        lambda _settings, **kwargs: (
+                            recorded.append(kwargs) or {"confirmed":True}))
+    app = FastAPI()
+    manual.register_routes(app, s)
+
+    async def loopback(scope, receive, send):
+        if scope["type"] == "http":
+            scope = {**scope, "server": ("127.0.0.1", 8788)}
+        await app(scope, receive, send)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=loopback, client=("127.0.0.1", 45555))
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://127.0.0.1:8788") as client:
+            csrf = (await client.get("/outreach/csrf")).json()["csrf"]
+            body = {"uidvalidity":"7", "uid":200, "message_id":"<first@example-co.com>",
+                    "failed_recipient":"test@example-co.com",
+                    "permanent_status":"5.1.1", "owner_reviewed":True,
+                    "provider_evidence_confirmed":True}
+            endpoint = "/outreach/email/confirm-bounce"
+            assert (await client.post(endpoint, json=body)).status_code == 403
+            assert (await client.post(endpoint, json=body, headers={
+                "Origin":"http://evil.example", "X-Outreach-CSRF":csrf})).status_code == 403
+            good = {"Origin":"http://127.0.0.1:8788", "X-Outreach-CSRF":csrf}
+            response = await client.post(endpoint, json=body, headers=good)
+            assert response.status_code == 200
+            assert response.json() == {"confirmed": True}
+            assert response.headers["Cache-Control"] == "no-store"
+            assert recorded[0]["uid"] == 200
+            s.outreach_enabled = False
+            assert (await client.post(endpoint, json=body, headers=good)).status_code == 404
+    asyncio.run(exercise())
+    assert len(recorded) == 1
