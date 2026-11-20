@@ -81,14 +81,20 @@ class _PublishedPersonBinding(HTMLParser):
                 len(links) == 1 and links[0].casefold().startswith("mailto:")) else ""
             parent = self.stack[-1] if self.stack else None
             if mail and parent is not None:
-                parent["emails"].add(mail)
+                # A nested team card must not hide a second mailbox from its
+                # containing card when deciding whether a name binds uniquely.
+                for frame in self.stack:
+                    frame["emails"].add(mail)
             self.current = {"mail": mail, "parent": parent, "text": []}
 
     def handle_data(self, data):
         if self.stack:
-            frame = self.stack[-1]
-            if sum(map(len, frame["text"])) < 500:
-                frame["text"].append(data[:500])
+            # Preserve descendant names in enclosing cards as well. Without
+            # this, nested markup could erase a second person's name from a
+            # parent used to authorize an unrelated mailto.
+            for frame in self.stack:
+                if sum(map(len, frame["text"])) < 500:
+                    frame["text"].append(data[:500])
         if self.current is not None and sum(map(len, self.current["text"])) < 500:
             self.current["text"].append(data[:500])
 
