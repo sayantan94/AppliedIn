@@ -639,7 +639,7 @@ def _rss_items(payload: bytes, kind: str) -> list[dict]:
         for tag in ("{http://purl.org/rss/1.0/modules/content/}encoded",
                     "description"):
             node = next((n for n in item if n.tag == tag), None)
-            if node is not None and node.text and node.text.strip():
+            if node is not None and node.text:
                 feed_html = node.text
                 break
         excerpt = _clip(feed_html, _MAX_EXCERPT_BYTES)
@@ -1145,11 +1145,23 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
 def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
     # Do not combine another company's financing, location or stage with this
     # issuer. In ambiguous multi-actor clauses, refuse before employer probing.
-    segments = re.split(
-        r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s*(?:which|who|but|and)\b"
-        r"|\band\s+(?=[A-Za-z][A-Za-z0-9._-]*\s+"
-        r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b)",
-        text, flags=re.I)
+    segments = []
+    for sentence in re.split(
+            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s*(?:which|who|but|and)\b",
+            text, flags=re.I):
+        start = 0
+        for boundary in re.finditer(
+                r"\band\s+(?=[A-Za-z][A-Za-z0-9._-]*\s+"
+                r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b)",
+                sentence, re.I):
+            left = sentence[start:boundary.start()]
+            if (_EVENT_VERB.search(left) and
+                    (_EVENT_OBJECT.search(left)
+                     or any(pattern.search(left) for pattern in _STAGE.values()))):
+                # A compound issuer subject is not a solo funding assertion.
+                segments.append(left)
+                start = boundary.end()
+        segments.append(sentence[start:])
     actor = re.compile(
         r"(?<!\w)" + re.escape(issuer) +
         r"(?!\w)(?:\s+\((?:formerly|previously known as)\s+[A-Za-z0-9 ._-]{2,80}\))?"
