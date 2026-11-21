@@ -730,23 +730,25 @@ def ready(settings=None) -> bool:
         return False
 
 
+def _publisher_unavailable(exc: Exception) -> bool:
+    """Only ordinary publisher failures, never guarded transport refusals."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {404, 410} or 500 <= exc.response.status_code <= 599
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                            httpx.ReadTimeout, httpx.ReadError))
+
+
 def _source_payload(source: dict, state: State, client: GuardedClient, now,
                     *, settings=None) -> tuple[list[dict], str]:
     settings = settings or getattr(client, "settings", None) or get_settings()
     sid = source["id"]
     meta = state.data["feeds"].get(sid, {})
-    # The cursor and a bounded list of not-yet-acknowledged feed items share
-    # one atomic checkpoint. A queued article still exists after it rolls off
-    # the feed's latest-N page, so the next pass does not need the publisher
-    # to repeat the exact same response.
-    outstanding = []
+    outstanding, stale = [], []
     for item in meta.get("inflight", []):
         status = state.data["articles"].get(item["key"], {}).get("status")
         if not _fresh(item["date"], now, settings.funding_eligible_days):
-            state.data["articles"][item["key"]] = {
-                "status": "complete", "source": sid, "seen_at": now.isoformat()}
-            continue
-        if status != "complete":
+            stale.append(item["key"])
+        elif status != "complete":
             outstanding.append(item)
     needs_replay = bool(outstanding) or any(
         isinstance(v, dict) and v.get("source") == sid
@@ -760,57 +762,89 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
     }
     if source["kind"] == "sec_atom" and not settings.funding_sec_user_agent:
         raise FundingRefusal("sec_user_agent_missing")
+
+    def checkpoint(items, cursor):
+        proposed = copy.deepcopy(state.data)
+        for key in stale:
+            proposed["articles"][key] = {
+                "status": "complete", "source": sid, "seen_at": now.isoformat()}
+        for item in items:
+            proposed["articles"].setdefault(item["key"], {
+                "status": "queued", "source": sid, "seen_at": now.isoformat()})
+        proposed["feeds"][sid] = {**cursor, "inflight": items}
+        state.checkpoint(proposed)
+
     if len(outstanding) >= 500:
-        # Do not consume a moving latest-N page while durable work is full.
-        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
-        state.save()
+        # The moving latest-N publisher page cannot replace durable work.
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "backlog_deferred"
-    resp = client.get(source["url"], headers=headers, follow_redirects=True)
-    if resp.status_code == 304:
-        if state.data["feeds"].get(sid, {}).get("inflight"):
-            state.data["feeds"][sid]["inflight"] = outstanding
-            state.save()
+    try:
+        response = client.get(source["url"], headers=headers, follow_redirects=True)
+        if response.status_code != 304:
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        if outstanding and _publisher_unavailable(exc):
+            # This is replay only; no new-source payload or cursor success.
+            return outstanding, "feed_unavailable_replay"
+        raise
+    if response.status_code == 304:
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "not_modified"
-    resp.raise_for_status()
     next_cursor = {
-        "etag": resp.headers.get("etag", "")[:256],
-        "last_modified": resp.headers.get("last-modified", "")[:128],
+        "etag": response.headers.get("etag", "")[:256],
+        "last_modified": response.headers.get("last-modified", "")[:128],
         "last_fetch": now.isoformat(),
     }
     if source["kind"] == "yc_json":
-        # YC cohort membership, recent changes and hiring are enrichment only.
         try:
-            v = resp.json()
-            if not isinstance(v, (dict, list)):
+            value = response.json()
+            if not isinstance(value, (dict, list)):
                 raise ValueError("wrong shape")
         except ValueError as exc:
             raise FundingRefusal("invalid_yc_json") from exc
-        state.data["feeds"][sid] = next_cursor
-        state.save()
+        proposed = copy.deepcopy(state.data)
+        proposed["feeds"][sid] = next_cursor
+        state.checkpoint(proposed)
         return [], "yc_not_round_evidence"
     kind = "atom" if source["kind"] in {"atom", "sec_atom"} else "rss"
-    items = _rss_items(resp.content, kind)
+    items = _rss_items(response.content, kind)
     merged = {a["key"]: a for a in outstanding}
     for item in items:
         item["key"] = _key(sid, item["key"])
         if state.data["articles"].get(item["key"], {}).get("status") == "complete":
             continue
-        merged[item["key"]] = item
+        saved = merged.get(item["key"])
+        if saved is None:
+            merged[item["key"]] = item
+        elif not saved.get("excerpt") and item.get("excerpt") and all(
+                saved.get(field) == item.get(field)
+                for field in ("title", "date", "url")):
+            # A missing excerpt may be filled by the same record, but a
+            # previously saved nonempty version is never edited or spliced.
+            merged[item["key"]] = {**saved, "excerpt": item["excerpt"]}
     if len(merged) > 500:
-        # Keep the prior cursor, drain outstanding, then retry new intake.
-        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
-        state.save()
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "backlog_deferred"
-    for item in merged.values():
-        if item["key"] not in state.data["articles"]:
-            state.data["articles"][item["key"]] = {
-                "status": "queued", "source": sid, "seen_at": now.isoformat()}
-    # Atomic cursor + bounded full item metadata permits recovery even when
-    # the next publisher feed no longer contains these article links.
-    state.data["feeds"][sid] = {**next_cursor, "inflight": list(merged.values())}
-    state.save()
+    try:
+        # Preflight and atomically commit the FULL state, not just the feed.
+        checkpoint(list(merged.values()), next_cursor)
+    except FundingRefusal as exc:
+        if str(exc) != "state_capacity":
+            raise
+        return outstanding, "backlog_deferred"
     return list(merged.values()), "fetched"
-
 
 def _sec_primary_doc(article_url: str, client: GuardedClient) -> str:
     """Choose a filing-supplied document, never guess an issuer site or person."""
@@ -878,7 +912,9 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
         state.data["deals"][key] = {"status": "unresolved" if reason == "sec_unverified_offering_proxy"
                                     else "rejected", "reason": reason, "seen_at": now.isoformat(),
                                     "source": source["id"],
-                                    "issuer": issuer[:150], "offering_amount_proxy": amount[:40]}
+                                    "issuer": _clip(issuer, 150), "stage": "",
+                                    "item_title": _clip(article.get("title", ""), 512),
+                                    "offering_amount_proxy": amount[:40]}
     except (FundingRefusal, httpx.HTTPError):
         state.data["deals"][key] = {
             "status": "retryable", "reason": "sec_document_unavailable",
@@ -899,7 +935,7 @@ def _extract_batch(articles: list[dict], state: State, settings, now, *, extract
         "Extract only independently announced financing deals. Never infer an employer "
         "domain, finance stage, location, industry, or remote-first status. "
         "Return JSON {\"articles\":[{\"id\":\"article id\",\"deals\":["
-        "{\"issuer\":\"company name\",\"stage\":\"pre-seed|seed|series a|unknown\","
+        "{\"issuer\":\"company name\",\"stage\":\"pre-seed|seed|series a|series b|series c|unknown\","
         "\"date\":\"ISO date or empty\",\"sector\":\"ai|fintech|unknown\","
         "\"region\":\"eu|uk|usa|uae|gcc|india|singapore|australia|unknown\","
         "\"remote_first\":false,\"amount\":\"reported amount or empty\","
