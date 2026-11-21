@@ -1173,6 +1173,9 @@ def test_fund_as_recipient_refuses_before_homepage_probe(tmp_path, issuer, body)
     ("example-co reports that OtherCo raised Series C financing in London", "series c"),
     ("example-co partnered with OtherCo and OtherCo raised Series C financing in London",
      "series c"),
+    ("example-co announced OtherCo's Series C financing in London", "series c"),
+    ("OtherCo and example-co raised Series C financing in London", "series c"),
+    ("example-co raised Series A financing in London and celebrated Series C", "series c"),
 ])
 def test_stage_only_planned_and_borrowed_rounds_refuse_without_probes(
         tmp_path, body, stage):
@@ -1184,6 +1187,24 @@ def test_stage_only_planned_and_borrowed_rounds_refuse_without_probes(
         funding.State(tmp_path / "state.yaml"), cfg, client, NOW)
     assert (reason, active, evidence) == ("round_unconfirmed", None, None)
     assert client.calls == []
+
+
+@pytest.mark.parametrize("stage,body", [
+    ("series b", "example-co raised Series B financing in London"),
+    ("series c", "example-co closed Series C funding in London"),
+])
+def test_completed_series_b_c_events_still_admit_with_independent_proofs(
+        tmp_path, stage, body):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(stage=stage), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "admissible"
+    assert active and active["careers_url"] == BOARD
+    assert evidence and evidence["employer_domain"] == "example-co.co.uk"
+    assert client.calls
 
 
 def test_adjacent_divs_cannot_borrow_another_issuer_round(tmp_path):
