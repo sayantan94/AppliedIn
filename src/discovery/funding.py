@@ -1137,54 +1137,76 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     }
 
 
+def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
+    # Do not combine another company's financing, location or stage with this
+    # issuer. In ambiguous multi-actor clauses, refuse before employer probing.
+    segments = re.split(
+        r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s*(?:which|who|but|and)\b"
+        r"|\band\s+(?=[A-Za-z][A-Za-z0-9._-]*\s+"
+        r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b)",
+        text, flags=re.I)
+    actor = re.compile(
+        r"(?<!\w)" + re.escape(issuer) +
+        r"(?!\w)(?:\s*[,()]\s*(?:a|an)\s+(?:venture|investment|real estate)"
+        r"\s+fund\s*[,()]?)*\s+(?:(?:has|have|recently|successfully)\s+){0,2}"
+        r"(?:raised|raises|secured|secures|closed|closes|completed|completes|"
+        r"announced|announces|obtained)\b", re.I)
+    found = []
+    for segment in segments:
+        if not _STAGE[stage].search(segment) or not _EVENT_OBJECT.search(segment):
+            continue
+        if _PLANNED.search(segment):
+            continue
+        match = actor.search(segment)
+        if not match or not _EVENT_VERB.search(match.group()):
+            continue
+        if re.search(
+                r"\b[A-Za-z][A-Za-z0-9._-]{2,}\s+"
+                r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b",
+                segment[match.end():], re.I):
+            continue
+        found.append(segment)
+    return found
+
+
+def _fund_issuer(issuer: str, passages: list[str]) -> bool:
+    if _BLOCKED_SECTOR.search(issuer):
+        return True
+    lead = re.escape(issuer) + r"(?!\w)"
+    return any(re.search(
+        lead + r"\s*(?:\(|,)?\s*(?:a|an|the)?\s*"
+        r"(?:venture fund|investment fund|fund manager|real estate fund)\b",
+        p, re.I) for p in passages)
+
+
 def _prove_deal(deal: dict, article: dict, state: State, settings,
                 client: GuardedClient, now, *, relevance_fn=None
                 ) -> tuple[str, dict | None, dict | None]:
-    """News evidence plus independently checked homepage; no guessed domain."""
+    """Require actual issuer-owned round, then independently prove employer."""
     if not isinstance(deal, dict):
         return "invalid_deal", None, None
     issuer, stage = deal.get("issuer"), deal.get("stage")
     if not isinstance(issuer, str) or not issuer.strip() or len(issuer) > 150:
         return "issuer_unknown", None, None
-    if not isinstance(stage, str) or stage not in _STAGE:
+    if not isinstance(stage, str) or stage.strip().casefold() not in _STAGE:
         return "round_unconfirmed", None, None
-    # A publisher's unrelated issuer clauses must not prove this issuer's
-    # stage, sector, or geography, including when they share one HTML article.
-    mentions = [
-        passage for passage in re.split(
-            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s+(?:but|and)\s+"
-            r"|\band\s+(?=[A-Z][A-Za-z0-9._-]{2,}\b)",
-            article["text"], flags=re.I)
-        if re.search(r"(?<!\w)" + re.escape(issuer) + r"(?!\w)",
-                     passage, re.I)
-    ]
-    round_passages = [
-        p for p in mentions if _STAGE[stage].search(p) and _FUNDING.search(p)
-    ]
+    stage = stage.strip().casefold()
+    round_passages = _issuer_round_passages(article["text"], issuer, stage)
     if not round_passages:
         return "round_unconfirmed", None, None
     if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
         return "round_date_unconfirmed_or_stale", None, None
-    # A model-invented date cannot stand in for a published announcement.
     item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
     if not item_day or not round_day or abs((item_day - round_day).days) > 14:
         return "round_date_unconfirmed_or_stale", None, None
-    if any(_BLOCKED_SECTOR.search(p) for p in round_passages):
+    if _fund_issuer(issuer, round_passages):
         return "fund_not_issuer", None, None
-    if (deal.get("sector") not in {"ai", "fintech"}
-            or any(_NEGATED_SECTOR.search(p) for p in round_passages)):
-        return "sector_unproved", None, None
-    sector_passages = [p for p in round_passages if _SECTOR.search(p)]
-    if not sector_passages:
-        return "sector_unproved", None, None
     region = deal.get("region")
     allowed = set(_manifest(settings)["regions"])
     evidenced = set().union(*(_regions(p, allowed) for p in round_passages))
     remote_exception = (region not in evidenced and deal.get("remote_first") is True
                         and evidenced == {"remote-first-anywhere"})
-    if (len(evidenced) != 1 or
-            (not any(region in _regions(p, allowed) for p in sector_passages)
-             and not remote_exception)):
+    if len(evidenced) != 1 or (region not in evidenced and not remote_exception):
         return "region_unproved", None, None
     homepage = _employer_link(issuer, article["html"], article["url"])
     if not homepage:
@@ -1192,16 +1214,12 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     domain = registrable(homepage)
     if not domain:
         return "psl_unavailable_or_unknown", None, None
-    # Independently read the candidate homepage before treating a lead as a
-    # verified employer. A publisher hyperlink is NOT proof of ownership.
     page = client.get(homepage, follow_redirects=True)
     page.raise_for_status()
     employer_html = _article(page.text)
     homepage_text = employer_html.text[:10000]
     if registrable(str(page.request.url)) != domain:
         return "employer_homepage_owner_unproved", None, None
-    # The news article and employer homepage must independently corroborate
-    # every alias before it can participate in identity precedence.
     proposed = deal.get("aliases", [])
     if not isinstance(proposed, list) or len(proposed) > 8:
         return "aliases_unverified", None, None
@@ -1218,7 +1236,6 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
             proven_aliases.append(alias.strip())
     if not _employer_owner_proved(issuer, homepage, employer_html, proven_aliases):
         return "employer_homepage_owner_unproved", None, None
-    # A news writer calling a business remote-first is not independent proof.
     if remote_exception and not _REMOTE.search(homepage_text):
         return "remote_first_not_employer_evidenced", None, None
     state.count(article["source"], "verified_homepage", now)
@@ -1228,7 +1245,6 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
         issuer, homepage, article["source"], state, settings, client, now,
         relevance_fn=relevance_fn, employer_page=page, aliases=proven_aliases)
     return reason, active, evidence
-
 
 def _recheck_pending(state: State, settings, client: GuardedClient,
                      now, *, relevance_fn=None, max_checks=None) -> int:
@@ -1368,7 +1384,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.save()
                     state.count(sid, "stale", now)
                     continue
-                if not _FUNDING.search(item["title"]) or _BLOCKED_SECTOR.search(item["title"]):
+                if not _FUNDING.search(item["title"] + " " + item.get("excerpt", "")):
                     state.data["articles"][item["key"]] = {
                         "status": "complete", "source": sid,
                         "seen_at": now.isoformat()}
@@ -1383,12 +1399,24 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.count(sid, "candidate_deferred", now)
                     continue
                 try:
+                    _safe_url(item["url"])
                     resp = client.get(item["url"], follow_redirects=True)
                     resp.raise_for_status()
                     html = _article(resp.text)
                     candidates.append({**item, "source": sid, "text": html.text[:10000],
                                        "html": html, "url": item["url"]})
-                except (FundingRefusal, httpx.HTTPError):
+                except (FundingRefusal, httpx.HTTPError) as exc:
+                    # An authorized publisher outage may replay exactly ONE
+                    # saved feed excerpt, never an unsafe URL or guard refusal.
+                    excerpt = item.get("excerpt", "")
+                    if excerpt and _publisher_unavailable(exc):
+                        html = _article(excerpt)
+                        if html.text.strip():
+                            candidates.append({**item, "source": sid,
+                                               "text": html.text[:10000],
+                                               "html": html, "url": item["url"]})
+                            state.count(sid, "feed_excerpt_fallback", now)
+                            continue
                     state.data["articles"][item["key"]] = {
                         "status": "retryable", "source": sid,
                         "seen_at": now.isoformat()}
@@ -1435,19 +1463,25 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 for _ in children:
                     state.count(article["source"], "extracted_deal", now)
             every_persisted = True
-            for deal in children:
+            for ordinal, deal in enumerate(children):
                 issuer = deal.get("issuer", "") if isinstance(deal, dict) else ""
                 stage = deal.get("stage", "") if isinstance(deal, dict) else ""
                 announced = deal.get("date", "") if isinstance(deal, dict) else ""
                 if not all(isinstance(x, str) and x.strip() for x in (issuer, stage, announced)):
                     key = _key(article["source"], article["key"], "ambiguous",
-                               json.dumps(deal, sort_keys=True, default=str)[:512])
+                               ordinal, json.dumps(deal, sort_keys=True, default=str)[:512])
+                    state.data["deals"][key] = {
+                        "status": "unresolved", "reason": "ambiguous_child_id",
+                        "issuer": _clip(issuer, 150), "stage": _clip(stage, 32),
+                        "item_title": _clip(article.get("title", ""), 512),
+                        "source": article["source"], "seen_at": now.isoformat()}
                     state.data["unresolved"][key] = {
                         "status": "retryable", "reason": "ambiguous_child_id",
                         "seen_at": now.isoformat()}
                     state.save()
                     every_persisted = False
                     continue
+                stage = stage.strip().casefold()
                 key = _key(article["source"], article["key"], issuer.casefold(), stage, announced)
                 previous = state.data["deals"].get(key, {})
                 if previous.get("status") in ("active", "rejected", "unresolved", "pending"):
@@ -1469,7 +1503,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                               "remote_first_not_employer_evidenced",
                               "employer_homepage_owner_unproved",
                               "round_unconfirmed", "round_date_unconfirmed_or_stale",
-                              "sector_unproved", "region_unproved", "issuer_unknown"}
+                              "region_unproved", "issuer_unknown"}
                           else "rejected")
                 if active and not state.reserve(now, "day_added", 1,
                                                 settings.funding_daily_new_companies):
@@ -1485,7 +1519,10 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                         "source": article["source"]}
                 state.data["deals"][key] = {
                     "status": status, "reason": reason, "source": article["source"],
-                    "seen_at": now.isoformat()}
+                    "seen_at": now.isoformat(),
+                    **({"issuer": _clip(issuer, 150), "stage": _clip(stage, 32),
+                        "item_title": _clip(article.get("title", ""), 512)}
+                       if status == "unresolved" else {})}
                 state.save()  # child A durably acknowledged before child B
                 state.count(article["source"], reason, now)
                 state.count(article["source"], "deal_" + status, now)
