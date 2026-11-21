@@ -7,6 +7,7 @@ passes. The local YAML is the only durable funding state.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import http.client
 import ipaddress
@@ -37,10 +38,23 @@ _ALLOWED_AUTO = frozenset({"name", "careers_url", "ats", "board", "mode", "disco
                            "unproductive_since"})
 _BOARD_HOST = {"ashby": "jobs.ashbyhq.com", "lever": "jobs.lever.co"}
 _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
-_FUNDING = re.compile(r"\b(?:funding|financing|fundraise|raised|raises|secured|pre.seed|seed|series a)\b", re.I)
+_FUNDING = re.compile(
+    r"\b(?:funding|financing|fundraise|raised|raises|secured|pre.seed|seed|series [abc])\b", re.I)
+# Candidate cues are not independent proof of a completed financing event.
+_EVENT_VERB = re.compile(
+    r"\b(?:raised|raises|secured|secures|closed|closes|completed|completes|"
+    r"announced|announces|obtained)\b", re.I)
+_EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital|investment)\b", re.I)
+_PLANNED = re.compile(
+    r"\b(?:plans?\s+(?:to|for)|planning|seeking|targets?\s+to|"
+    r"aims?\s+to|intends?\s+to|hopes?\s+to|will\s+raise|"
+    r"fundraising\s+plans?)\b", re.I)
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
-          "series a": re.compile(r"\bseries\s+a\b", re.I)}
+          "series a": re.compile(r"\bseries\s+a\b", re.I),
+          "series b": re.compile(r"\bseries\s+b\b", re.I),
+          "series c": re.compile(r"\bseries\s+c\b", re.I)}
+
 _SECTOR = re.compile(r"\b(?:fintech|payments?|financial technology|artificial intelligence|"
                      r"generative ai|machine learning|llms?|ai[- /]powered|ai startup)\b", re.I)
 _BLOCKED_SECTOR = re.compile(r"\b(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
@@ -61,6 +75,15 @@ _REGION_PHRASES = {
 }
 _REMOTE = re.compile(r"\bremote[- ]first\b", re.I)
 _MAX_STATE_BYTES = 3_000_000
+_MAX_EXCERPT_BYTES = 2048
+_MAX_INFLIGHT_EXCERPT_BYTES = 256 * 1024
+_DIAGNOSTIC_LIMITS = {"issuer": 150, "stage": 32, "item_title": 512, "reason": 160}
+
+
+def _clip(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
 
 class FundingRefusal(ValueError):
@@ -155,7 +178,10 @@ def _validate_state(data: object) -> dict:
         if any(not isinstance(k, str) or len(k) > 200 or not isinstance(v, dict)
                for k, v in data[field].items()):
             raise FundingRefusal("corrupt_funding_state")
+    excerpt_bytes = 0
     for feed in data["feeds"].values():
+        if not isinstance(feed, dict):
+            raise FundingRefusal("corrupt_funding_state")
         if any(not isinstance(feed.get(k, ""), str)
                for k in ("etag", "last_modified", "last_fetch")):
             raise FundingRefusal("corrupt_funding_state")
@@ -164,15 +190,29 @@ def _validate_state(data: object) -> dict:
             raise FundingRefusal("corrupt_funding_state")
         for article in inflight:
             if (not isinstance(article, dict)
-                    or set(article) != {"key", "title", "date", "url"}
+                    or set(article) - {"key", "title", "date", "url", "excerpt"}
+                    or not {"key", "title", "date", "url"} <= set(article)
                     or not isinstance(article["key"], str)
                     or len(article["key"]) != 32
                     or any(not isinstance(article[field], str)
                            for field in ("title", "date", "url"))
                     or len(article["title"]) > 512
                     or len(article["date"]) > 100
-                    or len(article["url"]) > 2048):
+                    or len(article["url"]) > 2048
+                    or not isinstance(article.get("excerpt", ""), str)
+                    or len(article.get("excerpt", "").encode("utf-8")) > _MAX_EXCERPT_BYTES):
                 raise FundingRefusal("corrupt_funding_state")
+            excerpt_bytes += len(article.get("excerpt", "").encode("utf-8"))
+    if excerpt_bytes > _MAX_INFLIGHT_EXCERPT_BYTES:
+        raise FundingRefusal("state_capacity")
+    for row in data["deals"].values():
+        if row.get("status") == "unresolved":
+            # Legacy rows without these diagnostics remain readable.
+            for field, limit in _DIAGNOSTIC_LIMITS.items():
+                row.setdefault(field, "")
+                if (not isinstance(row[field], str)
+                        or len(row[field].encode("utf-8")) > limit):
+                    raise FundingRefusal("corrupt_funding_state")
     for period in ("day", "week"):
         if not isinstance(data["budgets"].get(period, ""), str):
             raise FundingRefusal("corrupt_budget")
@@ -201,6 +241,17 @@ class State:
                 raise FundingRefusal("corrupt_funding_state") from exc
         else:
             self.data = _new_state()
+
+    def checkpoint(self, proposed: dict) -> None:
+        before = self.data
+        self.data = proposed
+        try:
+            self.save()
+        except (FundingRefusal, OSError, yaml.YAMLError):
+            # A failed save never advances an in-memory cursor or loses
+            # earlier budget reservations from the authoritative snapshot.
+            self.data = before
+            raise
 
     def save(self) -> None:
         _validate_state(self.data)
@@ -258,14 +309,19 @@ class State:
         return True
 
     def count(self, source: str, reason: str, now) -> None:
-        report = self.data["report"]
+        report = copy.deepcopy(self.data["report"])
         if report.get("date") != _day(now):
             report.clear()
             report.update(date=_day(now), sources={}, counts={})
         report["counts"][reason] = report["counts"].get(reason, 0) + 1
         src = report["sources"].setdefault(source, {})
         src[reason] = src.get(reason, 0) + 1
-        self.save()
+        try:
+            self.checkpoint({**self.data, "report": report})
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
+            # Telemetry may not displace the unacknowledged backlog.
 
     def compact(self, now, days: int = 60) -> None:
         cutoff = now - timedelta(days=max(30, min(90, days)))
@@ -523,7 +579,7 @@ class _ArticleHTML(HTMLParser):
         if tag in ("h1", "title") and self._heading_parts is not None:
             self.headings.append(" ".join(self._heading_parts).strip())
             self._heading_parts = None
-        if tag in ("p", "h1", "h2", "h3", "li", "section", "article"):
+        if tag in ("p", "div", "h1", "h2", "h3", "li", "section", "article"):
             # Preserve publisher paragraph boundaries across HTML flattening.
             self.parts.append("; ")
         if tag in ("script", "style", "noscript"):
@@ -575,9 +631,22 @@ def _rss_items(payload: bytes, kind: str) -> list[dict]:
                     link = node.attrib["href"]
                     break
         guid = _node_text(item, "guid") or _node_text(item, "id") or link
-        out.append({"title": title, "date": date_raw, "url": link, "key": _key(kind, guid)})
+        # Only the standard RSS content namespace is accepted, never a
+        # publisher-defined lookalike. Preserve source HTML with its links.
+        feed_html = ""
+        for tag in ("{http://purl.org/rss/1.0/modules/content/}encoded",
+                    "description", "summary"):
+            node = next((n for n in item if n.tag == tag), None)
+            if node is not None and node.text and node.text.strip():
+                feed_html = node.text
+                break
+        excerpt = _clip(feed_html, _MAX_EXCERPT_BYTES)
+        record = {"title": title, "date": date_raw, "url": link,
+                  "key": _key(kind, guid)}
+        if excerpt:
+            record["excerpt"] = excerpt
+        out.append(record)
     return out
-
 
 def _date(raw: str) -> datetime | None:
     if not isinstance(raw, str) or len(raw) > 100:
