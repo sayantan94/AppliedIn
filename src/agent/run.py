@@ -2781,6 +2781,17 @@ def retry_precheck(pk: str, stores: Any = None, *,
 
 def retry_job(pk: str, stores: Any = None, *,
               explicit_review_restart: bool = False) -> dict:
+    """Run one Retry and log its outcome; Retry runs as a background task, so
+    without this line a refused or failed retry leaves no trace."""
+    result = _retry_job(pk, stores, explicit_review_restart=explicit_review_restart)
+    outcome = result if isinstance(result, dict) else {}
+    log.info("retry: pk=%s result=%s reason=%s", pk,
+             outcome.get("result"), outcome.get("reason", ""))
+    return result
+
+
+def _retry_job(pk: str, stores: Any = None, *,
+               explicit_review_restart: bool = False) -> dict:
     """Recover a closed unsent job under ONE claim and admitted TAILORING row.
 
     JD attention goes directly ERROR -> TAILORING with durable review-only

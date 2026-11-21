@@ -682,6 +682,11 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
         try:
             seen = _from_chrome(url, kind)
         except PostingReadUnavailable:
+            # Workday and Workable answer HTTP with a near-empty script shell.
+            # Without an ATS read, a browser outage here is an outage, exactly
+            # as when HTTP fails above, not an unreadable posting (no_jd).
+            if not ats:
+                raise
             seen = None
         if seen and len(seen.get("text", "")) > len(hit["text"]):
             combined = pg.merge(seen["text"], seen["posting_guard"],
