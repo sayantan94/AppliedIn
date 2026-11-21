@@ -7,6 +7,8 @@ passes. The local YAML is the only durable funding state.
 """
 from __future__ import annotations
 
+import copy
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -37,10 +39,57 @@ _ALLOWED_AUTO = frozenset({"name", "careers_url", "ats", "board", "mode", "disco
                            "unproductive_since"})
 _BOARD_HOST = {"ashby": "jobs.ashbyhq.com", "lever": "jobs.lever.co"}
 _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
-_FUNDING = re.compile(r"\b(?:funding|financing|fundraise|raised|raises|secured|pre.seed|seed|series a)\b", re.I)
+_FUNDING = re.compile(
+    r"\b(?:funding|financing|fundraise|raised|raises|secured|pre.seed|seed|series [abc])\b", re.I)
+# Candidate cues are not independent proof of a completed financing event.
+_EVENT_VERB = re.compile(
+    r"\b(?:raised|raises|secured|secures|closed|closes|completed|completes|"
+    r"announced|announces|obtained)\b", re.I)
+_EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital)\b", re.I)
+_PLANNED = re.compile(
+    r"\b(?:plans?\s+(?:to\s+)?(?:raise|close|secure|complete)|"
+    r"plans?\s+for\s+(?:a\s+|an\s+|its\s+|the\s+)?"
+    r"(?:pre[- ]seed|seed|series\s+[abc]|funding|financing|round)|"
+    r"planning|planned|proposed|upcoming|potential|expected|seeking|"
+    r"targets?\s+to\s+(?:raise|close|secure|complete)|"
+    r"aims?\s+to\s+(?:raise|close|secure|complete)|"
+    r"intends?\s+to\s+(?:raise|close|secure|complete)|"
+    r"hopes?\s+to\s+(?:raise|close|secure|complete)|"
+    r"(?:will|may|could)\s+(?:be\s+)?"
+    r"(?:raised|closed|secured|completed|raise|close|secure|complete)|"
+    r"fundraising\s+plans?)\b"
+    r"|\b(?:funding|financing|round)\s+plans?\b", re.I)
+_CANCELLED_EVENT = re.compile(
+    r"\b(?:cancelled|canceled|failed|fell\s+through|abandoned|withdrawn|"
+    r"never\s+closed|was\s+not\s+completed|did\s+not\s+close)\b", re.I)
+_FINANCING_PURPOSE_WORDS = frozenset({
+    "accelerate", "accelerating", "acquisition", "acquiring", "build", "building",
+    "capital", "close", "company", "complete", "create", "creating", "customer",
+    "customers", "development", "expand", "expanding", "expansion", "financing",
+    "firm", "fund", "funding", "grow", "growth", "hire", "hiring", "market",
+    "markets", "operations", "organization", "product", "raise", "research", "sales",
+    "scale", "scaling", "secure", "support", "supporting",
+    "launch", "launching",
+})
+_FINANCING_PURPOSE_VERBS = frozenset({
+    "accelerate", "acquire", "build", "close", "complete", "create",
+    "develop", "enable", "enter", "expand", "finance", "grow", "hire",
+    "launch", "open", "raise", "recruit", "scale", "secure", "support",
+})
+_FUTURE_EVENT_FOLLOW = re.compile(
+    r"\b(?:(?:is|was|are|were|has\s+been|had\s+been|will\s+be|"
+    r"would\s+be)\s+)?(?:planned|scheduled|due|expected|proposed|"
+    r"upcoming|set|plans?)\b|"
+    r"\b(?:will|would|may|might|could)\s+(?:be\s+)?"
+    r"(?:raised|closed|secured|completed|raise|close|secure|complete)\b",
+    re.I,
+)
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
-          "series a": re.compile(r"\bseries\s+a\b", re.I)}
+          "series a": re.compile(r"\bseries\s+a\b", re.I),
+          "series b": re.compile(r"\bseries\s+b\b", re.I),
+          "series c": re.compile(r"\bseries\s+c\b", re.I)}
+
 _SECTOR = re.compile(r"\b(?:fintech|payments?|financial technology|artificial intelligence|"
                      r"generative ai|machine learning|llms?|ai[- /]powered|ai startup)\b", re.I)
 _BLOCKED_SECTOR = re.compile(r"\b(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
@@ -61,6 +110,15 @@ _REGION_PHRASES = {
 }
 _REMOTE = re.compile(r"\bremote[- ]first\b", re.I)
 _MAX_STATE_BYTES = 3_000_000
+_MAX_EXCERPT_BYTES = 2048
+_MAX_INFLIGHT_EXCERPT_BYTES = 256 * 1024
+_DIAGNOSTIC_LIMITS = {"issuer": 150, "stage": 32, "item_title": 512, "reason": 160}
+
+
+def _clip(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
 
 class FundingRefusal(ValueError):
@@ -155,7 +213,10 @@ def _validate_state(data: object) -> dict:
         if any(not isinstance(k, str) or len(k) > 200 or not isinstance(v, dict)
                for k, v in data[field].items()):
             raise FundingRefusal("corrupt_funding_state")
+    excerpt_bytes = 0
     for feed in data["feeds"].values():
+        if not isinstance(feed, dict):
+            raise FundingRefusal("corrupt_funding_state")
         if any(not isinstance(feed.get(k, ""), str)
                for k in ("etag", "last_modified", "last_fetch")):
             raise FundingRefusal("corrupt_funding_state")
@@ -164,15 +225,29 @@ def _validate_state(data: object) -> dict:
             raise FundingRefusal("corrupt_funding_state")
         for article in inflight:
             if (not isinstance(article, dict)
-                    or set(article) != {"key", "title", "date", "url"}
+                    or set(article) - {"key", "title", "date", "url", "excerpt"}
+                    or not {"key", "title", "date", "url"} <= set(article)
                     or not isinstance(article["key"], str)
                     or len(article["key"]) != 32
                     or any(not isinstance(article[field], str)
                            for field in ("title", "date", "url"))
                     or len(article["title"]) > 512
                     or len(article["date"]) > 100
-                    or len(article["url"]) > 2048):
+                    or len(article["url"]) > 2048
+                    or not isinstance(article.get("excerpt", ""), str)
+                    or len(article.get("excerpt", "").encode("utf-8")) > _MAX_EXCERPT_BYTES):
                 raise FundingRefusal("corrupt_funding_state")
+            excerpt_bytes += len(article.get("excerpt", "").encode("utf-8"))
+    if excerpt_bytes > _MAX_INFLIGHT_EXCERPT_BYTES:
+        raise FundingRefusal("state_capacity")
+    for row in data["deals"].values():
+        if row.get("status") == "unresolved":
+            # Legacy rows without these diagnostics remain readable.
+            for field, limit in _DIAGNOSTIC_LIMITS.items():
+                row.setdefault(field, "")
+                if (not isinstance(row[field], str)
+                        or len(row[field].encode("utf-8")) > limit):
+                    raise FundingRefusal("corrupt_funding_state")
     for period in ("day", "week"):
         if not isinstance(data["budgets"].get(period, ""), str):
             raise FundingRefusal("corrupt_budget")
@@ -201,6 +276,17 @@ class State:
                 raise FundingRefusal("corrupt_funding_state") from exc
         else:
             self.data = _new_state()
+
+    def checkpoint(self, proposed: dict) -> None:
+        before = self.data
+        self.data = proposed
+        try:
+            self.save()
+        except (FundingRefusal, OSError, yaml.YAMLError):
+            # A failed save never advances an in-memory cursor or loses
+            # earlier budget reservations from the authoritative snapshot.
+            self.data = before
+            raise
 
     def save(self) -> None:
         _validate_state(self.data)
@@ -258,14 +344,19 @@ class State:
         return True
 
     def count(self, source: str, reason: str, now) -> None:
-        report = self.data["report"]
+        report = copy.deepcopy(self.data["report"])
         if report.get("date") != _day(now):
             report.clear()
             report.update(date=_day(now), sources={}, counts={})
         report["counts"][reason] = report["counts"].get(reason, 0) + 1
         src = report["sources"].setdefault(source, {})
         src[reason] = src.get(reason, 0) + 1
-        self.save()
+        try:
+            self.checkpoint({**self.data, "report": report})
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
+            # Telemetry may not displace the unacknowledged backlog.
 
     def compact(self, now, days: int = 60) -> None:
         cutoff = now - timedelta(days=max(30, min(90, days)))
@@ -392,18 +483,34 @@ def _public_addresses(host: str, port: int) -> list[tuple]:
 class _SafeTLS(http.client.HTTPSConnection):
     def connect(self):
         addresses = _public_addresses(self.host, self.port)
-        last = None
+        last_connect_error = None
         for family, socktype, proto, _, sockaddr in addresses:
             sock = socket.socket(family, socktype, proto)
             try:
                 sock.settimeout(self.timeout)
                 sock.connect(sockaddr)  # numeric approved address, no second DNS lookup
+            except OSError as exc:
+                sock.close()
+                ordinary_connect_errnos = {
+                    errno.ECONNREFUSED, errno.ETIMEDOUT,
+                    errno.EHOSTUNREACH, errno.ENETUNREACH,
+                    errno.ENETDOWN,
+                }
+                if getattr(errno, "EHOSTDOWN", None) is not None:
+                    ordinary_connect_errnos.add(errno.EHOSTDOWN)
+                if isinstance(exc, TimeoutError) or exc.errno in ordinary_connect_errnos:
+                    last_connect_error = exc
+                    continue
+                raise FundingRefusal("tls_or_connect_failed") from exc
+            try:
                 self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
                 return
             except (OSError, ssl.SSLError) as exc:
-                last = exc
                 sock.close()
-        raise FundingRefusal("tls_or_connect_failed") from last
+                raise FundingRefusal("tls_or_connect_failed") from exc
+        if last_connect_error is not None:
+            raise ConnectionError("publisher_tcp_connect_failed") from last_connect_error
+        raise FundingRefusal("tls_or_connect_failed")
 
 
 class GuardedClient:
@@ -523,7 +630,7 @@ class _ArticleHTML(HTMLParser):
         if tag in ("h1", "title") and self._heading_parts is not None:
             self.headings.append(" ".join(self._heading_parts).strip())
             self._heading_parts = None
-        if tag in ("p", "h1", "h2", "h3", "li", "section", "article"):
+        if tag in ("p", "div", "h1", "h2", "h3", "li", "section", "article"):
             # Preserve publisher paragraph boundaries across HTML flattening.
             self.parts.append("; ")
         if tag in ("script", "style", "noscript"):
@@ -575,9 +682,25 @@ def _rss_items(payload: bytes, kind: str) -> list[dict]:
                     link = node.attrib["href"]
                     break
         guid = _node_text(item, "guid") or _node_text(item, "id") or link
-        out.append({"title": title, "date": date_raw, "url": link, "key": _key(kind, guid)})
+        # Only the standard RSS content namespace is accepted, never a
+        # publisher-defined lookalike. Preserve source HTML with its links.
+        feed_html = ""
+        for tag in ("{http://purl.org/rss/1.0/modules/content/}encoded",
+                    "description"):
+            node = next((n for n in item if n.tag == tag), None)
+            if node is not None and node.text:
+                feed_html = node.text
+                # Prefer actual article content, but checkpoint a whitespace-only
+                # excerpt if neither source supplies more meaningful text.
+                if feed_html.strip():
+                    break
+        excerpt = _clip(feed_html, _MAX_EXCERPT_BYTES)
+        record = {"title": title, "date": date_raw, "url": link,
+                  "key": _key(kind, guid)}
+        if excerpt:
+            record["excerpt"] = excerpt
+        out.append(record)
     return out
-
 
 def _date(raw: str) -> datetime | None:
     if not isinstance(raw, str) or len(raw) > 100:
@@ -661,23 +784,28 @@ def ready(settings=None) -> bool:
         return False
 
 
+def _publisher_unavailable(exc: Exception) -> bool:
+    """Only ordinary publisher failures, never guarded transport refusals."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {404, 410} or 500 <= exc.response.status_code <= 599
+    # After guarded DNS/TLS connection, an ordinary socket read/reset can
+    # surface as a builtin OSError rather than an httpx exception.
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                            httpx.ReadTimeout, httpx.ReadError,
+                            TimeoutError, ConnectionError))
+
+
 def _source_payload(source: dict, state: State, client: GuardedClient, now,
                     *, settings=None) -> tuple[list[dict], str]:
     settings = settings or getattr(client, "settings", None) or get_settings()
     sid = source["id"]
     meta = state.data["feeds"].get(sid, {})
-    # The cursor and a bounded list of not-yet-acknowledged feed items share
-    # one atomic checkpoint. A queued article still exists after it rolls off
-    # the feed's latest-N page, so the next pass does not need the publisher
-    # to repeat the exact same response.
-    outstanding = []
+    outstanding, stale = [], []
     for item in meta.get("inflight", []):
         status = state.data["articles"].get(item["key"], {}).get("status")
         if not _fresh(item["date"], now, settings.funding_eligible_days):
-            state.data["articles"][item["key"]] = {
-                "status": "complete", "source": sid, "seen_at": now.isoformat()}
-            continue
-        if status != "complete":
+            stale.append(item["key"])
+        elif status != "complete":
             outstanding.append(item)
     needs_replay = bool(outstanding) or any(
         isinstance(v, dict) and v.get("source") == sid
@@ -691,57 +819,89 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
     }
     if source["kind"] == "sec_atom" and not settings.funding_sec_user_agent:
         raise FundingRefusal("sec_user_agent_missing")
+
+    def checkpoint(items, cursor):
+        proposed = copy.deepcopy(state.data)
+        for key in stale:
+            proposed["articles"][key] = {
+                "status": "complete", "source": sid, "seen_at": now.isoformat()}
+        for item in items:
+            proposed["articles"].setdefault(item["key"], {
+                "status": "queued", "source": sid, "seen_at": now.isoformat()})
+        proposed["feeds"][sid] = {**cursor, "inflight": items}
+        state.checkpoint(proposed)
+
     if len(outstanding) >= 500:
-        # Do not consume a moving latest-N page while durable work is full.
-        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
-        state.save()
+        # The moving latest-N publisher page cannot replace durable work.
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "backlog_deferred"
-    resp = client.get(source["url"], headers=headers, follow_redirects=True)
-    if resp.status_code == 304:
-        if state.data["feeds"].get(sid, {}).get("inflight"):
-            state.data["feeds"][sid]["inflight"] = outstanding
-            state.save()
+    try:
+        response = client.get(source["url"], headers=headers, follow_redirects=True)
+        if response.status_code != 304:
+            response.raise_for_status()
+    except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+        if outstanding and _publisher_unavailable(exc):
+            # This is replay only; no new-source payload or cursor success.
+            return outstanding, "feed_unavailable_replay"
+        raise
+    if response.status_code == 304:
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "not_modified"
-    resp.raise_for_status()
     next_cursor = {
-        "etag": resp.headers.get("etag", "")[:256],
-        "last_modified": resp.headers.get("last-modified", "")[:128],
+        "etag": response.headers.get("etag", "")[:256],
+        "last_modified": response.headers.get("last-modified", "")[:128],
         "last_fetch": now.isoformat(),
     }
     if source["kind"] == "yc_json":
-        # YC cohort membership, recent changes and hiring are enrichment only.
         try:
-            v = resp.json()
-            if not isinstance(v, (dict, list)):
+            value = response.json()
+            if not isinstance(value, (dict, list)):
                 raise ValueError("wrong shape")
         except ValueError as exc:
             raise FundingRefusal("invalid_yc_json") from exc
-        state.data["feeds"][sid] = next_cursor
-        state.save()
+        proposed = copy.deepcopy(state.data)
+        proposed["feeds"][sid] = next_cursor
+        state.checkpoint(proposed)
         return [], "yc_not_round_evidence"
     kind = "atom" if source["kind"] in {"atom", "sec_atom"} else "rss"
-    items = _rss_items(resp.content, kind)
+    items = _rss_items(response.content, kind)
     merged = {a["key"]: a for a in outstanding}
     for item in items:
         item["key"] = _key(sid, item["key"])
         if state.data["articles"].get(item["key"], {}).get("status") == "complete":
             continue
-        merged[item["key"]] = item
+        saved = merged.get(item["key"])
+        if saved is None:
+            merged[item["key"]] = item
+        elif not saved.get("excerpt") and item.get("excerpt") and all(
+                saved.get(field) == item.get(field)
+                for field in ("title", "date", "url")):
+            # A missing excerpt may be filled by the same record, but a
+            # previously saved nonempty version is never edited or spliced.
+            merged[item["key"]] = {**saved, "excerpt": item["excerpt"]}
     if len(merged) > 500:
-        # Keep the prior cursor, drain outstanding, then retry new intake.
-        state.data["feeds"][sid] = {**meta, "inflight": outstanding}
-        state.save()
+        try:
+            checkpoint(outstanding, meta)
+        except FundingRefusal as exc:
+            if str(exc) != "state_capacity":
+                raise
         return outstanding, "backlog_deferred"
-    for item in merged.values():
-        if item["key"] not in state.data["articles"]:
-            state.data["articles"][item["key"]] = {
-                "status": "queued", "source": sid, "seen_at": now.isoformat()}
-    # Atomic cursor + bounded full item metadata permits recovery even when
-    # the next publisher feed no longer contains these article links.
-    state.data["feeds"][sid] = {**next_cursor, "inflight": list(merged.values())}
-    state.save()
+    try:
+        # Preflight and atomically commit the FULL state, not just the feed.
+        checkpoint(list(merged.values()), next_cursor)
+    except FundingRefusal as exc:
+        if str(exc) != "state_capacity":
+            raise
+        return outstanding, "backlog_deferred"
     return list(merged.values()), "fetched"
-
 
 def _sec_primary_doc(article_url: str, client: GuardedClient) -> str:
     """Choose a filing-supplied document, never guess an issuer site or person."""
@@ -809,8 +969,10 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
         state.data["deals"][key] = {"status": "unresolved" if reason == "sec_unverified_offering_proxy"
                                     else "rejected", "reason": reason, "seen_at": now.isoformat(),
                                     "source": source["id"],
-                                    "issuer": issuer[:150], "offering_amount_proxy": amount[:40]}
-    except (FundingRefusal, httpx.HTTPError):
+                                    "issuer": _clip(issuer, 150), "stage": "",
+                                    "item_title": _clip(article.get("title", ""), 512),
+                                    "offering_amount_proxy": amount[:40]}
+    except (FundingRefusal, httpx.HTTPError, OSError):
         state.data["deals"][key] = {
             "status": "retryable", "reason": "sec_document_unavailable",
             "seen_at": now.isoformat(), "source": source["id"]}
@@ -830,7 +992,7 @@ def _extract_batch(articles: list[dict], state: State, settings, now, *, extract
         "Extract only independently announced financing deals. Never infer an employer "
         "domain, finance stage, location, industry, or remote-first status. "
         "Return JSON {\"articles\":[{\"id\":\"article id\",\"deals\":["
-        "{\"issuer\":\"company name\",\"stage\":\"pre-seed|seed|series a|unknown\","
+        "{\"issuer\":\"company name\",\"stage\":\"pre-seed|seed|series a|series b|series c|unknown\","
         "\"date\":\"ISO date or empty\",\"sector\":\"ai|fintech|unknown\","
         "\"region\":\"eu|uk|usa|uae|gcc|india|singapore|australia|unknown\","
         "\"remote_first\":false,\"amount\":\"reported amount or empty\","
@@ -1032,54 +1194,172 @@ def _preview_verified(issuer: str, homepage: str, source_id: str,
     }
 
 
+def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
+    # Do not combine another company's financing, location or stage with this
+    # issuer. In ambiguous multi-actor clauses, refuse before employer probing.
+    segments = []
+    for sentence in re.split(
+            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s*(?:which|who|but|and)\b",
+            text, flags=re.I):
+        start = 0
+        for boundary in re.finditer(
+                r"\band\s+(?=[A-Za-z][A-Za-z0-9._-]*\s+"
+                r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b)",
+                sentence, re.I):
+            left = sentence[start:boundary.start()]
+            if (_EVENT_VERB.search(left) and
+                    (_EVENT_OBJECT.search(left)
+                     or any(pattern.search(left) for pattern in _STAGE.values()))):
+                # A compound issuer subject is not a solo funding assertion.
+                segments.append(left)
+                start = boundary.end()
+        segments.append(sentence[start:])
+    actor = re.compile(
+        r"(?<!\w)" + re.escape(issuer) +
+        r"(?!\w)(?:\s+\((?:formerly|previously known as)\s+[A-Za-z0-9 ._-]{2,80}\))?"
+        r"(?:\s*[,()]\s*(?:a|an)\s+(?:venture|investment|real estate)"
+        r"\s+fund\s*[,()]?)*\s+(?:(?:has|have|recently|successfully)\s+){0,2}"
+        r"(?:raised|raises|secured|secures|closed|closes|completed|completes|"
+        r"announced|announces|obtained)\b", re.I)
+    found = []
+    for segment in segments:
+        match = actor.search(segment)
+        if not match or not _EVENT_VERB.search(match.group()):
+            continue
+        prefix = segment[:match.start()]
+        if (re.search(r"\band\s+$", prefix, re.I)
+                or re.search(r"\b[A-Z][A-Za-z0-9._-]{2,}\s*,\s*$", prefix)):
+            # "OtherCo and example-co ..." and "OtherCo, example-co ..."
+            # name two plausible recipients; neither proves a solo issuer.
+            continue
+        tail = segment[match.end():]
+        stage_match = _STAGE[stage].search(tail)
+        event_match = _EVENT_OBJECT.search(tail)
+        if not stage_match or not event_match:
+            continue
+        if abs(stage_match.start() - event_match.start()) > 80:
+            continue
+        event_end = max(stage_match.end(), event_match.end())
+        # Bind prospective/negative language to the financing itself, not
+        # to later plans to hire, expand or launch a product.
+        before_event = tail[:event_end]
+        after_event = tail[event_end:event_end + 100]
+        financing_follow = re.split(
+            r"\b(?:and|but)\b|[.;]", after_event, maxsplit=1, flags=re.I)[0]
+        if (_PLANNED.search(before_event)
+                or _CANCELLED_EVENT.search(before_event)
+                or _CANCELLED_EVENT.search(financing_follow)
+                or _FUTURE_EVENT_FOLLOW.search(financing_follow)
+                or re.search(
+                    r"\b(?:planned|scheduled|expected|due|set)\s+to\s+"
+                    r"(?:raise|close|secure|complete)\b",
+                    after_event, re.I)):
+            continue
+        beneficiary = re.search(
+            r"\b(?:funding|financing|round|capital)\b.{0,60}"
+            r"\b(?P<relation>for|to)\s+"
+            r"(?:(?:the|a|an|its|their)\s+)?"
+            r"(?:(?:[a-z][a-z0-9-]*-based)\s+)?"
+            r"(?:(?P<entity_kind>startup|company|business|firm|fund|"
+            r"corporation|organization)\s+)?"
+            r"(?P<recipient>[a-z][a-z0-9.-]*)\b", tail, re.I)
+        if beneficiary:
+            relation = beneficiary.group("relation").casefold()
+            recipient = beneficiary.group("recipient").casefold()
+            # A typed beneficiary (even one named "Growth") or a purpose
+            # explicitly owned by another company cannot prove this issuer.
+            described_other = (
+                recipient in _FINANCING_PURPOSE_WORDS
+                and re.match(
+                    r"\s+of\s+(?!(?:its|their|our|the|a|an|operations|"
+                    r"markets|products|services|team|business|research|"
+                    r"technology)\b)[a-z][a-z0-9.-]*\b",
+                    tail[beneficiary.end():], re.I))
+            if (beneficiary.group("entity_kind") or described_other
+                    or (relation == "for"
+                        and recipient not in _FINANCING_PURPOSE_WORDS)
+                    or (relation == "to"
+                        and recipient not in _FINANCING_PURPOSE_VERBS)):
+                continue
+        if len([name for name, witness in _STAGE.items()
+                if witness.search(tail)]) != 1:
+            # One funding clause cannot transfer the Series A event to C.
+            continue
+        if re.match(r"\s*(?:awareness|alarm|concerns|questions)\b", tail, re.I):
+            continue
+        if re.search(
+                r"\b[A-Za-z][A-Za-z0-9._-]{2,}'s\s+"
+                r"(?:pre[- ]seed|seed|series\s+[abc])\b", tail, re.I):
+            # A named third-party's financing is not the reporter's round.
+            continue
+        if re.search(
+                r"\b[A-Za-z][A-Za-z0-9._-]{2,}\s+"
+                r"(?:has\s+)?(?:raised|raises|received|secured|closed|"
+                r"obtained|announced)\b", tail, re.I):
+            continue
+        evidence_end = len(segment)
+        investor = re.search(
+            r"\b(?:from|backed\s+by|led\s+by|"
+            r"with\s+(?:(?:a|an|the)\s+)?"
+            r"(?:(?:[a-z][a-z0-9-]*-based)\s+)?"
+            r"(?:(?:venture|investment|real\s+estate|private\s+equity)\s+)?"
+            r"(?:fund|investors?|backers?|partners?))\b", tail, re.I)
+        if investor:
+            evidence_end = min(evidence_end, match.end() + investor.start())
+        other_action = re.search(
+            r"\b[A-Za-z][A-Za-z0-9.-]{2,}\s+"
+            r"(?:opened|opens|launched|launches|announced|announces|"
+            r"raised|raises|secured|closed|completed|acquired|acquires|"
+            r"(?:is|was|are|were)\s+(?:(?:now|currently)\s+)?"
+            r"(?:based|located|headquartered))\b", tail, re.I)
+        if other_action:
+            evidence_end = min(evidence_end, match.end() + other_action.start())
+        found.append(segment[:evidence_end])
+    return found
+
+
+def _fund_issuer(issuer: str, passages: list[str]) -> bool:
+    if _BLOCKED_SECTOR.search(issuer):
+        return True
+    lead = re.escape(issuer) + r"(?!\w)"
+    suffix = re.compile(
+        lead + r"\s*(?:\(|,)?\s*(?:a|an|the)?\s*"
+        r"(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
+    prefix = re.compile(
+        r"\b(?:a|an|the)?\s*(?:(?:venture|investment|real estate)\s+fund|"
+        r"fund manager)\s+"
+        r"(?:named\s+)?" + lead, re.I)
+    return any(suffix.search(p) or prefix.search(p) for p in passages)
+
+
 def _prove_deal(deal: dict, article: dict, state: State, settings,
                 client: GuardedClient, now, *, relevance_fn=None
                 ) -> tuple[str, dict | None, dict | None]:
-    """News evidence plus independently checked homepage; no guessed domain."""
+    """Require actual issuer-owned round, then independently prove employer."""
     if not isinstance(deal, dict):
         return "invalid_deal", None, None
     issuer, stage = deal.get("issuer"), deal.get("stage")
     if not isinstance(issuer, str) or not issuer.strip() or len(issuer) > 150:
         return "issuer_unknown", None, None
-    if not isinstance(stage, str) or stage not in _STAGE:
+    if not isinstance(stage, str) or stage.strip().casefold() not in _STAGE:
         return "round_unconfirmed", None, None
-    # A publisher's unrelated issuer clauses must not prove this issuer's
-    # stage, sector, or geography, including when they share one HTML article.
-    mentions = [
-        passage for passage in re.split(
-            r"[.!?;](?:\s+|$)|\b(?:while|whereas)\b|,\s+(?:but|and)\s+"
-            r"|\band\s+(?=[A-Z][A-Za-z0-9._-]{2,}\b)",
-            article["text"], flags=re.I)
-        if re.search(r"(?<!\w)" + re.escape(issuer) + r"(?!\w)",
-                     passage, re.I)
-    ]
-    round_passages = [
-        p for p in mentions if _STAGE[stage].search(p) and _FUNDING.search(p)
-    ]
+    stage = stage.strip().casefold()
+    round_passages = _issuer_round_passages(article["text"], issuer, stage)
     if not round_passages:
         return "round_unconfirmed", None, None
     if not _fresh(deal.get("date", ""), now, settings.funding_eligible_days):
         return "round_date_unconfirmed_or_stale", None, None
-    # A model-invented date cannot stand in for a published announcement.
     item_day, round_day = _date(article.get("date", "")), _date(deal["date"])
     if not item_day or not round_day or abs((item_day - round_day).days) > 14:
         return "round_date_unconfirmed_or_stale", None, None
-    if any(_BLOCKED_SECTOR.search(p) for p in round_passages):
+    if _fund_issuer(issuer, round_passages):
         return "fund_not_issuer", None, None
-    if (deal.get("sector") not in {"ai", "fintech"}
-            or any(_NEGATED_SECTOR.search(p) for p in round_passages)):
-        return "sector_unproved", None, None
-    sector_passages = [p for p in round_passages if _SECTOR.search(p)]
-    if not sector_passages:
-        return "sector_unproved", None, None
     region = deal.get("region")
     allowed = set(_manifest(settings)["regions"])
     evidenced = set().union(*(_regions(p, allowed) for p in round_passages))
     remote_exception = (region not in evidenced and deal.get("remote_first") is True
                         and evidenced == {"remote-first-anywhere"})
-    if (len(evidenced) != 1 or
-            (not any(region in _regions(p, allowed) for p in sector_passages)
-             and not remote_exception)):
+    if len(evidenced) != 1 or (region not in evidenced and not remote_exception):
         return "region_unproved", None, None
     homepage = _employer_link(issuer, article["html"], article["url"])
     if not homepage:
@@ -1087,16 +1367,12 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
     domain = registrable(homepage)
     if not domain:
         return "psl_unavailable_or_unknown", None, None
-    # Independently read the candidate homepage before treating a lead as a
-    # verified employer. A publisher hyperlink is NOT proof of ownership.
     page = client.get(homepage, follow_redirects=True)
     page.raise_for_status()
     employer_html = _article(page.text)
     homepage_text = employer_html.text[:10000]
     if registrable(str(page.request.url)) != domain:
         return "employer_homepage_owner_unproved", None, None
-    # The news article and employer homepage must independently corroborate
-    # every alias before it can participate in identity precedence.
     proposed = deal.get("aliases", [])
     if not isinstance(proposed, list) or len(proposed) > 8:
         return "aliases_unverified", None, None
@@ -1113,7 +1389,6 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
             proven_aliases.append(alias.strip())
     if not _employer_owner_proved(issuer, homepage, employer_html, proven_aliases):
         return "employer_homepage_owner_unproved", None, None
-    # A news writer calling a business remote-first is not independent proof.
     if remote_exception and not _REMOTE.search(homepage_text):
         return "remote_first_not_employer_evidenced", None, None
     state.count(article["source"], "verified_homepage", now)
@@ -1123,7 +1398,6 @@ def _prove_deal(deal: dict, article: dict, state: State, settings,
         issuer, homepage, article["source"], state, settings, client, now,
         relevance_fn=relevance_fn, employer_page=page, aliases=proven_aliases)
     return reason, active, evidence
-
 
 def _recheck_pending(state: State, settings, client: GuardedClient,
                      now, *, relevance_fn=None, max_checks=None) -> int:
@@ -1154,7 +1428,7 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
                 row["name"], row["homepage"], row["source"],
                 state, settings, client, now, relevance_fn=relevance_fn,
                 aliases=row.get("aliases", []))
-        except (FundingRefusal, httpx.HTTPError, ValueError):
+        except (FundingRefusal, httpx.HTTPError, OSError, ValueError):
             reason, active = "pending_recheck_failed", None
         if active is not None and not state.reserve(
                 now, "day_added", 1, settings.funding_daily_new_companies):
@@ -1263,7 +1537,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.save()
                     state.count(sid, "stale", now)
                     continue
-                if not _FUNDING.search(item["title"]) or _BLOCKED_SECTOR.search(item["title"]):
+                if not _FUNDING.search(item["title"] + " " + item.get("excerpt", "")):
                     state.data["articles"][item["key"]] = {
                         "status": "complete", "source": sid,
                         "seen_at": now.isoformat()}
@@ -1278,12 +1552,24 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     state.count(sid, "candidate_deferred", now)
                     continue
                 try:
+                    _safe_url(item["url"])
                     resp = client.get(item["url"], follow_redirects=True)
                     resp.raise_for_status()
                     html = _article(resp.text)
                     candidates.append({**item, "source": sid, "text": html.text[:10000],
                                        "html": html, "url": item["url"]})
-                except (FundingRefusal, httpx.HTTPError):
+                except (FundingRefusal, httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+                    # An authorized publisher outage may replay exactly ONE
+                    # saved feed excerpt, never an unsafe URL or guard refusal.
+                    excerpt = item.get("excerpt", "")
+                    if excerpt and _publisher_unavailable(exc):
+                        html = _article(excerpt)
+                        if html.text.strip():
+                            candidates.append({**item, "source": sid,
+                                               "text": html.text[:10000],
+                                               "html": html, "url": item["url"]})
+                            state.count(sid, "feed_excerpt_fallback", now)
+                            continue
                     state.data["articles"][item["key"]] = {
                         "status": "retryable", "source": sid,
                         "seen_at": now.isoformat()}
@@ -1330,19 +1616,25 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 for _ in children:
                     state.count(article["source"], "extracted_deal", now)
             every_persisted = True
-            for deal in children:
+            for ordinal, deal in enumerate(children):
                 issuer = deal.get("issuer", "") if isinstance(deal, dict) else ""
                 stage = deal.get("stage", "") if isinstance(deal, dict) else ""
                 announced = deal.get("date", "") if isinstance(deal, dict) else ""
                 if not all(isinstance(x, str) and x.strip() for x in (issuer, stage, announced)):
                     key = _key(article["source"], article["key"], "ambiguous",
-                               json.dumps(deal, sort_keys=True, default=str)[:512])
+                               ordinal, json.dumps(deal, sort_keys=True, default=str)[:512])
+                    state.data["deals"][key] = {
+                        "status": "unresolved", "reason": "ambiguous_child_id",
+                        "issuer": _clip(issuer, 150), "stage": _clip(stage, 32),
+                        "item_title": _clip(article.get("title", ""), 512),
+                        "source": article["source"], "seen_at": now.isoformat()}
                     state.data["unresolved"][key] = {
                         "status": "retryable", "reason": "ambiguous_child_id",
                         "seen_at": now.isoformat()}
                     state.save()
                     every_persisted = False
                     continue
+                stage = stage.strip().casefold()
                 key = _key(article["source"], article["key"], issuer.casefold(), stage, announced)
                 previous = state.data["deals"].get(key, {})
                 if previous.get("status") in ("active", "rejected", "unresolved", "pending"):
@@ -1351,7 +1643,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 try:
                     reason, active, verified = _prove_deal(
                         deal, article, state, settings, client, now, relevance_fn=relevance_fn)
-                except (FundingRefusal, httpx.HTTPError, ValueError, KeyError):
+                except (FundingRefusal, httpx.HTTPError, OSError, ValueError, KeyError):
                     reason, active, verified = "probe_retryable", None, None
                 status = ("active" if active else "retryable" if reason in
                           {"probe_retryable", "relevance_budget", "postings_limit"}
@@ -1364,7 +1656,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                               "remote_first_not_employer_evidenced",
                               "employer_homepage_owner_unproved",
                               "round_unconfirmed", "round_date_unconfirmed_or_stale",
-                              "sector_unproved", "region_unproved", "issuer_unknown"}
+                              "region_unproved", "issuer_unknown"}
                           else "rejected")
                 if active and not state.reserve(now, "day_added", 1,
                                                 settings.funding_daily_new_companies):
@@ -1380,7 +1672,10 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                         "source": article["source"]}
                 state.data["deals"][key] = {
                     "status": status, "reason": reason, "source": article["source"],
-                    "seen_at": now.isoformat()}
+                    "seen_at": now.isoformat(),
+                    **({"issuer": _clip(issuer, 150), "stage": _clip(stage, 32),
+                        "item_title": _clip(article.get("title", ""), 512)}
+                       if status == "unresolved" else {})}
                 state.save()  # child A durably acknowledged before child B
                 state.count(article["source"], reason, now)
                 state.count(article["source"], "deal_" + status, now)
