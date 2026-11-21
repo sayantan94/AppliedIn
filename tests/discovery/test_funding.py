@@ -906,7 +906,7 @@ def test_feed_rollover_keeps_unacknowledged_deal_link(tmp_path):
     (
         "example-co raised seed funding in Germany; "
         "OtherCo raised seed fintech financing in London.",
-        "sector_unproved",
+        "region_unproved",
     ),
     (
         "example-co raised seed fintech funding in Germany while "
@@ -936,20 +936,20 @@ def test_two_issuer_passages_cannot_cross_authorize_sector_or_region(
     assert (reason, active, verified) == (expected_reason, None, None)
 
 
-@pytest.mark.parametrize("body,region", [
+@pytest.mark.parametrize("body,region,expected_reason", [
     (
         "example-co raised seed financing as a non-fintech firm in Germany; "
         "OtherCo raised seed fintech funding in London.",
-        "eu",
+        "eu", "admissible",
     ),
     (
         "example-co raised seed financing and "
         "OtherCo raised seed fintech funding in London.",
-        "uk",
+        "uk", "region_unproved",
     ),
 ])
 def test_negated_sector_and_named_other_issuer_cannot_admit(
-        tmp_path, body, region):
+        tmp_path, body, region, expected_reason):
     cfg = settings(tmp_path)
     news = funding._article(
         f'<h1>{body}</h1><a href="{HOME}">example-co</a>')
@@ -961,9 +961,12 @@ def test_negated_sector_and_named_other_issuer_cannot_admit(
                "text": news.text, "html": news, "url": ARTICLE},
         funding.State(tmp_path / "local" / "funded-watchlist.yaml"),
         cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
-    assert (reason, active, verified) == ("sector_unproved", None, None)
-    assert client.calls == [], "an issuer-negative article cannot probe an ATS"
-
+    assert reason == expected_reason
+    if expected_reason == "admissible":
+        assert active and verified and client.calls
+    else:
+        assert (active, verified) == (None, None)
+        assert client.calls == [], "another issuer's region cannot authorize employer probes"
 
 def test_portfolio_page_with_valid_ashby_board_is_not_employer_homepage(tmp_path):
     cfg = settings(tmp_path)
@@ -1098,3 +1101,383 @@ def test_sec_reader_refuses_missing_user_agent_before_any_request(tmp_path):
         funding._source_payload(source, state, client, NOW, settings=cfg)
     assert client.calls == []
     assert state.data["feeds"] == {}
+
+
+
+# #396: funding eligibility is independent of industry, but not of ownership.
+def _synthetic_article(body, *, link=True):
+    html = funding._article(
+        f'<h1>{body}</h1>' +
+        (f'<a href="{HOME}">example-co</a>' if link else ""))
+    return {"source": "uk_feed", "date": "2026-11-18",
+            "text": html.text, "html": html, "url": ARTICLE,
+            "title": "Synthetic financing news"}
+
+
+def _series_c_deal(**overrides):
+    return {"issuer": "example-co", "stage": "Series C",
+            "date": "2026-11-18", "sector": "unknown", "region": "uk",
+            "remote_first": False, "aliases": [], **overrides}
+
+
+@pytest.mark.parametrize("sector", ["ai", "fintech", "unknown", "non-fintech"])
+@pytest.mark.parametrize("investor_position", ["title", "body"])
+def test_any_sector_series_c_and_fund_investor_can_admit(
+        tmp_path, sector, investor_position):
+    body = "example-co raised Series C financing in London"
+    if investor_position == "title":
+        body += " from a venture fund"
+    else:
+        body += "; Backers include a venture fund"
+    article = _synthetic_article(body)
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    deal = _series_c_deal(sector=sector)
+    reason, active, evidence = funding._prove_deal(
+        deal, article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "admissible"
+    assert active and active["careers_url"] == BOARD
+    assert evidence["employer_domain"] == "example-co.co.uk"
+    assert client.calls, "independent employer and ATS proof is still mandatory"
+
+
+@pytest.mark.parametrize("issuer,body", [
+    ("Example Venture Fund",
+     "Example Venture Fund raised Series C financing in London"),
+    ("example-co",
+     "example-co (a venture fund) raised Series C financing in London"),
+    ("Example Investment Fund",
+     "Example Investment Fund closed Series C funding in London"),
+    ("Example Real Estate Fund",
+     "Example Real Estate Fund raised Series C financing in London"),
+])
+def test_fund_as_recipient_refuses_before_homepage_probe(tmp_path, issuer, body):
+    cfg = settings(tmp_path)
+    article = _synthetic_article(body)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(issuer=issuer), article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW)
+    assert (reason, active, evidence) == ("fund_not_issuer", None, None)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("body,stage", [
+    ("example-co plans a Series C in London", "series c"),
+    ("example-co Series C product launch in London", "series c"),
+    ("example-co Series B product launch in London", "series b"),
+    ("example-co Series A product launch in London", "series a"),
+    ("example-co seed product launch in London", "seed"),
+    ("example-co partnered with OtherCo, which raised Series C financing in London", "series c"),
+    ("example-co reports that OtherCo raised Series C financing in London", "series c"),
+    ("example-co partnered with OtherCo and OtherCo raised Series C financing in London",
+     "series c"),
+])
+def test_stage_only_planned_and_borrowed_rounds_refuse_without_probes(
+        tmp_path, body, stage):
+    cfg = settings(tmp_path)
+    article = _synthetic_article(body)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(stage=stage), article,
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW)
+    assert (reason, active, evidence) == ("round_unconfirmed", None, None)
+    assert client.calls == []
+
+
+def test_adjacent_divs_cannot_borrow_another_issuer_round(tmp_path):
+    html = funding._article(
+        '<div>example-co opened a new office.</div>'
+        '<div>OtherCo raised Series C financing in London.</div>'
+        f'<a href="{HOME}">example-co</a>')
+    assert ";" in html.text
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(),
+        {"source": "uk_feed", "date": "2026-11-18",
+         "text": html.text, "html": html, "url": ARTICLE},
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW)
+    assert (reason, active, evidence) == ("round_unconfirmed", None, None)
+    assert client.calls == []
+
+
+def _feed_with_html(html, *, tag="description", title="General business digest",
+                    link=ARTICLE, guid="fallback-round"):
+    tag_name = "content:encoded" if tag == "content:encoded" else "description"
+    return (f'<?xml version="1.0"?><rss xmlns:content="'
+            f'http://purl.org/rss/1.0/modules/content/"><channel><item>'
+            f'<guid>{guid}</guid><title>{title}</title><link>{link}</link>'
+            '<pubDate>Wed, 18 Nov 2026 12:00:00 GMT</pubDate>'
+            f'<{tag_name}><![CDATA[{html}]]></{tag_name}>'
+            '</item></channel></rss>').encode()
+
+
+def _funding_excerpt(*, link=True):
+    return ("<h1>example-co raised Series C financing in London</h1>" +
+            (f'<a href="{HOME}">example-co</a>' if link else ""))
+
+
+def _series_c_extractor(prompt, *, max_tokens):
+    ids = re.findall(r'"id":"([0-9a-f]{32})"', prompt)
+    return {"articles": [{"id": item_id, "deals": [_series_c_deal()]}
+                         for item_id in ids]}
+
+
+@pytest.mark.parametrize("tag", ["description", "content:encoded"])
+def test_neutral_headline_feed_content_falls_back_only_after_publisher_404(
+        tmp_path, tag):
+    cfg = settings(tmp_path)
+    supplied = routes()
+    supplied[SOURCE] = _feed_with_html(_funding_excerpt(), tag=tag)
+    supplied[ARTICLE] = (404, b"publisher unavailable")
+    client = OfflineClient(supplied)
+    result = funding.poll_once(
+        cfg, now=NOW, client_factory=lambda *_: client,
+        extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert result["status"] == "ok"
+    assert len(state.data["active"]) == 1
+    assert state.data["report"]["counts"]["feed_excerpt_fallback"] == 1
+    assert [u for u, _, _ in client.calls if u == HOME], "publisher link alone is not proof"
+    excerpt = state.data["feeds"]["uk_feed"]["inflight"][0]["excerpt"]
+    assert f'href="{HOME}"' in excerpt
+
+
+@pytest.mark.parametrize("tag", ["description", "content:encoded"])
+def test_plain_text_fallback_never_invents_issuer_employer_link(tmp_path, tag):
+    cfg = settings(tmp_path)
+    feed = _feed_with_html("example-co raised Series C financing in London",
+                           tag=tag)
+    mapping = routes()
+    mapping.update({SOURCE: feed, ARTICLE: (410, b"gone")})
+    client = OfflineClient(mapping)
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert not state.data["active"]
+    assert next(iter(state.data["deals"].values()))["reason"] == "employer_site_unproved"
+    assert HOME not in [u for u, _, _ in client.calls]
+
+
+@pytest.mark.parametrize("refusal", ["unsafe_url", "redirect_not_authorized",
+                                      "dns_failed", "tls_or_connect_failed",
+                                      "response_too_large", "http_day_budget"])
+def test_guard_refusals_never_authorize_feed_fallback(tmp_path, refusal):
+    cfg = settings(tmp_path)
+    link = "http://unsafe.example.com/round" if refusal == "unsafe_url" else ARTICLE
+    feed = _feed_with_html(_funding_excerpt(), link=link)
+    mapping = routes()
+    mapping[SOURCE] = feed
+
+    class GuardedFailure(OfflineClient):
+        def get(self, url, **kwargs):
+            if url == ARTICLE:
+                self.calls.append((url, {}, True))
+                raise funding.FundingRefusal(refusal)
+            return super().get(url, **kwargs)
+
+    client = GuardedFailure(mapping)
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert not state.data["active"]
+    assert not state.data["deals"]
+    assert HOME not in [u for u, _, _ in client.calls]
+
+
+def test_missing_article_url_never_replays_excerpt(tmp_path):
+    cfg = settings(tmp_path)
+    feed = _feed_with_html(_funding_excerpt(), link="")
+    client = OfflineClient({SOURCE: feed})
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=_series_c_extractor)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert not state.data["deals"] and not state.data["active"]
+    assert [u for u, _, _ in client.calls] == [SOURCE]
+
+
+def test_duplicate_guid_preserves_first_nonempty_excerpt_and_legacy_fill(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    source = funding._manifest(cfg)["sources"][0]
+    state = funding.State(path)
+    original = _feed_with_html(_funding_excerpt())
+    first, status = funding._source_payload(
+        source, state, OfflineClient({SOURCE: original}), NOW)
+    assert status == "fetched"
+    old_excerpt = first[0]["excerpt"]
+    changed = _feed_with_html("<p>New unrelated financing links</p>")
+    edited, _ = funding._source_payload(
+        source, state, OfflineClient({SOURCE: changed}), NOW)
+    assert edited[0]["excerpt"] == old_excerpt
+    empty = _feed_with_html("")
+    absent, _ = funding._source_payload(
+        source, state, OfflineClient({SOURCE: empty}), NOW)
+    assert absent[0]["excerpt"] == old_excerpt
+    state.data["feeds"]["uk_feed"]["inflight"][0].pop("excerpt")
+    state.save()
+    restarted = funding.State(path)
+    filled, status = funding._source_payload(
+        source, restarted, OfflineClient({SOURCE: original}), NOW)
+    assert status == "fetched" and filled[0]["excerpt"] == old_excerpt
+    assert funding.State(path).data["feeds"]["uk_feed"]["inflight"][0]["excerpt"] == old_excerpt
+
+
+def test_two_source_excerpt_cap_defers_without_rolling_cursor(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    for sid in ("uk_feed", "second_feed"):
+        outstanding = []
+        for idx in range(64):
+            key = funding._key(sid, idx)
+            outstanding.append({
+                "key": key, "title": "example-co raises seed funding in London",
+                "date": "2026-11-18", "url": f"https://news.example.com/{sid}/{idx}",
+                "excerpt": "x" * 2048})
+            state.data["articles"][key] = {
+                "status": "queued", "source": sid, "seen_at": NOW.isoformat()}
+        state.data["feeds"][sid] = {
+            "etag": '"old"', "last_modified": "", "last_fetch": NOW.isoformat(),
+            "inflight": outstanding}
+    assert state.reserve(NOW, "day_http", 1, cfg.funding_daily_http)
+    state.save()
+    before = path.read_bytes()
+    source = funding._manifest(cfg)["sources"][0]
+    new_feed = _feed_with_html("x" * 2048, guid="new-round")
+    replay, status = funding._source_payload(
+        source, state, OfflineClient({SOURCE: new_feed}), NOW)
+    assert status == "backlog_deferred" and len(replay) == 64
+    assert path.read_bytes() == before
+    assert state.data["feeds"]["uk_feed"]["etag"] == '"old"'
+    assert state.data["budgets"]["day_http"] == 1
+    state.data["articles"][state.data["feeds"]["uk_feed"]["inflight"][0]["key"]]["status"] = "complete"
+    state.save()
+    restarted = funding.State(path)
+    replay, status = funding._source_payload(
+        source, restarted, OfflineClient({SOURCE: new_feed}), NOW)
+    assert status == "fetched" and len(replay) == 64
+    assert restarted.data["feeds"]["uk_feed"]["etag"] == '"synthetic-v1"'
+    assert sum(len(i.get("excerpt", "").encode()) for f in
+               restarted.data["feeds"].values() for i in f["inflight"]) <= 256 * 1024
+
+
+def test_yaml_expansion_and_whole_ledger_cap_do_not_advance_cursor(tmp_path):
+    cfg = settings(tmp_path)
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    state.data["feeds"]["uk_feed"] = {
+        "etag": '"old"', "last_modified": "", "last_fetch": NOW.isoformat(),
+        "inflight": []}
+    base = len(yaml.safe_dump(state.data, sort_keys=True, allow_unicode=False).encode())
+    state.data["deals"]["padding"] = {
+        "status": "retryable", "reason": "Q" * (funding._MAX_STATE_BYTES - base - 1500)}
+    state.save()
+    saved = path.read_bytes()
+    excerpt = "\t" * 2048  # escaped YAML representation is larger than UTF-8 excerpt
+    news = _feed_with_html(excerpt)
+    source = funding._manifest(cfg)["sources"][0]
+    outstanding, status = funding._source_payload(
+        source, state, OfflineClient({SOURCE: news}), NOW)
+    assert status == "backlog_deferred" and outstanding == []
+    assert path.read_bytes() == saved
+    assert state.data["feeds"]["uk_feed"]["etag"] == '"old"'
+    state.data["deals"].pop("padding")
+    state.save()
+    records, status = funding._source_payload(
+        source, funding.State(path), OfflineClient({SOURCE: news}), NOW)
+    assert status == "fetched" and records
+
+
+def test_saved_backlog_replays_during_transient_feed_unavailability(tmp_path):
+    cfg = settings(tmp_path)
+    source = funding._manifest(cfg)["sources"][0]
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    records, _ = funding._source_payload(
+        source, state, OfflineClient({SOURCE: _feed_with_html(_funding_excerpt())}), NOW)
+
+    class OfflineOutage(OfflineClient):
+        def get(self, url, **kwargs):
+            raise httpx.ConnectError("synthetic outage", request=httpx.Request("GET", url))
+
+    again, status = funding._source_payload(
+        source, funding.State(path), OfflineOutage({}), NOW)
+    assert status == "feed_unavailable_replay" and again == records
+    assert funding.State(path).data["feeds"]["uk_feed"]["etag"] == '"synthetic-v1"'
+
+
+def test_failed_checkpoint_save_keeps_state_and_cursor(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    source = funding._manifest(cfg)["sources"][0]
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    state.save()
+    before = path.read_bytes()
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("synthetic atomic replace failure")
+    monkeypatch.setattr(funding.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        funding._source_payload(
+            source, state, OfflineClient({SOURCE: _feed_with_html(_funding_excerpt())}), NOW)
+    assert state.data["feeds"] == {}
+    assert path.read_bytes() == before
+
+
+def test_identical_malformed_children_have_distinct_stable_unresolved_rows(tmp_path):
+    cfg = settings(tmp_path)
+    def malformed(prompt, *, max_tokens):
+        ids = re.findall(r'"id":"([0-9a-f]{32})"', prompt)
+        child = {"issuer": "example-co", "stage": "series c", "date": ""}
+        return {"articles": [{"id": k, "deals": [child, child]} for k in ids]}
+
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
+                      extractor=malformed)
+    path = tmp_path / "local" / "funded-watchlist.yaml"
+    first = funding.State(path)
+    rows = {k: v for k, v in first.data["deals"].items()
+            if v["status"] == "unresolved"}
+    assert len(rows) == 2
+    assert all(v["issuer"] == "example-co" and v["stage"] == "series c"
+               and v["reason"] == "ambiguous_child_id" and v["item_title"]
+               for v in rows.values())
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: OfflineClient(routes()),
+                      extractor=lambda *_a, **_k: pytest.fail("saved children must replay"))
+    second = funding.State(path)
+    assert rows.keys() <= second.data["deals"].keys()
+
+
+@pytest.mark.parametrize("malformed", [42, "x" * 161])
+def test_unresolved_diagnostics_reject_malformed_load_and_normalize_legacy(
+        tmp_path, malformed):
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    state.data["deals"]["legacy"] = {
+        "status": "unresolved", "reason": "round_unconfirmed",
+        "seen_at": NOW.isoformat()}
+    state.save()
+    legacy = funding.State(path)
+    assert all(legacy.data["deals"]["legacy"][key] == ""
+               for key in ("issuer", "stage", "item_title"))
+    raw = yaml.safe_load(path.read_text())
+    raw["deals"]["legacy"]["reason"] = malformed
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(funding.FundingRefusal):
+        funding.State(path)
+
+
+def test_sec_proxy_unresolved_retains_empty_stage_and_item_title(tmp_path):
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+    client = OfflineClient({SEC_INDEX: fixture("sec_index.html"),
+                            SEC_DOC: fixture("sec_primary_doc.xml")})
+    title = "Synthetic SEC proxy offering"
+    funding._sec_proxy({"id": "sec_test"},
+                       {"key": "sec-round", "url": SEC_INDEX, "title": title},
+                       state, client, NOW)
+    row = next(iter(funding.State(state.path).data["deals"].values()))
+    assert row["status"] == "unresolved"
+    assert row["issuer"] and row["stage"] == ""
+    assert row["item_title"] == title
+    assert row["reason"] == "sec_unverified_offering_proxy"
