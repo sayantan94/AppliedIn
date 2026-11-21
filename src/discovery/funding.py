@@ -8,6 +8,7 @@ passes. The local YAML is the only durable funding state.
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -51,6 +52,9 @@ _PLANNED = re.compile(
     r"intends?\s+to|hopes?\s+to|(?:will|may|could)\s+"
     r"(?:raise|close|secure|complete)|fundraising\s+plans?)\b"
     r"|\b(?:funding|financing|round)\s+plans?\b", re.I)
+_CANCELLED_EVENT = re.compile(
+    r"\b(?:cancelled|canceled|failed|fell\s+through|abandoned|withdrawn|"
+    r"never\s+closed|was\s+not\s+completed|did\s+not\s+close)\b", re.I)
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
           "series a": re.compile(r"\bseries\s+a\b", re.I),
@@ -450,18 +454,34 @@ def _public_addresses(host: str, port: int) -> list[tuple]:
 class _SafeTLS(http.client.HTTPSConnection):
     def connect(self):
         addresses = _public_addresses(self.host, self.port)
-        last = None
+        last_connect_error = None
         for family, socktype, proto, _, sockaddr in addresses:
             sock = socket.socket(family, socktype, proto)
             try:
                 sock.settimeout(self.timeout)
                 sock.connect(sockaddr)  # numeric approved address, no second DNS lookup
+            except OSError as exc:
+                sock.close()
+                ordinary_connect_errnos = {
+                    errno.ECONNREFUSED, errno.ETIMEDOUT,
+                    errno.EHOSTUNREACH, errno.ENETUNREACH,
+                    errno.ENETDOWN,
+                }
+                if getattr(errno, "EHOSTDOWN", None) is not None:
+                    ordinary_connect_errnos.add(errno.EHOSTDOWN)
+                if isinstance(exc, TimeoutError) or exc.errno in ordinary_connect_errnos:
+                    last_connect_error = exc
+                    continue
+                raise FundingRefusal("tls_or_connect_failed") from exc
+            try:
                 self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
                 return
             except (OSError, ssl.SSLError) as exc:
-                last = exc
                 sock.close()
-        raise FundingRefusal("tls_or_connect_failed") from last
+                raise FundingRefusal("tls_or_connect_failed") from exc
+        if last_connect_error is not None:
+            raise ConnectionError("publisher_tcp_connect_failed") from last_connect_error
+        raise FundingRefusal("tls_or_connect_failed")
 
 
 class GuardedClient:
@@ -1174,8 +1194,6 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         r"announced|announces|obtained)\b", re.I)
     found = []
     for segment in segments:
-        if _PLANNED.search(segment):
-            continue
         match = actor.search(segment)
         if not match or not _EVENT_VERB.search(match.group()):
             continue
@@ -1191,6 +1209,22 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         if not stage_match or not event_match:
             continue
         if abs(stage_match.start() - event_match.start()) > 80:
+            continue
+        event_start = min(stage_match.start(), event_match.start())
+        event_end = max(stage_match.end(), event_match.end())
+        # Qualifiers before or inside the financing assertion affect its
+        # polarity; later plans about unrelated business activity do not.
+        assertion = tail[:event_end]
+        if (_PLANNED.search(assertion)
+                or re.match(r"\s+plans?\b", tail[event_end:], re.I)
+                or _CANCELLED_EVENT.search(
+                    tail[event_start:max(event_end, event_end + 60)])):
+            continue
+        if re.search(
+                r"\b(?:funding|financing|round|capital)\b.{0,60}"
+                r"\b(?:for|to)\s+[A-Z][A-Za-z0-9.-]*\b", tail):
+            # An announced arrangement for a named beneficiary is not proof
+            # that the announcing issuer received the financing.
             continue
         if len([name for name, witness in _STAGE.items()
                 if witness.search(tail)]) != 1:
@@ -1208,7 +1242,19 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
                 r"(?:has\s+)?(?:raised|raises|received|secured|closed|"
                 r"obtained|announced)\b", tail, re.I):
             continue
-        found.append(segment)
+        evidence_end = len(segment)
+        investor = re.search(
+            r"\b(?:from|by|backed\s+by|led\s+by)\s+"
+            r"(?:[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*)*)", tail)
+        if investor:
+            evidence_end = min(evidence_end, match.end() + investor.start())
+        other_action = re.search(
+            r"\b[A-Z][A-Za-z0-9.-]{2,}\s+"
+            r"(?:opened|opens|launched|launches|announced|announces|"
+            r"raised|raises|secured|closed|completed|acquired|acquires)\b", tail)
+        if other_action:
+            evidence_end = min(evidence_end, match.end() + other_action.start())
+        found.append(segment[:evidence_end])
     return found
 
 
@@ -1216,10 +1262,13 @@ def _fund_issuer(issuer: str, passages: list[str]) -> bool:
     if _BLOCKED_SECTOR.search(issuer):
         return True
     lead = re.escape(issuer) + r"(?!\w)"
-    return any(re.search(
+    suffix = re.compile(
         lead + r"\s*(?:\(|,)?\s*(?:a|an|the)?\s*"
-        r"(?:venture fund|investment fund|fund manager|real estate fund)\b",
-        p, re.I) for p in passages)
+        r"(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
+    prefix = re.compile(
+        r"\b(?:a|an|the)?\s*(?:venture|investment|real estate)\s+fund\s+"
+        r"(?:named\s+)?" + lead, re.I)
+    return any(suffix.search(p) or prefix.search(p) for p in passages)
 
 
 def _prove_deal(deal: dict, article: dict, state: State, settings,

@@ -1546,3 +1546,151 @@ def test_authorized_feed_read_timeout_replays_only_saved_backlog(tmp_path):
         source, funding.State(path), ReadTimeout({}), NOW)
     assert outcome == "feed_unavailable_replay" and replay == saved
     assert path.read_bytes() == old
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("example-co announced Series C financing for OtherCo in London",
+     "round_unconfirmed"),
+    ("example-co raised Series C financing from OtherCo, a London-based investor",
+     "region_unproved"),
+    ("example-co raised Series C financing, OtherCo opened a London office",
+     "region_unproved"),
+    ("example-co announced its Series C financing was cancelled in London",
+     "round_unconfirmed"),
+])
+def test_third_party_beneficiary_region_and_cancelled_round_refuse_before_probe(
+        tmp_path, body, expected):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == (expected, None, None)
+    assert client.calls == []
+
+
+def test_completed_round_followed_by_expansion_plan_remains_valid(tmp_path):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    article = _synthetic_article(
+        "example-co raised Series C financing in London and plans to expand")
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "admissible"
+    assert active and evidence
+
+
+def test_prefixed_fund_issuer_refuses_before_homepage_probe(tmp_path):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    article = _synthetic_article(
+        "The investment fund example-co raised Series C financing in London")
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW)
+    assert (reason, active, evidence) == ("fund_not_issuer", None, None)
+    assert client.calls == []
+
+
+def test_guarded_tcp_connect_refusal_is_differentiated_for_saved_feed_replay(
+        tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    state_path = tmp_path / "funded-watchlist.yaml"
+    source = funding._manifest(cfg)["sources"][0]
+    state = funding.State(state_path)
+    saved, _ = funding._source_payload(
+        source, state, OfflineClient({SOURCE: _feed_with_html(_funding_excerpt())}), NOW)
+
+    class RefusedSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            raise ConnectionRefusedError(111, "synthetic refusal")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        funding, "_public_addresses",
+        lambda _host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                              ("93.184.216.34", port))])
+    monkeypatch.setattr(funding.socket, "socket", lambda *_args: RefusedSocket())
+    guarded = funding.GuardedClient(
+        state=funding.State(state_path), settings=cfg, now=NOW)
+    with pytest.raises(ConnectionError):
+        guarded.get(SOURCE)
+
+    replay, outcome = funding._source_payload(
+        source, funding.State(state_path), guarded, NOW)
+    assert outcome == "feed_unavailable_replay" and replay == saved
+
+
+def test_guarded_tcp_connect_refusal_allows_pinned_article_fallback(tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    class RefusedSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            raise ConnectionRefusedError(111, "synthetic refusal")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        funding, "_public_addresses",
+        lambda _host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                              ("93.184.216.34", port))])
+    monkeypatch.setattr(funding.socket, "socket", lambda *_args: RefusedSocket())
+    offline = OfflineClient({**routes(),
+                             SOURCE: _feed_with_html(_funding_excerpt())})
+
+    class MixedClient:
+        def __init__(self, state, settings, now):
+            self.guarded = funding.GuardedClient(state=state, settings=settings, now=now)
+
+        def get(self, url, **kwargs):
+            if url == ARTICLE:
+                return self.guarded.get(url, **kwargs)
+            return offline.get(url, **kwargs)
+
+    result = funding.poll_once(
+        cfg, now=NOW, client_factory=MixedClient,
+        extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert result["status"] == "ok"
+    assert len(state.data["active"]) == 1
+    assert state.data["report"]["counts"]["feed_excerpt_fallback"] == 1
+
+
+def test_guarded_tls_failure_remains_a_refusal_not_publisher_outage(
+        tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    state = funding.State(tmp_path / "funded-watchlist.yaml")
+
+    class ConnectedSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            pass
+
+        def close(self):
+            pass
+
+    class FailedTLS:
+        def wrap_socket(self, _sock, *, server_hostname):
+            raise funding.ssl.SSLError("synthetic TLS validation failure")
+
+    monkeypatch.setattr(
+        funding, "_public_addresses",
+        lambda _host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                              ("93.184.216.34", port))])
+    monkeypatch.setattr(funding.socket, "socket", lambda *_args: ConnectedSocket())
+    monkeypatch.setattr(funding.ssl, "create_default_context", lambda: FailedTLS())
+    guarded = funding.GuardedClient(state=state, settings=cfg, now=NOW)
+    with pytest.raises(funding.FundingRefusal, match="tls_or_connect_failed"):
+        guarded.get(SOURCE)
