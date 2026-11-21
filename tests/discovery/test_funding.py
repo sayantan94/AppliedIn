@@ -1121,12 +1121,14 @@ def _series_c_deal(**overrides):
 
 
 @pytest.mark.parametrize("sector", ["ai", "fintech", "unknown", "non-fintech"])
-@pytest.mark.parametrize("investor_position", ["title", "body"])
+@pytest.mark.parametrize("investor_position", ["title", "body", "fund_manager"])
 def test_any_sector_series_c_and_fund_investor_can_admit(
         tmp_path, sector, investor_position):
     body = "example-co raised Series C financing in London"
     if investor_position == "title":
         body += " from a venture fund"
+    elif investor_position == "fund_manager":
+        body += " from a fund manager"
     else:
         body += "; Backers include a venture fund"
     article = _synthetic_article(body)
@@ -1151,6 +1153,7 @@ def test_any_sector_series_c_and_fund_investor_can_admit(
      "Example Investment Fund closed Series C funding in London"),
     ("Example Real Estate Fund",
      "Example Real Estate Fund raised Series C financing in London"),
+    ("example-co", "The fund manager example-co raised Series C financing in London"),
 ])
 def test_fund_as_recipient_refuses_before_homepage_probe(tmp_path, issuer, body):
     cfg = settings(tmp_path)
@@ -1570,11 +1573,14 @@ def test_third_party_beneficiary_region_and_cancelled_round_refuse_before_probe(
     assert client.calls == []
 
 
-def test_completed_round_followed_by_expansion_plan_remains_valid(tmp_path):
+@pytest.mark.parametrize("body", [
+    "example-co raised Series C financing in London and plans to expand",
+    "example-co raised Series C financing in London to support expansion",
+])
+def test_completed_round_followed_by_expansion_plan_remains_valid(tmp_path, body):
     cfg = settings(tmp_path)
     client = OfflineClient(routes())
-    article = _synthetic_article(
-        "example-co raised Series C financing in London and plans to expand")
+    article = _synthetic_article(body)
     reason, active, evidence = funding._prove_deal(
         _series_c_deal(), article, funding.State(tmp_path / "state.yaml"),
         cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
@@ -1694,3 +1700,140 @@ def test_guarded_tls_failure_remains_a_refusal_not_publisher_outage(
     guarded = funding.GuardedClient(state=state, settings=cfg, now=NOW)
     with pytest.raises(funding.FundingRefusal, match="tls_or_connect_failed"):
         guarded.get(SOURCE)
+
+
+@pytest.mark.parametrize("body", [
+    "example-co announced Series C financing planned for London",
+    "example-co announced cancelled Series C financing in London",
+    "example-co announced Series C financing is planned for London",
+    "example-co announced Series C financing will be raised in London",
+    "example-co announced plans for a Series C financing in London",
+])
+def test_post_object_future_and_cancelled_rounds_refuse_before_probe(tmp_path, body):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == ("round_unconfirmed", None, None)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("example-co announced Series C financing for otherco in London",
+     "round_unconfirmed"),
+    ("example-co raised Series C financing from otherco, a London-based investor",
+     "region_unproved"),
+    ("example-co announced Series C financing for the London-based startup OtherCo",
+     "round_unconfirmed"),
+    ("example-co raised Series C financing from a London-based investment fund",
+     "region_unproved"),
+    ("example-co raised Series C financing, otherco opened a London office",
+     "region_unproved"),
+])
+def test_lowercase_and_described_third_parties_cannot_supply_round_or_region(
+        tmp_path, body, expected):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == (expected, None, None)
+    assert client.calls == []
+
+
+def test_pending_tcp_connect_failure_defers_without_unwinding(tmp_path):
+    cfg = settings(tmp_path)
+    state = funding.State(tmp_path / "state.yaml")
+    key = "synthetic-pending-connect-failure"
+    state.data["pending"][key] = {
+        "name": "example-co", "homepage": HOME,
+        "employer_domain": "example-co.co.uk", "source": "uk_feed",
+        "reason": "no_openings", "seen_at": (NOW - timedelta(days=7)).isoformat(),
+        "next_check": (NOW - timedelta(hours=1)).isoformat(),
+        "expires": (NOW + timedelta(days=53)).isoformat(),
+    }
+    state.data["deals"][key] = {
+        "status": "pending", "reason": "no_openings", "source": "uk_feed",
+        "seen_at": NOW.isoformat(),
+    }
+    state.save()
+
+    class RefusedClient:
+        def get(self, *_args, **_kwargs):
+            raise ConnectionRefusedError(111, "synthetic refusal")
+
+    assert funding._recheck_pending(state, cfg, RefusedClient(), NOW) == 1
+    assert key in state.data["pending"]
+    assert key not in state.data["active"]
+    assert state.data["pending"][key]["reason"] == "pending_recheck_failed"
+    assert funding._date(state.data["pending"][key]["next_check"]) > NOW
+
+
+def test_sec_tcp_connect_failure_remains_retryable(tmp_path):
+    state = funding.State(tmp_path / "state.yaml")
+    article = {"key": "synthetic-sec-connect", "url": SEC_INDEX}
+
+    class RefusedClient:
+        def get(self, *_args, **_kwargs):
+            raise ConnectionRefusedError(111, "synthetic refusal")
+
+    funding._sec_proxy({"id": "sec_test"}, article, state, RefusedClient(), NOW)
+    deal = next(iter(state.data["deals"].values()))
+    assert deal["status"] == "retryable"
+    assert state.data["articles"][article["key"]]["status"] == "retryable"
+
+
+def test_homepage_tcp_refusal_defers_one_child_and_continues_next_candidate(
+        tmp_path, monkeypatch):
+    cfg = settings(tmp_path)
+    second_article = "https://news.example.com/round-2"
+    first_xml = _feed_with_html(_funding_excerpt(), guid="first", link=ARTICLE).decode()
+    second_xml = _feed_with_html(
+        _funding_excerpt(), guid="second", link=second_article).decode()
+    item_re = re.compile(r"<item>.*?</item>")
+    items = item_re.findall(first_xml) + item_re.findall(second_xml)
+    feed = ("<?xml version=\"1.0\"?><rss xmlns:content=\""
+            "http://purl.org/rss/1.0/modules/content/\"><channel>" +
+            "".join(items) + "</channel></rss>").encode()
+
+    class RefusedSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            raise ConnectionRefusedError(111, "synthetic refusal")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        funding, "_public_addresses",
+        lambda _host, port: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                              ("93.184.216.34", port))])
+    monkeypatch.setattr(funding.socket, "socket", lambda *_args: RefusedSocket())
+    offline = OfflineClient({**routes(), SOURCE: feed,
+                             ARTICLE: _funding_excerpt().encode(),
+                             second_article: _funding_excerpt().encode()})
+
+    class MixedClient:
+        def __init__(self, state, settings, now):
+            self.guarded = funding.GuardedClient(state=state, settings=settings, now=now)
+            self.home_refused = False
+
+        def get(self, url, **kwargs):
+            if url == HOME and not self.home_refused:
+                self.home_refused = True
+                return self.guarded.get(url, **kwargs)
+            return offline.get(url, **kwargs)
+
+    result = funding.poll_once(
+        cfg, now=NOW, client_factory=MixedClient,
+        extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert result["status"] == "ok"
+    assert len(state.data["active"]) == 1
+    assert sum(row["reason"] == "probe_retryable"
+               for row in state.data["deals"].values()) == 1

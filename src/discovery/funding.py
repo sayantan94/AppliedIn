@@ -47,14 +47,29 @@ _EVENT_VERB = re.compile(
     r"announced|announces|obtained)\b", re.I)
 _EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital)\b", re.I)
 _PLANNED = re.compile(
-    r"\b(?:plans?\s+(?:to|for)|planning|planned|proposed|upcoming|"
-    r"potential|expected|seeking|targets?\s+to|aims?\s+to|"
-    r"intends?\s+to|hopes?\s+to|(?:will|may|could)\s+"
-    r"(?:raise|close|secure|complete)|fundraising\s+plans?)\b"
+    r"\b(?:plans?\s+(?:to\s+)?(?:raise|close|secure|complete)|"
+    r"plans?\s+for\s+(?:a\s+|an\s+|its\s+|the\s+)?"
+    r"(?:pre[- ]seed|seed|series\s+[abc]|funding|financing|round)|"
+    r"planning|planned|proposed|upcoming|potential|expected|seeking|"
+    r"targets?\s+to\s+(?:raise|close|secure|complete)|"
+    r"aims?\s+to\s+(?:raise|close|secure|complete)|"
+    r"intends?\s+to\s+(?:raise|close|secure|complete)|"
+    r"hopes?\s+to\s+(?:raise|close|secure|complete)|"
+    r"(?:will|may|could)\s+(?:be\s+)?"
+    r"(?:raised|closed|secured|completed|raise|close|secure|complete)|"
+    r"fundraising\s+plans?)\b"
     r"|\b(?:funding|financing|round)\s+plans?\b", re.I)
 _CANCELLED_EVENT = re.compile(
     r"\b(?:cancelled|canceled|failed|fell\s+through|abandoned|withdrawn|"
     r"never\s+closed|was\s+not\s+completed|did\s+not\s+close)\b", re.I)
+_FINANCING_PURPOSE_WORDS = frozenset({
+    "accelerate", "accelerating", "acquisition", "acquiring", "build", "building",
+    "capital", "close", "company", "complete", "create", "creating", "customer",
+    "customers", "development", "expand", "expanding", "expansion", "financing",
+    "firm", "fund", "funding", "grow", "growth", "hire", "hiring", "market",
+    "markets", "operations", "organization", "product", "raise", "research", "sales",
+    "scale", "scaling", "secure", "support", "supporting",
+})
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
           "series a": re.compile(r"\bseries\s+a\b", re.I),
@@ -943,7 +958,7 @@ def _sec_proxy(source: dict, article: dict, state: State, client: GuardedClient,
                                     "issuer": _clip(issuer, 150), "stage": "",
                                     "item_title": _clip(article.get("title", ""), 512),
                                     "offering_amount_proxy": amount[:40]}
-    except (FundingRefusal, httpx.HTTPError):
+    except (FundingRefusal, httpx.HTTPError, OSError):
         state.data["deals"][key] = {
             "status": "retryable", "reason": "sec_document_unavailable",
             "seen_at": now.isoformat(), "source": source["id"]}
@@ -1214,15 +1229,17 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         event_end = max(stage_match.end(), event_match.end())
         # Qualifiers before or inside the financing assertion affect its
         # polarity; later plans about unrelated business activity do not.
-        assertion = tail[:event_end]
-        if (_PLANNED.search(assertion)
-                or re.match(r"\s+plans?\b", tail[event_end:], re.I)
-                or _CANCELLED_EVENT.search(
-                    tail[event_start:max(event_end, event_end + 60)])):
+        assertion = tail[max(0, event_start - 50):event_end + 80]
+        if _PLANNED.search(assertion) or _CANCELLED_EVENT.search(assertion):
             continue
-        if re.search(
-                r"\b(?:funding|financing|round|capital)\b.{0,60}"
-                r"\b(?:for|to)\s+[A-Z][A-Za-z0-9.-]*\b", tail):
+        beneficiary = re.search(
+            r"\b(?:funding|financing|round|capital)\b.{0,60}"
+            r"\b(?:for|to)\s+(?:(?:the|a|an|its|their)\s+)?"
+            r"(?:(?:[a-z][a-z0-9-]*-based)\s+)?"
+            r"(?:(?:startup|company|business|firm|fund|corporation|"
+            r"organization)\s+)?(?P<recipient>[a-z][a-z0-9.-]*)\b", tail, re.I)
+        if (beneficiary and beneficiary.group("recipient").casefold()
+                not in _FINANCING_PURPOSE_WORDS):
             # An announced arrangement for a named beneficiary is not proof
             # that the announcing issuer received the financing.
             continue
@@ -1243,15 +1260,13 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
                 r"obtained|announced)\b", tail, re.I):
             continue
         evidence_end = len(segment)
-        investor = re.search(
-            r"\b(?:from|by|backed\s+by|led\s+by)\s+"
-            r"(?:[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*)*)", tail)
+        investor = re.search(r"\b(?:from|backed\s+by|led\s+by)\b", tail, re.I)
         if investor:
             evidence_end = min(evidence_end, match.end() + investor.start())
         other_action = re.search(
-            r"\b[A-Z][A-Za-z0-9.-]{2,}\s+"
+            r"\b[A-Za-z][A-Za-z0-9.-]{2,}\s+"
             r"(?:opened|opens|launched|launches|announced|announces|"
-            r"raised|raises|secured|closed|completed|acquired|acquires)\b", tail)
+            r"raised|raises|secured|closed|completed|acquired|acquires)\b", tail, re.I)
         if other_action:
             evidence_end = min(evidence_end, match.end() + other_action.start())
         found.append(segment[:evidence_end])
@@ -1266,7 +1281,8 @@ def _fund_issuer(issuer: str, passages: list[str]) -> bool:
         lead + r"\s*(?:\(|,)?\s*(?:a|an|the)?\s*"
         r"(?:venture fund|investment fund|fund manager|real estate fund)\b", re.I)
     prefix = re.compile(
-        r"\b(?:a|an|the)?\s*(?:venture|investment|real estate)\s+fund\s+"
+        r"\b(?:a|an|the)?\s*(?:(?:venture|investment|real estate)\s+fund|"
+        r"fund manager)\s+"
         r"(?:named\s+)?" + lead, re.I)
     return any(suffix.search(p) or prefix.search(p) for p in passages)
 
@@ -1367,7 +1383,7 @@ def _recheck_pending(state: State, settings, client: GuardedClient,
                 row["name"], row["homepage"], row["source"],
                 state, settings, client, now, relevance_fn=relevance_fn,
                 aliases=row.get("aliases", []))
-        except (FundingRefusal, httpx.HTTPError, ValueError):
+        except (FundingRefusal, httpx.HTTPError, OSError, ValueError):
             reason, active = "pending_recheck_failed", None
         if active is not None and not state.reserve(
                 now, "day_added", 1, settings.funding_daily_new_companies):
@@ -1582,7 +1598,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                 try:
                     reason, active, verified = _prove_deal(
                         deal, article, state, settings, client, now, relevance_fn=relevance_fn)
-                except (FundingRefusal, httpx.HTTPError, ValueError, KeyError):
+                except (FundingRefusal, httpx.HTTPError, OSError, ValueError, KeyError):
                     reason, active, verified = "probe_retryable", None, None
                 status = ("active" if active else "retryable" if reason in
                           {"probe_retryable", "relevance_budget", "postings_limit"}
