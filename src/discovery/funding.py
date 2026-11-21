@@ -641,7 +641,10 @@ def _rss_items(payload: bytes, kind: str) -> list[dict]:
             node = next((n for n in item if n.tag == tag), None)
             if node is not None and node.text:
                 feed_html = node.text
-                break
+                # Prefer actual article content, but checkpoint a whitespace-only
+                # excerpt if neither source supplies more meaningful text.
+                if feed_html.strip():
+                    break
         excerpt = _clip(feed_html, _MAX_EXCERPT_BYTES)
         record = {"title": title, "date": date_raw, "url": link,
                   "key": _key(kind, guid)}
