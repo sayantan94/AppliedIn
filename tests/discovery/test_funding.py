@@ -1588,6 +1588,92 @@ def test_completed_round_followed_by_expansion_plan_remains_valid(tmp_path, body
     assert active and evidence
 
 
+
+# Review 6003370162, source-01: typed beneficiaries and investor-owned region.
+@pytest.mark.parametrize("body,expected", [
+    ("example-co announced Series C financing for the startup Growth in London",
+     "round_unconfirmed"),
+    ("example-co raised Series C financing with a London-based investment fund",
+     "region_unproved"),
+])
+def test_source01_named_beneficiary_and_with_investor_region_refuse(
+        tmp_path, body, expected):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == (expected, None, None)
+    assert client.calls == []
+
+
+# Review 6003370162, source-01: completed round followed by purpose or plans.
+@pytest.mark.parametrize("body", [
+    "example-co raised Series C financing in London to launch a product",
+    "example-co raised Series C financing in London and expected to hire engineers",
+    "example-co raised Series C financing in London with a London-based investment fund",
+    "example-co raised Series C financing in London for expansion of its operations",
+])
+def test_source01_completed_raise_purpose_and_hiring_plans_admit(tmp_path, body):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "admissible"
+    assert active and evidence
+    assert client.calls
+
+
+# Review 6003370162, source-02: beneficiary description and second actor region.
+@pytest.mark.parametrize("body,expected", [
+    ("example-co announced Series C financing for expansion of OtherCo in London",
+     "round_unconfirmed"),
+    ("example-co raised Series C financing, OtherCo is based in London",
+     "region_unproved"),
+])
+def test_source02_described_beneficiary_and_second_region_refuse(
+        tmp_path, body, expected):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), _synthetic_article(body),
+        funding.State(tmp_path / "state.yaml"), cfg, client, NOW,
+        relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == (expected, None, None)
+    assert client.calls == []
+
+
+# Review 6003370162, source-02: scheduled financing is not a completed round.
+def test_source02_scheduled_closing_refuses_without_employer_probes(tmp_path):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    article = _synthetic_article(
+        "example-co announced its Series C financing is scheduled to close "
+        "in London next month")
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert (reason, active, evidence) == ("round_unconfirmed", None, None)
+    assert client.calls == []
+
+
+# Review 6003370162, source-02: an unrelated planned expansion is not a round.
+def test_source02_completed_raise_with_planned_expansion_admits(tmp_path):
+    cfg = settings(tmp_path)
+    client = OfflineClient(routes())
+    article = _synthetic_article(
+        "example-co raised Series C financing in London and planned to expand")
+    reason, active, evidence = funding._prove_deal(
+        _series_c_deal(), article, funding.State(tmp_path / "state.yaml"),
+        cfg, client, NOW, relevance_fn=lambda jobs, prefs: jobs)
+    assert reason == "admissible"
+    assert active and evidence
+    assert client.calls
+
+
 def test_prefixed_fund_issuer_refuses_before_homepage_probe(tmp_path):
     cfg = settings(tmp_path)
     client = OfflineClient(routes())

@@ -69,7 +69,21 @@ _FINANCING_PURPOSE_WORDS = frozenset({
     "firm", "fund", "funding", "grow", "growth", "hire", "hiring", "market",
     "markets", "operations", "organization", "product", "raise", "research", "sales",
     "scale", "scaling", "secure", "support", "supporting",
+    "launch", "launching",
 })
+_FINANCING_PURPOSE_VERBS = frozenset({
+    "accelerate", "acquire", "build", "close", "complete", "create",
+    "develop", "enable", "enter", "expand", "finance", "grow", "hire",
+    "launch", "open", "raise", "recruit", "scale", "secure", "support",
+})
+_FUTURE_EVENT_FOLLOW = re.compile(
+    r"\b(?:(?:is|was|are|were|has\s+been|had\s+been|will\s+be|"
+    r"would\s+be)\s+)?(?:planned|scheduled|due|expected|proposed|"
+    r"upcoming|set)\b|"
+    r"\b(?:will|would|may|might|could)\s+(?:be\s+)?"
+    r"(?:raised|closed|secured|completed|raise|close|secure|complete)\b",
+    re.I,
+)
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
           "series a": re.compile(r"\bseries\s+a\b", re.I),
@@ -1227,22 +1241,47 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
             continue
         event_start = min(stage_match.start(), event_match.start())
         event_end = max(stage_match.end(), event_match.end())
-        # Qualifiers before or inside the financing assertion affect its
-        # polarity; later plans about unrelated business activity do not.
-        assertion = tail[max(0, event_start - 50):event_end + 80]
-        if _PLANNED.search(assertion) or _CANCELLED_EVENT.search(assertion):
+        # Bind prospective/negative language to the financing itself, not
+        # to later plans to hire, expand or launch a product.
+        before_event = tail[:event_end]
+        after_event = tail[event_end:event_end + 100]
+        financing_follow = re.split(
+            r"\b(?:and|but)\b|[.;]", after_event, maxsplit=1, flags=re.I)[0]
+        if (_PLANNED.search(before_event)
+                or _CANCELLED_EVENT.search(before_event)
+                or _CANCELLED_EVENT.search(financing_follow)
+                or _FUTURE_EVENT_FOLLOW.search(financing_follow)
+                or re.search(
+                    r"\b(?:planned|scheduled|expected|due|set)\s+to\s+"
+                    r"(?:raise|close|secure|complete)\b",
+                    after_event, re.I)):
             continue
         beneficiary = re.search(
             r"\b(?:funding|financing|round|capital)\b.{0,60}"
-            r"\b(?:for|to)\s+(?:(?:the|a|an|its|their)\s+)?"
+            r"\b(?P<relation>for|to)\s+"
+            r"(?:(?:the|a|an|its|their)\s+)?"
             r"(?:(?:[a-z][a-z0-9-]*-based)\s+)?"
-            r"(?:(?:startup|company|business|firm|fund|corporation|"
-            r"organization)\s+)?(?P<recipient>[a-z][a-z0-9.-]*)\b", tail, re.I)
-        if (beneficiary and beneficiary.group("recipient").casefold()
-                not in _FINANCING_PURPOSE_WORDS):
-            # An announced arrangement for a named beneficiary is not proof
-            # that the announcing issuer received the financing.
-            continue
+            r"(?:(?P<entity_kind>startup|company|business|firm|fund|"
+            r"corporation|organization)\s+)?"
+            r"(?P<recipient>[a-z][a-z0-9.-]*)\b", tail, re.I)
+        if beneficiary:
+            relation = beneficiary.group("relation").casefold()
+            recipient = beneficiary.group("recipient").casefold()
+            # A typed beneficiary (even one named "Growth") or a purpose
+            # explicitly owned by another company cannot prove this issuer.
+            described_other = (
+                recipient in _FINANCING_PURPOSE_WORDS
+                and re.match(
+                    r"\s+of\s+(?!(?:its|their|our|the|a|an|operations|"
+                    r"markets|products|services|team|business|research|"
+                    r"technology)\b)[a-z][a-z0-9.-]*\b",
+                    tail[beneficiary.end():], re.I))
+            if (beneficiary.group("entity_kind") or described_other
+                    or (relation == "for"
+                        and recipient not in _FINANCING_PURPOSE_WORDS)
+                    or (relation == "to"
+                        and recipient not in _FINANCING_PURPOSE_VERBS)):
+                continue
         if len([name for name, witness in _STAGE.items()
                 if witness.search(tail)]) != 1:
             # One funding clause cannot transfer the Series A event to C.
@@ -1260,13 +1299,20 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
                 r"obtained|announced)\b", tail, re.I):
             continue
         evidence_end = len(segment)
-        investor = re.search(r"\b(?:from|backed\s+by|led\s+by)\b", tail, re.I)
+        investor = re.search(
+            r"\b(?:from|backed\s+by|led\s+by|"
+            r"with\s+(?:(?:a|an|the)\s+)?"
+            r"(?:(?:[a-z][a-z0-9-]*-based)\s+)?"
+            r"(?:(?:venture|investment|real\s+estate|private\s+equity)\s+)?"
+            r"(?:fund|investors?|backers?|partners?))\b", tail, re.I)
         if investor:
             evidence_end = min(evidence_end, match.end() + investor.start())
         other_action = re.search(
             r"\b[A-Za-z][A-Za-z0-9.-]{2,}\s+"
             r"(?:opened|opens|launched|launches|announced|announces|"
-            r"raised|raises|secured|closed|completed|acquired|acquires)\b", tail, re.I)
+            r"raised|raises|secured|closed|completed|acquired|acquires|"
+            r"(?:is|was|are|were)\s+(?:(?:now|currently)\s+)?"
+            r"(?:based|located|headquartered))\b", tail, re.I)
         if other_action:
             evidence_end = min(evidence_end, match.end() + other_action.start())
         found.append(segment[:evidence_end])
