@@ -1481,3 +1481,43 @@ def test_sec_proxy_unresolved_retains_empty_stage_and_item_title(tmp_path):
     assert row["issuer"] and row["stage"] == ""
     assert row["item_title"] == title
     assert row["reason"] == "sec_unverified_offering_proxy"
+
+
+
+def test_authorized_article_read_timeout_uses_pinned_excerpt(tmp_path):
+    cfg = settings(tmp_path)
+    supplied = routes()
+    supplied[SOURCE] = _feed_with_html(_funding_excerpt())
+
+    class ReadTimeout(OfflineClient):
+        def get(self, url, **kwargs):
+            if url == ARTICLE:
+                self.calls.append((url, {}, True))
+                raise TimeoutError("synthetic publisher read timeout")
+            return super().get(url, **kwargs)
+
+    client = ReadTimeout(supplied)
+    funding.poll_once(cfg, now=NOW, client_factory=lambda *_: client,
+                      extractor=_series_c_extractor, relevance_fn=lambda jobs, prefs: jobs)
+    state = funding.State(tmp_path / "local" / "funded-watchlist.yaml")
+    assert len(state.data["active"]) == 1
+    assert state.data["report"]["counts"]["feed_excerpt_fallback"] == 1
+
+
+def test_authorized_feed_read_timeout_replays_only_saved_backlog(tmp_path):
+    cfg = settings(tmp_path)
+    source = funding._manifest(cfg)["sources"][0]
+    path = tmp_path / "funded-watchlist.yaml"
+    state = funding.State(path)
+    saved, _ = funding._source_payload(
+        source, state, OfflineClient({SOURCE: _feed_with_html(_funding_excerpt())}), NOW)
+
+    class ReadTimeout(OfflineClient):
+        def get(self, url, **kwargs):
+            raise TimeoutError("synthetic source read timeout")
+
+    old = path.read_bytes()
+    replay, outcome = funding._source_payload(
+        source, funding.State(path), ReadTimeout({}), NOW)
+    assert outcome == "feed_unavailable_replay" and replay == saved
+    assert path.read_bytes() == old
