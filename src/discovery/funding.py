@@ -734,8 +734,11 @@ def _publisher_unavailable(exc: Exception) -> bool:
     """Only ordinary publisher failures, never guarded transport refusals."""
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {404, 410} or 500 <= exc.response.status_code <= 599
+    # After guarded DNS/TLS connection, an ordinary socket read/reset can
+    # surface as a builtin OSError rather than an httpx exception.
     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
-                            httpx.ReadTimeout, httpx.ReadError))
+                            httpx.ReadTimeout, httpx.ReadError,
+                            TimeoutError, ConnectionError))
 
 
 def _source_payload(source: dict, state: State, client: GuardedClient, now,
@@ -786,7 +789,7 @@ def _source_payload(source: dict, state: State, client: GuardedClient, now,
         response = client.get(source["url"], headers=headers, follow_redirects=True)
         if response.status_code != 304:
             response.raise_for_status()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
         if outstanding and _publisher_unavailable(exc):
             # This is replay only; no new-source payload or cursor success.
             return outstanding, "feed_unavailable_replay"
@@ -1406,7 +1409,7 @@ def poll_once(settings=None, *, now=None, client_factory=None, extractor=None,
                     html = _article(resp.text)
                     candidates.append({**item, "source": sid, "text": html.text[:10000],
                                        "html": html, "url": item["url"]})
-                except (FundingRefusal, httpx.HTTPError) as exc:
+                except (FundingRefusal, httpx.HTTPError, TimeoutError, ConnectionError) as exc:
                     # An authorized publisher outage may replay exactly ONE
                     # saved feed excerpt, never an unsafe URL or guard refusal.
                     excerpt = item.get("excerpt", "")
