@@ -165,13 +165,14 @@ def _effective_smtp(settings, sender, stores):
     # Validate types beyond reply_ingest.local_credentials's truthiness check.
     try:
         record = stores.secrets.get_json("imap")
+        valid = (isinstance(record, dict)
+                 and all(isinstance(record.get(key), str) and record[key]
+                         for key in ("host", "mailbox", "username", "password"))
+                 and record["host"] == "imap.gmail.com"
+                 and record["username"] == sender)
     except Exception:
         raise OutreachHold("matching_local_imap_app_password_required_for_smtp") from None
-    if (not isinstance(record, dict)
-            or any(not isinstance(record.get(key), str) or not record[key]
-                   for key in ("host", "mailbox", "username", "password"))
-            or record["host"] != "imap.gmail.com"
-            or record["username"] != sender):
+    if not valid:
         raise OutreachHold("matching_local_imap_app_password_required_for_smtp")
     return "smtp.gmail.com", 465, record["username"], record["password"]
 
