@@ -1178,6 +1178,7 @@ def test_fund_as_recipient_refuses_before_homepage_probe(tmp_path, issuer, body)
      "series c"),
     ("example-co announced OtherCo's Series C financing in London", "series c"),
     ("OtherCo and example-co raised Series C financing in London", "series c"),
+    ("OtherCo, example-co raised Series C financing in London", "series c"),
     ("example-co raised Series A financing in London and celebrated Series C", "series c"),
 ])
 def test_stage_only_planned_and_borrowed_rounds_refuse_without_probes(
