@@ -44,7 +44,7 @@ _FUNDING = re.compile(
 _EVENT_VERB = re.compile(
     r"\b(?:raised|raises|secured|secures|closed|closes|completed|completes|"
     r"announced|announces|obtained)\b", re.I)
-_EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital|investment)\b", re.I)
+_EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital)\b", re.I)
 _PLANNED = re.compile(
     r"\b(?:plans?\s+(?:to|for)|planning|seeking|targets?\s+to|"
     r"aims?\s+to|intends?\s+to|hopes?\s+to|will\s+raise|"
@@ -635,7 +635,7 @@ def _rss_items(payload: bytes, kind: str) -> list[dict]:
         # publisher-defined lookalike. Preserve source HTML with its links.
         feed_html = ""
         for tag in ("{http://purl.org/rss/1.0/modules/content/}encoded",
-                    "description", "summary"):
+                    "description"):
             node = next((n for n in item if n.tag == tag), None)
             if node is not None and node.text and node.text.strip():
                 feed_html = node.text
@@ -1157,17 +1157,36 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         r"announced|announces|obtained)\b", re.I)
     found = []
     for segment in segments:
-        if not _STAGE[stage].search(segment) or not _EVENT_OBJECT.search(segment):
-            continue
         if _PLANNED.search(segment):
             continue
         match = actor.search(segment)
         if not match or not _EVENT_VERB.search(match.group()):
             continue
+        if re.search(r"\band\s+$", segment[:match.start()], re.I):
+            # "OtherCo and example-co raised ..." names two recipients.
+            continue
+        tail = segment[match.end():]
+        stage_match = _STAGE[stage].search(tail)
+        event_match = _EVENT_OBJECT.search(tail)
+        if not stage_match or not event_match:
+            continue
+        if abs(stage_match.start() - event_match.start()) > 80:
+            continue
+        if len([name for name, witness in _STAGE.items()
+                if witness.search(tail)]) != 1:
+            # One funding clause cannot transfer the Series A event to C.
+            continue
+        if re.match(r"\s*(?:awareness|alarm|concerns|questions)\b", tail, re.I):
+            continue
+        if re.search(
+                r"\b[A-Za-z][A-Za-z0-9._-]{2,}'s\s+"
+                r"(?:pre[- ]seed|seed|series\s+[abc])\b", tail, re.I):
+            # A named third-party's financing is not the reporter's round.
+            continue
         if re.search(
                 r"\b[A-Za-z][A-Za-z0-9._-]{2,}\s+"
-                r"(?:has\s+)?(?:raised|raises|secured|closed|announced)\b",
-                segment[match.end():], re.I):
+                r"(?:has\s+)?(?:raised|raises|received|secured|closed|"
+                r"obtained|announced)\b", tail, re.I):
             continue
         found.append(segment)
     return found
