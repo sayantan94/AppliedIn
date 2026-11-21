@@ -1164,8 +1164,11 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         match = actor.search(segment)
         if not match or not _EVENT_VERB.search(match.group()):
             continue
-        if re.search(r"\band\s+$", segment[:match.start()], re.I):
-            # "OtherCo and example-co raised ..." names two recipients.
+        prefix = segment[:match.start()]
+        if (re.search(r"\band\s+$", prefix, re.I)
+                or re.search(r"\b[A-Z][A-Za-z0-9._-]{2,}\s*,\s*$", prefix)):
+            # "OtherCo and example-co ..." and "OtherCo, example-co ..."
+            # name two plausible recipients; neither proves a solo issuer.
             continue
         tail = segment[match.end():]
         stage_match = _STAGE[stage].search(tail)
