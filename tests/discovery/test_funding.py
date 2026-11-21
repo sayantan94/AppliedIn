@@ -1165,6 +1165,9 @@ def test_fund_as_recipient_refuses_before_homepage_probe(tmp_path, issuer, body)
 
 @pytest.mark.parametrize("body,stage", [
     ("example-co plans a Series C in London", "series c"),
+    ("example-co announced its Series C financing plans in London", "series c"),
+    ("example-co announced a planned Series C financing in London", "series c"),
+    ("example-co announced it will close Series C funding in London", "series c"),
     ("example-co Series C product launch in London", "series c"),
     ("example-co Series B product launch in London", "series b"),
     ("example-co Series A product launch in London", "series a"),
