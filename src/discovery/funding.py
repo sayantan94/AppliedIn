@@ -1239,7 +1239,6 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
             continue
         if abs(stage_match.start() - event_match.start()) > 80:
             continue
-        event_start = min(stage_match.start(), event_match.start())
         event_end = max(stage_match.end(), event_match.end())
         # Bind prospective/negative language to the financing itself, not
         # to later plans to hire, expand or launch a product.
