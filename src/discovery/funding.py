@@ -46,9 +46,11 @@ _EVENT_VERB = re.compile(
     r"announced|announces|obtained)\b", re.I)
 _EVENT_OBJECT = re.compile(r"\b(?:funding|financing|round|capital)\b", re.I)
 _PLANNED = re.compile(
-    r"\b(?:plans?\s+(?:to|for)|planning|seeking|targets?\s+to|"
-    r"aims?\s+to|intends?\s+to|hopes?\s+to|will\s+raise|"
-    r"fundraising\s+plans?)\b", re.I)
+    r"\b(?:plans?\s+(?:to|for)|planning|planned|proposed|upcoming|"
+    r"potential|expected|seeking|targets?\s+to|aims?\s+to|"
+    r"intends?\s+to|hopes?\s+to|(?:will|may|could)\s+"
+    r"(?:raise|close|secure|complete)|fundraising\s+plans?)\b"
+    r"|\b(?:funding|financing|round)\s+plans?\b", re.I)
 _STAGE = {"pre-seed": re.compile(r"\bpre[- ]seed\b", re.I),
           "seed": re.compile(r"(?<!pre[- ])\bseed\b", re.I),
           "series a": re.compile(r"\bseries\s+a\b", re.I),
