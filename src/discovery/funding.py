@@ -1147,7 +1147,8 @@ def _issuer_round_passages(text: str, issuer: str, stage: str) -> list[str]:
         text, flags=re.I)
     actor = re.compile(
         r"(?<!\w)" + re.escape(issuer) +
-        r"(?!\w)(?:\s*[,()]\s*(?:a|an)\s+(?:venture|investment|real estate)"
+        r"(?!\w)(?:\s+\((?:formerly|previously known as)\s+[A-Za-z0-9 ._-]{2,80}\))?"
+        r"(?:\s*[,()]\s*(?:a|an)\s+(?:venture|investment|real estate)"
         r"\s+fund\s*[,()]?)*\s+(?:(?:has|have|recently|successfully)\s+){0,2}"
         r"(?:raised|raises|secured|secures|closed|closes|completed|completes|"
         r"announced|announces|obtained)\b", re.I)
