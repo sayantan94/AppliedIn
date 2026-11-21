@@ -46,7 +46,8 @@ def test_unapproved_funding_sentence_or_format_object_not_rendered():
                          "body": "Test", "role_family": "product management"}, lead, contact)
 
 
-def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
+def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False,
+                     real_sender=False):
     """A complete in-memory SMTP boundary; never starts a live connection."""
     from core import outreach_email as mail
     from core.outreach_contacts import LinkedInSnapshot
@@ -60,7 +61,8 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     s = SimpleNamespace(mode="local", outreach_enabled=True, local_dir=str(tmp_path),
                         outreach_timezone="UTC", outreach_sender="sender@example-co.com",
                         outreach_smtp_host="smtp.example-co.com", outreach_smtp_port=587,
-                        outreach_smtp_username="synthetic", outreach_smtp_password="synthetic")
+                        outreach_smtp_username="synthetic", outreach_smtp_password="synthetic",
+                        outreach_sender_authorized=True, outreach_inbound_verified=True)
     Ledger(s).record_successful_poll(
         uidvalidity="3", monitored_address=s.outreach_sender, now=when)
     calls = []
@@ -70,8 +72,8 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
         def __enter__(self): return self
         def __exit__(self, *_): return False
         def ehlo(self): pass
-        def starttls(self, **kwargs): pass
-        def login(self, *_): pass
+        def starttls(self, **kwargs): calls.append(("starttls", kwargs))
+        def login(self, username, password): calls.append(("login", username, password))
         def send_message(self, message, **kwargs):
             calls.append(("message", message, kwargs))
             return {}
@@ -85,7 +87,8 @@ def _mail_fake_setup(tmp_path, monkeypatch, *, collision_after_lookup=False):
     monkeypatch.setattr(mail, "read_no_opening", read_source)
     monkeypatch.setattr(mail, "read_linkedin",
                         lambda *args, **kwargs: LinkedInSnapshot(frozenset(), frozenset()))
-    monkeypatch.setattr(mail, "_sender", lambda _: s.outreach_sender)
+    if not real_sender:
+        monkeypatch.setattr(mail, "_sender", lambda _: s.outreach_sender)
     monkeypatch.setattr(mail, "_official_page", lambda *args: (
         "https://example-co.com/team", "<a href='mailto:test@example-co.com'>Test User</a>"))
     monkeypatch.setattr(mail, "verify_published_contact", lambda **kwargs: contact)
@@ -514,3 +517,300 @@ def test_owner_approval_rotated_after_mime_before_handoff_is_no_wire(tmp_path,mo
         assert conn.execute("SELECT state FROM attempts").fetchone()[0] == (
             "definite_pre_wire_failure")
         assert conn.execute("SELECT active_attempt FROM email_dispatch").fetchone()[0] is None
+
+
+def _imap_secret():
+    """Entirely synthetic four-string record matching the local IMAP contract."""
+    return {"host": "imap.gmail.com", "mailbox": "INBOX",
+            "username": "sender@example-co.com", "password": "synthetic-only"}
+
+
+def _secret_smtp_setup(tmp_path, monkeypatch, *, record=None, error=None):
+    """Real sender guard, injected secret store, ordered ledger and TLS spies."""
+    from core import outreach_email as mail
+    from core.outreach_ledger import Ledger
+
+    settings, now, fake_smtp, calls = _mail_fake_setup(
+        tmp_path, monkeypatch, real_sender=True)
+    events = []
+    hooks = {"after_begin": None}
+
+    class FakeSecrets:
+        def __init__(self):
+            self.reads = []
+        def get_json(self, key):
+            self.reads.append(key)
+            events.append("imap_read")
+            assert key == "imap"
+            if error is not None:
+                raise error
+            return record
+
+    secrets = FakeSecrets()
+    stores = SimpleNamespace(secrets=secrets)
+    original_reserve = Ledger.reserve_email
+    original_begin = Ledger.begin_wire
+    original_release = Ledger.release_claim
+
+    def reserve(self, *args, **kwargs):
+        events.append("reserve")
+        return original_reserve(self, *args, **kwargs)
+
+    def begin(self, *args, **kwargs):
+        result = original_begin(self, *args, **kwargs)
+        events.append("begin_wire")
+        if hooks["after_begin"] is not None:
+            hooks["after_begin"]()
+        return result
+
+    def release(self, *args, **kwargs):
+        events.append(("release", args[2]))
+        return original_release(self, *args, **kwargs)
+
+    monkeypatch.setattr(Ledger, "reserve_email", reserve)
+    monkeypatch.setattr(Ledger, "begin_wire", begin)
+    monkeypatch.setattr(Ledger, "release_claim", release)
+
+    def ssl_factory(*args, **kwargs):
+        events.append("ssl")
+        return fake_smtp(*args, **kwargs)
+
+    def plain_factory(*args, **kwargs):
+        events.append("plain")
+        return fake_smtp(*args, **kwargs)
+
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", ssl_factory)
+    monkeypatch.setattr(mail.smtplib, "SMTP", plain_factory)
+    return mail, settings, now, stores, calls, events, hooks
+
+
+def _send_secret_fake(mail, settings, now, stores):
+    return _send_fake(
+        mail, settings=settings, company_id="a"*32,
+        contact_page_url="https://example-co.com/team",
+        exact_address="test@example-co.com", person_name="Test User",
+        variant_id="synthetic-v1", stores=stores, now=now,
+        smtp_factory=None)
+
+
+@pytest.mark.parametrize("smtp_host,smtp_port", [
+    ("", 465), ("smtp.other.invalid", 587),
+])
+def test_local_matching_imap_secret_uses_only_gmail_ssl_before_wire(
+        tmp_path, monkeypatch, smtp_host, smtp_port):
+    record = _imap_secret()
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=record)
+    settings.outreach_smtp_host = smtp_host
+    settings.outreach_smtp_port = smtp_port
+    settings.outreach_smtp_username = ""
+    settings.outreach_smtp_password = ""
+    original_settings = dict(vars(settings))
+    original_record = dict(record)
+
+    result = _send_secret_fake(mail, settings, now, stores)
+
+    assert result["state"] == "confirmed_smtp_accepted"
+    assert events == ["imap_read", "reserve", "begin_wire", "ssl"]
+    assert stores.secrets.reads == ["imap"]
+    assert [x[1] for x in calls if x[0] == "constructed"] == [
+        ("smtp.gmail.com", 465)]
+    assert [x[1:] for x in calls if x[0] == "login"] == [
+        ("sender@example-co.com", "synthetic-only")]
+    assert not any(x[0] == "starttls" for x in calls)
+    assert len([x for x in calls if x[0] == "message"]) == 1
+    assert vars(settings) == original_settings
+    assert record == original_record
+    message = next(x[1] for x in calls if x[0] == "message")
+    assert message["From"] == "sender@example-co.com"
+    assert message["Reply-To"] == "sender@example-co.com"
+    assert "synthetic-only" not in message.as_string()
+
+
+@pytest.mark.parametrize("operation,field,value", [
+    ("replace", None, None),
+    ("replace", None, []),
+    ("replace", None, "not-json-object"),
+    ("replace", None, {"host": "imap.gmail.com"}),
+    ("remove", "host", None),
+    ("remove", "mailbox", None),
+    ("remove", "username", None),
+    ("remove", "password", None),
+    ("set", "host", ""),
+    ("set", "mailbox", ""),
+    ("set", "username", ""),
+    ("set", "password", ""),
+    ("set", "host", "imap.other.invalid"),
+    ("set", "username", "other@example-co.com"),
+    ("set", "host", {"not": "string"}),
+    ("set", "mailbox", ["INBOX"]),
+    ("set", "username", 123),
+    ("set", "password", {"synthetic": "invalid"}),
+    ("set", "password", 123),
+])
+def test_bad_imap_record_holds_without_reservation_or_smtp(
+        tmp_path, monkeypatch, operation, field, value):
+    from core.outreach_ledger import Ledger
+    record = _imap_secret()
+    if operation == "replace":
+        record = value
+    elif operation == "remove":
+        del record[field]
+    else:
+        record[field] = value
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=record)
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    settings.outreach_smtp_host = ""
+    with pytest.raises(OutreachHold, match="matching_local_imap_app_password_required_for_smtp"):
+        _send_secret_fake(mail, settings, now, stores)
+    assert stores.secrets.reads == ["imap"]
+    assert events[0] == "imap_read"
+    assert not any(x in events for x in ("reserve", "begin_wire", "ssl", "plain"))
+    assert ("release", "matching_local_imap_app_password_required_for_smtp") in events
+    assert not calls
+    with Ledger(settings)._tx() as db:
+        assert db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+
+
+def test_unreadable_imap_secret_raises_sanitized_pre_reservation_hold(
+        tmp_path, monkeypatch):
+    from core.outreach_ledger import Ledger
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, error=RuntimeError("private-synthetic-error-marker"))
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    with pytest.raises(OutreachHold) as caught:
+        _send_secret_fake(mail, settings, now, stores)
+    assert str(caught.value) == "matching_local_imap_app_password_required_for_smtp"
+    assert "private-synthetic-error-marker" not in str(caught.value)
+    assert stores.secrets.reads == ["imap"]
+    assert ("release", str(caught.value)) in events
+    assert not any(x in events for x in ("reserve", "begin_wire", "ssl", "plain"))
+    assert not calls
+    with Ledger(settings)._tx() as db:
+        assert db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("smtp_port", [465, 587])
+def test_explicit_smtp_credentials_preserve_tls_and_never_read_imap(
+        tmp_path, monkeypatch, smtp_port):
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, error=AssertionError("imap must not be read"))
+    settings.outreach_smtp_host = "smtp.example-co.com"
+    settings.outreach_smtp_port = smtp_port
+    settings.outreach_smtp_username = "explicit@example-co.com"
+    settings.outreach_smtp_password = "synthetic-explicit"
+    result = _send_secret_fake(mail, settings, now, stores)
+    assert result["state"] == "confirmed_smtp_accepted"
+    assert stores.secrets.reads == []
+    assert events == ["reserve", "begin_wire", "ssl" if smtp_port == 465 else "plain"]
+    assert [x[1] for x in calls if x[0] == "constructed"] == [
+        ("smtp.example-co.com", smtp_port)]
+    assert [x[1:] for x in calls if x[0] == "login"] == [
+        ("explicit@example-co.com", "synthetic-explicit")]
+    assert len([x for x in calls if x[0] == "starttls"]) == (smtp_port == 587)
+
+
+@pytest.mark.parametrize("username,password,host,port", [
+    ("", "explicit-only", "smtp.example-co.com", 465),
+    ("explicit-only", "", "smtp.example-co.com", 465),
+    ("explicit-only", "synthetic-explicit", "", 465),
+    ("explicit-only", "synthetic-explicit", "smtp.example-co.com", 2525),
+])
+def test_partial_or_invalid_explicit_smtp_holds_without_secret_read(
+        tmp_path, monkeypatch, username, password, host, port):
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, error=AssertionError("imap must not be read"))
+    settings.outreach_smtp_username, settings.outreach_smtp_password = username, password
+    settings.outreach_smtp_host, settings.outreach_smtp_port = host, port
+    with pytest.raises(OutreachHold, match="private_smtp_tls_configuration_required"):
+        _send_secret_fake(mail, settings, now, stores)
+    assert stores.secrets.reads == []
+    assert not any(x in events for x in ("reserve", "begin_wire", "ssl", "plain"))
+    assert not calls
+
+
+@pytest.mark.parametrize("flag", ["outreach_sender_authorized", "outreach_inbound_verified"])
+def test_real_initial_sender_guard_blocks_secret_and_smtp(
+        tmp_path, monkeypatch, flag):
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=_imap_secret())
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    setattr(settings, flag, False)
+    with pytest.raises(OutreachHold, match="operator_must_verify_sender_and_inbound_identity"):
+        _send_secret_fake(mail, settings, now, stores)
+    assert stores.secrets.reads == []
+    assert not any(x in events for x in ("reserve", "begin_wire", "ssl", "plain"))
+    assert not calls
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("outreach_sender", "sender_identity_changed_before_wire"),
+    ("outreach_sender_authorized", "operator_must_verify_sender_and_inbound_identity"),
+    ("outreach_inbound_verified", "operator_must_verify_sender_and_inbound_identity"),
+])
+def test_real_final_sender_recheck_stops_mutation_before_smtp(
+        tmp_path, monkeypatch, change, reason):
+    from core.outreach_ledger import Ledger
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=_imap_secret())
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    def change_after_reservation():
+        setattr(settings, change, "other@example-co.com" if change == "outreach_sender"
+                else False)
+        return object()
+    monkeypatch.setattr(mail.ssl, "create_default_context", change_after_reservation)
+    with pytest.raises(OutreachHold, match=reason):
+        _send_secret_fake(mail, settings, now, stores)
+    assert events[:2] == ["imap_read", "reserve"]
+    assert "begin_wire" not in events
+    assert "ssl" not in events and "plain" not in events
+    assert stores.secrets.reads == ["imap"]
+    assert not calls
+    with Ledger(settings)._tx() as db:
+        assert db.execute("SELECT state FROM attempts").fetchone()[0] == (
+            "definite_pre_wire_failure")
+
+
+@pytest.mark.parametrize("mode,enabled", [("local", False), ("remote", True)])
+def test_disabled_or_nonlocal_never_uses_imap_or_constructs_smtp(
+        tmp_path, monkeypatch, mode, enabled):
+    mail, settings, now, stores, calls, events, _ = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=_imap_secret())
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    settings.mode = mode
+    settings.outreach_enabled = enabled
+    with pytest.raises(OutreachHold, match="outreach_disabled_or_not_local"):
+        _send_secret_fake(mail, settings, now, stores)
+    assert stores.secrets.reads == []
+    assert not events and not calls
+
+
+def test_post_handoff_setting_mutation_cannot_redirect_frozen_smtp_secret(
+        tmp_path, monkeypatch):
+    """No endpoint or credential selection is allowed after the durable handoff."""
+    record = _imap_secret()
+    mail, settings, now, stores, calls, events, hooks = _secret_smtp_setup(
+        tmp_path, monkeypatch, record=record)
+    settings.outreach_smtp_username = settings.outreach_smtp_password = ""
+    settings.outreach_smtp_host = "smtp.other.invalid"
+    settings.outreach_smtp_port = 587
+
+    def mutate_after_begin():
+        settings.outreach_smtp_host = "malicious.invalid"
+        settings.outreach_smtp_port = 587
+        settings.outreach_smtp_username = "changed"
+        settings.outreach_smtp_password = "changed"
+        record["username"] = "other@example-co.com"
+        record["password"] = "changed-after-handoff"
+
+    hooks["after_begin"] = mutate_after_begin
+    result = _send_secret_fake(mail, settings, now, stores)
+    assert result["state"] == "confirmed_smtp_accepted"
+    assert events == ["imap_read", "reserve", "begin_wire", "ssl"]
+    assert stores.secrets.reads == ["imap"]
+    assert [x[1] for x in calls if x[0] == "constructed"] == [
+        ("smtp.gmail.com", 465)]
+    assert [x[1:] for x in calls if x[0] == "login"] == [
+        ("sender@example-co.com", "synthetic-only")]
+    assert not any(x[0] == "starttls" for x in calls)
