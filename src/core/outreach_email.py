@@ -144,12 +144,37 @@ def _sender(settings):
     if (not getattr(settings, "outreach_sender_authorized", False)
             or not getattr(settings, "outreach_inbound_verified", False)):
         raise OutreachHold("operator_must_verify_sender_and_inbound_identity")
-    if (not isinstance(settings.outreach_smtp_host, str) or
-            not re.fullmatch(r"[A-Za-z0-9.-]{3,253}", settings.outreach_smtp_host)
-            or settings.outreach_smtp_port not in (465, 587)
-            or not settings.outreach_smtp_username or not settings.outreach_smtp_password):
-        raise OutreachHold("private_smtp_tls_configuration_required")
     return sender
+
+
+def _effective_smtp(settings, sender, stores):
+    """Resolve once before reservation; no credentials or endpoint re-read after wire."""
+    username = settings.outreach_smtp_username
+    password = settings.outreach_smtp_password
+    if username and password:
+        host, port = settings.outreach_smtp_host, settings.outreach_smtp_port
+        if (not isinstance(host, str)
+                or not re.fullmatch(r"[A-Za-z0-9.-]{3,253}", host)
+                or port not in (465, 587)):
+            raise OutreachHold("private_smtp_tls_configuration_required")
+        return host, port, username, password
+    if username != "" or password != "" or settings.mode != "local":
+        raise OutreachHold("private_smtp_tls_configuration_required")
+
+    # Only the injected private store may supply a fully empty explicit pair.
+    # Validate types beyond reply_ingest.local_credentials's truthiness check.
+    try:
+        record = stores.secrets.get_json("imap")
+        valid = (isinstance(record, dict)
+                 and all(isinstance(record.get(key), str) and record[key]
+                         for key in ("host", "mailbox", "username", "password"))
+                 and record["host"] == "imap.gmail.com"
+                 and record["username"] == sender)
+    except Exception:
+        raise OutreachHold("matching_local_imap_app_password_required_for_smtp") from None
+    if not valid:
+        raise OutreachHold("matching_local_imap_app_password_required_for_smtp")
+    return "smtp.gmail.com", 465, record["username"], record["password"]
 
 
 def _official_page(settings, url, now):
@@ -342,6 +367,7 @@ def send_approved(*, settings, queue_id, owner_token, stores,
         ledger._window(current)
         ledger._stage_enabled(stage)
         sender = _sender(settings)
+        effective_smtp = _effective_smtp(settings, sender, stores)
         lead = read_no_opening(settings,q["company_id"],now=current)
         url,markup = _official_page(settings,q["contact_url"],current)
         contact = verify_published_contact(
@@ -460,22 +486,18 @@ def send_approved(*, settings, queue_id, owner_token, stores,
                                                now=_current_time(now,clock))
         raise
     try:
-        factory = smtp_factory or (smtplib.SMTP_SSL if settings.outreach_smtp_port==465
-                                   else smtplib.SMTP)
-        if settings.outreach_smtp_port==465:
-            connection_context=factory(settings.outreach_smtp_host,
-                                       settings.outreach_smtp_port,timeout=20,
-                                       context=tls_context)
+        host, port, username, password = effective_smtp
+        factory = smtp_factory or (smtplib.SMTP_SSL if port==465 else smtplib.SMTP)
+        if port==465:
+            connection_context=factory(host,port,timeout=20,context=tls_context)
         else:
-            connection_context=factory(settings.outreach_smtp_host,
-                                       settings.outreach_smtp_port,timeout=20)
+            connection_context=factory(host,port,timeout=20)
         with connection_context as connection:
-            if settings.outreach_smtp_port==587:
+            if port==587:
                 connection.ehlo()
                 connection.starttls(context=tls_context)
                 connection.ehlo()
-            connection.login(settings.outreach_smtp_username,
-                             settings.outreach_smtp_password)
+            connection.login(username,password)
             refused=connection.send_message(msg,from_addr=sender,to_addrs=[contact.address])
             if refused:
                 raise OutreachHold("smtp_recipient_not_definitively_accepted")
