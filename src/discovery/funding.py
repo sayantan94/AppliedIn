@@ -79,7 +79,7 @@ _FINANCING_PURPOSE_VERBS = frozenset({
 _FUTURE_EVENT_FOLLOW = re.compile(
     r"\b(?:(?:is|was|are|were|has\s+been|had\s+been|will\s+be|"
     r"would\s+be)\s+)?(?:planned|scheduled|due|expected|proposed|"
-    r"upcoming|set)\b|"
+    r"upcoming|set|plans?)\b|"
     r"\b(?:will|would|may|might|could)\s+(?:be\s+)?"
     r"(?:raised|closed|secured|completed|raise|close|secure|complete)\b",
     re.I,
