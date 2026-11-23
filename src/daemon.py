@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import os
+import signal
 import threading
 import time
 from typing import Any
@@ -763,11 +764,57 @@ def _start_outreach_pixel(settings=None) -> bool:
     return True
 
 
+
+# Uvicorn captures SIGTERM itself while running in the main thread; installing
+# a handler before uvicorn.run would be overwritten. Hook the actual Server
+# signal path instead, and enforce a daemon-local deadline even when executor
+# threads cannot cooperate or HTTP shutdown cannot finish.
+_SHUTDOWN_GRACE_S = 8.0
+
+
+def _shutdown_watchdog(requested: threading.Event, finished: threading.Event,
+                       seconds: float = _SHUTDOWN_GRACE_S) -> None:
+    requested.wait()
+    if not finished.wait(seconds):
+        log.warning("daemon SIGTERM deadline: terminating process; in-flight work remains uncertain")
+        os._exit(0)  # executor atexit joins can otherwise keep the PID indefinitely
+
+
+def _serve_http(port: int) -> None:
+    from core.config import get_settings
+    from server import create_app, _recover_stuck
+    import uvicorn
+
+    # Same pre-serve recovery and Uvicorn options as server.serve, but keep the
+    # server handle locally so its signal and cooperative exit can be supervised.
+    _recover_stuck(get_settings())
+    requested, finished = threading.Event(), threading.Event()
+
+    class _LocalServer(uvicorn.Server):
+        def handle_exit(self, sig: int, frame) -> None:
+            if sig == signal.SIGTERM:
+                requested.set()
+            super().handle_exit(sig, frame)
+
+    server = _LocalServer(uvicorn.Config(
+        create_app(), host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=_shutdown_watchdog, args=(requested, finished),
+                     name="daemon-shutdown-watchdog", daemon=True).start()
+    try:
+        server.run()
+    finally:
+        finished.set()
+        if requested.is_set():
+            # Uvicorn is down, but a ThreadPoolExecutor may have an arbitrarily
+            # long in-flight LLM/browser call. A normal interpreter exit joins
+            # executor threads and violates the PID deadline.
+            log.warning("daemon SIGTERM: exiting process; interrupted tasks are not completed")
+            os._exit(0)
+
+
 def main() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
-    from server import serve
-
     stores = make_stores()
     if not hasattr(stores.queue, "drain"):
         raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
@@ -790,7 +837,7 @@ def main() -> None:
     _start_outreach_pixel(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
-        serve(port=WEB_PORT)
+        _serve_http(WEB_PORT)
     except KeyboardInterrupt:
         log.info("daemon stopped")
 

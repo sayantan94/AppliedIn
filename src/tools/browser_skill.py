@@ -273,6 +273,12 @@ def ensure_daemon() -> tuple[bool, str]:
         _sync("status")
         return True, ""
     except Unavailable:
+        # A foreground helper started from inside a systemd unit inherits its
+        # cgroup despite start_new_session=True. This shared helper is external.
+        if os.environ.get('APPLIEDIN_USER_SERVICE') == '1':
+            return False, ('BrowserSkill unavailable: shared helper is not reachable; '
+                           'start or repair it outside the AppliedIn user service '
+                           'through the orchestrator; run bsk doctor.')
         home = Path(os.environ.get("BSK_HOME") or Path.home() / ".bsk")
         record = home / "daemon.json"
         if record.exists():
