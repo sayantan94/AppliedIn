@@ -1782,7 +1782,7 @@ def test_legacy_transient_row_has_backed_off_review_only_retry(monkeypatch, stat
     assert after["jd_url"] == original["jd_url"]
     assert after["jd_read_attempts"] == 3
     assert after["jd_read_retry_at"] == (now[0] + timedelta(seconds=300)).isoformat()
-    assert not after.get("fail_kind")
+    assert after["fail_kind"] == fail_kind  # old marker clears only after verified read
     assert after["jd_read_prepare_only"] is True
 
 
