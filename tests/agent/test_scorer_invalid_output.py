@@ -8,6 +8,7 @@ the real root/review SequentialAgent boundaries; no network or browser exists.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -420,20 +421,30 @@ def test_non_json_then_valid_keeps_original_model_and_material(harness):
     [(_response('{"score":9,"reasoning":"interim"}', partial=True),
       _response("  ")), _response("  ")],
 ])
-def test_terminal_invalid_stops_both_graphs_without_artifacts(harness, responses):
+def test_terminal_invalid_defers_both_graphs_without_artifacts(harness, monkeypatch, responses):
     h = harness
+    now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(R, "_utc_now", lambda: now)
+    h.stores.tracking.row.update(rescore_requested=False, jd_read_attempts=1)
     h.fake.scripted = list(responses)
     result = _run(h)
-    assert result["result"] == "skipped"
+    row = h.stores.tracking.row
+    assert result["result"] == "deferred"
     assert result["reason"] == "scorer_invalid_output"
-    assert h.stores.tracking.row["status"] == Status.SKIPPED.value
-    assert h.stores.tracking.row["skip_reason"] == "scorer_invalid_output"
-    assert h.stores.tracking.row["match_score"] is None
-    assert h.stores.tracking.row["resume_s3_key"] == "resumes/historical.pdf"
+    # Not terminal: back in the ordinary FOUND pool with a FUTURE scorer deadline.
+    assert row["status"] == Status.FOUND.value
+    assert row.get("skip_reason") != "scorer_invalid_output"
+    assert datetime.fromisoformat(row["scorer_retry_at"]) == now + R._SCORER_RETRY_DELAY
+    assert row["match_score"] is None
+    assert row["resume_s3_key"] == "resumes/historical.pdf"
+    # The posting-reader budget and the manual re-score flag are untouched.
+    assert row["jd_read_attempts"] == 0  # reset at admission, never spent by the scorer
+    assert row.get("jd_read_retry_at") in (None, "")
+    assert row["rescore_requested"] is False
     assert h.next.observed == []
     assert h.saved == []  # no diagnostic, tailoring, approval, enqueue, submit
     assert len(h.fake.requests) == 2
-
+    assert not R._reader_eligible(row, now=now)
 
 @pytest.mark.parametrize("score,override,expected_next", [(2, False, []), (7, False, [7]),
                                                            (2, True, [2])])
@@ -586,3 +597,115 @@ def test_callback_mutation_failure_reasks_without_state_patch(harness, monkeypat
     assert len(h.fake.requests) == 2
     assert h.next.observed == [8]
     assert h.saved[0]["match_score"] == 8
+
+
+NOW = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+
+
+def _found(**extra):
+    return {"pk": "example-co#due", "company": "example-co", "status": "found", **extra}
+
+
+def test_deferred_scorer_retry_is_eligible_only_once_due():
+    due = (NOW + timedelta(minutes=30)).isoformat()
+    row = _found(scorer_retry_at=due)
+    assert not R._reader_eligible(row, now=NOW)
+    assert not R._reader_eligible(row, now=NOW + timedelta(minutes=29, seconds=59))
+    assert R._reader_eligible(row, now=NOW + timedelta(minutes=30))
+    # Independent of the posting-reader deadline and budget.
+    assert not R._reader_eligible(
+        _found(scorer_retry_at=due, jd_read_attempts=3), now=NOW + timedelta(hours=1))
+    # A corrupt deadline never authorizes an immediate retry.
+    assert not R._reader_eligible(_found(scorer_retry_at="garbage"), now=NOW)
+    assert not R._reader_eligible(_found(scorer_retry_at="2026-11-23T12:00:00"), now=NOW)
+    assert R._reader_eligible(_found(), now=NOW)
+
+
+def test_daemon_sweep_follows_the_scorer_deadline(monkeypatch):
+    import daemon
+    from core import flags
+
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    monkeypatch.setattr(flags, "skipped_companies", lambda: set())
+    rows = [_found(pk="example-co#deferred",
+                   scorer_retry_at=(NOW + timedelta(minutes=30)).isoformat()),
+            {"pk": "example-co#skipped", "company": "example-co", "status": "skipped",
+             "gate_reason": "approval", "match_score": 7}]
+    queued = []
+    stores = SimpleNamespace(
+        tracking=SimpleNamespace(query_status=lambda status: [
+            r for r in rows if r["status"] == status.value]),
+        queue=SimpleNamespace(enqueue=lambda q, item: queued.append(item["pk"])),
+        tailor_queue="tailor")
+    daemon._sweep_found(stores)
+    assert queued == []                       # not due yet
+    clock["now"] = NOW + timedelta(minutes=31)
+    daemon._sweep_found(stores)
+    assert queued == ["example-co#deferred"]  # due: the normal lane claims it again
+    # A historical SKIPPED/approval row is never swept into a new run.
+    assert "example-co#skipped" not in queued
+
+
+def test_second_invalid_run_defers_again_then_valid_score_proceeds(harness, monkeypatch):
+    h = harness
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    first = h.stores.tracking.row["scorer_retry_at"]
+    # Not due: the run is refused without another generation.
+    assert _run(h)["result"] == "already_done"
+    assert len(h.fake.requests) == 2
+    # Due, but invalid again: a LATER deadline, still FOUND, no spin.
+    clock["now"] = NOW + timedelta(minutes=31)
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    second = h.stores.tracking.row["scorer_retry_at"]
+    assert datetime.fromisoformat(second) > datetime.fromisoformat(first)
+    assert h.stores.tracking.row["status"] == Status.FOUND.value
+    assert h.next.observed == []
+    # Due again with a valid score: ordinary score gate, deadline cleared.
+    clock["now"] = NOW + timedelta(hours=2)
+    h.fake.scripted = [_response('{"score":8,"reasoning":"fit"}')]
+    _run(h)
+    assert h.next.observed == [8]
+    assert h.stores.tracking.row["match_score"] == 8
+    assert not h.stores.tracking.row.get("scorer_retry_at")
+
+
+@pytest.mark.parametrize("score", [7, 9])
+def test_floor_score_reaches_tailoring_with_approval_metadata(harness, score):
+    """The at-floor row is never held by gate_reason; it reaches the tailor stage."""
+    h = harness
+    if not h.prep:
+        pytest.skip("AC3 is the explicit review-only (prepare_only) route")
+    h.stores.tracking.row.update(
+        jd_url="https://jobs.example.com/custom/synthetic-role", gate_reason="approval",
+        match_score=None)
+    h.fake.scripted = [_response(f'{{"score":{score},"reasoning":"fit"}}')]
+    _run(h)
+    row = h.stores.tracking.row
+    assert h.next.observed == [score]               # the next (tailor) stage ran
+    assert row["status"] == Status.TAILORED.value   # settled by it, not just TAILORING
+    assert row["resume_s3_key"] == "resumes/synthetic-new.pdf"
+    assert row["match_score"] == score
+    assert not hasattr(h.stores, "queue")           # no queue entry can have been made
+
+
+def test_below_floor_with_approval_metadata_is_not_promoted(harness):
+    h = harness
+    h.stores.tracking.row.update(gate_reason="approval", match_score=None)
+    h.fake.scripted = [_response('{"score":6,"reasoning":"weak fit"}')]
+    result = _run(h)
+    assert result["result"] == "skipped"
+    assert h.stores.tracking.row["skip_reason"] == "low_score"
+    assert h.next.observed == []
+
+
+@pytest.mark.parametrize("reason", ["user_skipped", "review_rejected", "low_score",
+                                    "title_filter", "preferences"])
+def test_historical_skipped_approval_rows_are_not_eligible(reason):
+    row = {"pk": "example-co#old", "company": "example-co", "status": "skipped",
+           "skip_reason": reason, "gate_reason": "approval", "match_score": 8}
+    assert not R._reader_eligible(row, now=NOW)
