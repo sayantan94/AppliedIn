@@ -109,7 +109,7 @@ def test_sigterm_deadline_watchdog_bounded_for_idle_and_blocked_work(blocked, mo
     else:
         daemon._shutdown_watchdog(Requested(), Finished())
         assert exits == []
-    assert waits == [("requested", None), ("finished", 8.0)]
+    assert waits == [("requested", None), ("finished", daemon._SHUTDOWN_GRACE_S)]
     assert waits[-1][1] < 10.0
 
 
