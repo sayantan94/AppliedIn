@@ -319,8 +319,12 @@ def install_service() -> dict:
                         "error": "systemctl --user " + " ".join(args) + " failed"}
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return {"status": "service error", "error": type(exc).__name__}
-    return {"status": "enabled", "unit": _SERVICE, "pid": _service_pid(),
-            "hint": "The unit starts at the next normal user login."}
+    pid = _service_pid()
+    return {"status": "running" if pid else "enabled (startup unverified)",
+            "unit": _SERVICE, "pid": pid,
+            "hint": ("The unit is enabled for future logins." if pid else
+                     "Unit enabled, but no verified daemon MainPID was observed; "
+                     "inspect systemctl --user status appliedin.service.")}
 
 
 def _running_pid() -> int | None:

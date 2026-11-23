@@ -54,7 +54,8 @@ def test_install_enable_is_idempotent_without_rewriting_existing_unit(world, mon
     unit = cli._service_unit()
     saved, mtime = unit.read_text(), unit.stat().st_mtime_ns
     second = cli.install_service()
-    assert first["status"] == second["status"] == "enabled"
+    assert first["status"] == second["status"] == "enabled (startup unverified)"
+    assert first["pid"] is None and "no verified daemon MainPID" in first["hint"]
     assert unit.read_text() == saved and unit.stat().st_mtime_ns == mtime
     assert calls.count(("daemon-reload",)) == 2
     assert calls.count(("enable", "--now", "appliedin.service")) == 2
@@ -107,3 +108,10 @@ def test_service_not_a_cloud_or_isolated_port_owner(world, monkeypatch):
     monkeypatch.setenv("APPLIEDIN_WEB_PORT", "8788")
     assert cli._unit_owner() == "absent"
     assert cli.install_service()["status"] == "refused"
+
+
+def test_service_install_entrypoint_does_not_run_setup_or_uv(tmp_path):
+    script = (Path(__file__).resolve().parents[1] / "appliedin").read_text()
+    block = script.split("  service-install)", 1)[1].split("  browser-setup)", 1)[0]
+    assert "exec .venv/bin/python -m cli service-install" in block
+    assert "ensure_env" not in block and "uv run" not in block

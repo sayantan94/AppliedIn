@@ -59,6 +59,9 @@ preflight() {
 
 case "${1:-}" in
   setup) exec ./setup.sh ;;
+  service-install)
+    [ -x .venv/bin/python ] || { warn "environment missing — run ./appliedin setup first"; exit 1; }
+    exec .venv/bin/python -m cli service-install ;;
   browser-setup) ensure_env ;;
   start) ensure_env; preflight; ensure_career_ops --tools-only ;;
   update) exec ./scripts/update-from-upstream.sh ;;
