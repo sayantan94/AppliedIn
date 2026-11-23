@@ -517,3 +517,79 @@ def test_deferred_row_without_original_url_cannot_settle_from_cached_text(monkey
                         lambda *a, **kw: pytest.fail("No URL may reach a reader"))
     with pytest.raises(jd.PostingReadUnavailable, match="Original posting URL"):
         asyncio.run(run._jd_meta(row))
+
+
+@pytest.mark.parametrize("first_text", [
+    "Loading...",
+    "Something went wrong. " * 9,
+])
+def test_manual_apply_role_readability_without_worker_private_import(
+        monkeypatch, first_text):
+    """The route verifies the posting without importing ADK worker internals.
+
+    Other HTTP suites intentionally stub agent.run with only run_job. A page
+    that is guarded but unreadable must still defer without creating a row;
+    a later source-verified read may enter the normal background workflow.
+    """
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import fakeredis
+    from fastapi.testclient import TestClient
+
+    import server
+    from core.storage.local import RedisTracking
+    from tools import jd, posting_guard as pg, submit_review
+
+    assert jd._unreadable is _unreadable
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    stores = SimpleNamespace(tracking=tracking)
+    monkeypatch.setattr(server, "make_stores", lambda _settings: stores)
+    monkeypatch.setattr(server.submit_hold, "blocked", lambda *a, **kw: False)
+    monkeypatch.setattr(submit_review, "recover_orphans", lambda: None)
+
+    runs = []
+    worker = ModuleType("agent.run")
+    worker.run_job = lambda pk, _stores: runs.append(pk)
+    events = ModuleType("core.events")
+    events.emit = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "agent.run", worker)
+    monkeypatch.setitem(sys.modules, "core.events", events)
+
+    good_text = "Build reliable systems and maintain safe integrations. " * 15
+    pending = [first_text, good_text]
+    visited = []
+
+    def reader(url):
+        visited.append(url)
+        text = pending.pop(0)
+        inspected = pg.analyze(
+            text, html_variants=["<article>" + text + "</article>"],
+            source_required=True, source_complete=True)
+        assert pg.valid(inspected["text"], inspected["posting_guard"])
+        return {**inspected, "title": "Test Engineer",
+                "source_kind": "ats_html", "source_url": url,
+                "source_identity": {}}
+
+    monkeypatch.setattr(jd, "fetch_jd_meta", reader)
+    url = "https://jobs.ashbyhq.com/example-co/role-123"
+    with TestClient(server.create_app()) as client:
+        deferred = client.post("/actions/apply-role", json={"url": url})
+        assert deferred.status_code == 200
+        assert deferred.json() == {
+            "ok": False, "error": "posting_reader_unavailable",
+            "retryable": True, "retry_after_seconds": 60,
+        }
+        assert tracking.all() == []
+        assert runs == []
+
+        accepted = client.post("/actions/apply-role", json={"url": url})
+        assert accepted.status_code == 200
+        result = accepted.json()
+        assert result["ok"] is True and result["status"] == "running"
+
+    assert visited == [url, url]
+    assert runs == [result["pk"]]
+    row = tracking.get(result["pk"])
+    assert row["jd_url"] == url and row["jd_text"] == good_text
+    assert row["posting_guard"]["source_verified"] is True
