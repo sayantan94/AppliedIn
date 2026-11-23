@@ -595,7 +595,7 @@ def _manual_role_identity(url: str) -> dict | None:
         # Keep the exact hostname/path posting identity. Resolve a conservative
         # employer hint with the bundled offline public suffix list (com.vn).
         registered = tldextract.TLDExtract(
-            suffix_list_urls=(), extra_suffixes=("test",))(host)
+            suffix_list_urls=(), extra_suffixes=("test", "example"))(host)
         if not registered.suffix or not registered.domain or not parts:
             return None
         label = registered.domain
