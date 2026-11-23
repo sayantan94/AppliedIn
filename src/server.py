@@ -1952,7 +1952,7 @@ def create_app() -> FastAPI:
         if (_review_row_conflict(row) or row.get("status") != "skipped" or row.get("skip_reason") != "low_score"
                 or submit_hold.blocked(pk, row, tracking=stores.tracking)
                 or row.get("confirmation_id") or pk in q.in_flight()
-                or any(item["pk"] == pk for item in q.pending())):
+                or any(item["pk"] == pk for item in q.pending(actionable=False))):
             return {"ok": False, "error": "Force apply is only available for an unsent role skipped for a low match score."}
         from datetime import datetime, timezone
 
@@ -2955,7 +2955,9 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": "Choose skip, restore, reject or undo."}
         stores = make_stores(settings)
         q = ApplyQueue(stores.tracking.r)
-        pending = {it["pk"] for it in q.pending()}
+        # Exact physical membership: a stale entry for a skipped row must keep
+        # blocking Restore, or undo would revive it.
+        pending = {it["pk"] for it in q.pending(actionable=False)}
         results = []
         for pk in pks:
             try:
