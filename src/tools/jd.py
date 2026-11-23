@@ -72,7 +72,7 @@ def _api_url(url: str):
                 return None
             region = host[len(tenant) + 1:].removesuffix(".myworkdayjobs.com")
             locale = None
-            if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+            if len(parts) in (4, 5) and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
                 locale, parts = parts[0], parts[1:]
             if (len(parts) not in (3, 4) or parts[1] != "job" or
                     not all(_ATS_TOKEN.fullmatch(x) for x in [tenant, *parts])):
