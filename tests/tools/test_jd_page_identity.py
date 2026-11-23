@@ -181,13 +181,13 @@ def test_unbound_related_role_cannot_override_marked_posting_heading(monkeypatch
     assert jd.matched_source_witness({"jd_url": url}, meta)
 
 
-def test_unbound_exact_role_can_supply_metadata(monkeypatch):
-    """A corroborated URL-less JobPosting still supplies its employer and title."""
+def test_unbound_exact_role_without_independent_identity_is_not_company_proof(monkeypatch):
+    """The same role title cannot independently bind a URL-less JobPosting."""
     url = "https://jobs.example.com.vn/role/1"
     meta = read_page(monkeypatch, url, page(
         url, company="Example Co", title="Platform Engineer", unbound=True))
     assert meta["title"] == "Platform Engineer"
-    assert meta["company"] == "Example Co"
+    assert not meta.get("company")
 
 
 def test_unbound_seniority_mismatch_cannot_supply_employer(monkeypatch):
@@ -220,3 +220,56 @@ def test_unfamiliar_hero_h1_yields_to_plain_role_h2(monkeypatch):
     meta = read_page(monkeypatch, url, html)
     assert meta["title"] == "Platform Engineer"
     assert not meta.get("company")
+
+def test_url_less_same_title_foreign_employer_is_not_bound(monkeypatch):
+    """source-01: same-title recommendation does not prove its different employer."""
+    url = "https://jobs.example.com.vn/role/1"
+    html = page(url, company="Different Fiction", title="Platform Engineer",
+                unbound=True).replace('class="job-title"', "")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+    assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_section_hero_wrapper_h1_does_not_override_following_role_h2(monkeypatch):
+    """source-01: a hero ancestor marks its slogan even if the H1 has no class."""
+    url = "https://careers.example-careers.com/role/1"
+    html = ("<html><body><section class='hero'><h1>Shape what's next</h1>"
+            "</section><article><h2>Platform Engineer</h2><p>" + DETAIL
+            + "</p></article></body></html>")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+
+
+def test_header_hero_wrapper_h1_does_not_override_following_role_h2(monkeypatch):
+    """source-02: H1 within a hero header cannot displace the posting H2."""
+    url = "https://careers.example-careers.com/role/1"
+    html = ("<html><body><header class='hero'><h1>Shape what's next</h1>"
+            "</header><h2>Platform Engineer</h2><p>" + DETAIL
+            + "</p></body></html>")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+
+
+def test_recruitee_host_og_provider_brand_is_not_hiring_employer(monkeypatch):
+    """source-02: an unlisted shared ATS must not supply its own OG branding."""
+    url = "https://example.recruitee.com/platform-engineer"
+    meta = read_page(monkeypatch, url, page(
+        url, jsonld=False, og_title="Platform Engineer",
+        og_company="Recruitee Hiring Platform"))
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+    assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_recruitee_exact_url_jsonld_employer_remains_usable(monkeypatch):
+    """Provider-host OG filtering must not discard exact-URL JobPosting evidence."""
+    url = "https://example.recruitee.com/platform-engineer"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Example Co", og_title="Platform Engineer",
+        og_company="Recruitee Hiring Platform"))
+    assert meta["title"] == "Platform Engineer"
+    assert meta["company"] == "Example Co"
