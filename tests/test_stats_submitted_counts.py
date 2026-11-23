@@ -309,3 +309,64 @@ def test_an_unstamped_actionable_entry_does_not_date_the_queue_to_the_epoch(queu
         {"pk": "nan#1", "company": "Acme", "queued_at": "nan"}))
 
     assert client.get("/stats").json()["queue_age_seconds"] == 0
+
+
+# Slow-request log (#415): synthetic requests and a fake wall clock only.
+def _fake_wall(monkeypatch, *readings):
+    values = iter(readings)
+    monkeypatch.setattr(server, "_wall_clock", lambda: next(values))
+
+
+def _slow_records(caplog):
+    return [r for r in caplog.records
+            if r.name == "server.timing" and "slow request" in r.getMessage()]
+
+
+def test_request_over_one_second_logs_method_path_wall_and_thread_cpu(
+        stats_client, monkeypatch, caplog):
+    client, _tracking = stats_client
+    burned = []
+    real = server._count_submitted_today
+
+    def busy(tracking):
+        start = time.thread_time()
+        while time.thread_time() - start < 0.02:
+            pass
+        burned.append(True)
+        return real(tracking)
+
+    monkeypatch.setattr(server, "_count_submitted_today", busy)
+    _fake_wall(monkeypatch, 100.0, 101.5)
+    caplog.set_level("WARNING", logger="server.timing")
+
+    assert client.get("/stats?probe=1").status_code == 200
+
+    assert burned
+    [record] = _slow_records(caplog)
+    message = record.getMessage()
+    assert record.levelname == "WARNING"
+    assert "GET /stats " in message
+    assert "probe" not in message
+    assert "wall=1.500s" in message
+    cpu = message.rsplit("thread_cpu=", 1)[1]
+    assert cpu.endswith("s") and float(cpu[:-1]) >= 0.02
+
+
+def test_request_at_or_under_one_second_logs_nothing(stats_client, monkeypatch, caplog):
+    client, _tracking = stats_client
+    caplog.set_level("DEBUG", logger="server.timing")
+    _fake_wall(monkeypatch, 100.0, 100.5, 200.0, 201.0)
+
+    assert client.get("/stats").status_code == 200
+    assert client.get("/stats").status_code == 200
+
+    assert _slow_records(caplog) == []
+
+
+def test_every_api_route_reports_thread_cpu():
+    from fastapi.routing import APIRoute
+
+    app = server.create_app()
+    routes = [r for r in app.routes if isinstance(r, APIRoute)]
+    assert routes
+    assert all(getattr(r.dependant.call, "_cpu_timed", False) for r in routes)
