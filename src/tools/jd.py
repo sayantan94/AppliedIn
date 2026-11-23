@@ -457,12 +457,14 @@ _GENERIC_EMPLOYERS = {
     "company", "unknown", "jobs", "job", "careers", "apply", "recruiting",
     "greenhouse", "ashby", "ashbyhq", "lever", "linkedin", "workday",
     "myworkdayjobs", "workable", "smartrecruiters", "personio", "breezy",
-    "homerun", "phenom", "eightfold", "teamtailor", "jobvite",
+    "homerun", "breezy hr", "homerun jobs", "phenom", "phenom people",
+    "eightfold", "teamtailor", "jobvite",
 }
 _GENERIC_HEADING = re.compile(
     r"^(?:welcome|join (?:our|the) team|build your future|"
     r"discover (?:your|our)|explore (?:our|your)|"
-    r"careers(?: at .*)?|jobs(?: at .*)?|work with us)(?:\b|$)", re.I,
+    r"careers(?: at .*)?|jobs(?: at .*)?|work with us|"
+    r"about (?:us|our team)|our (?:culture|mission)|job openings)(?:\b|$)", re.I,
 )
 _ROLE_HINT = re.compile(
     r"(?:^|[\s_-])(?:job|posting|position|role|vacancy)[\s_-]*title"
