@@ -155,7 +155,7 @@ def stats_client(monkeypatch):
         def __init__(self, redis):
             assert redis is tracking.r
 
-        def pending(self):
+        def pending(self, **kwargs):
             return []
 
     monkeypatch.setattr(apply_queue, "ApplyQueue", _Queue)
@@ -282,12 +282,14 @@ def test_queue_age_is_the_oldest_actionable_entry(queue_client):
     _queue(q, "old#2", "skipped", _NOW - 1_500_000)
     _queue(q, "live#1", "failed", _NOW - 300)               # retry awaiting backoff
     _queue(q, "live#2", "tailored", _NOW - 60)
+    _queue(q, "live#3", "tailored", _NOW - 30)
+    q.r.set("app:live#3", json.dumps({"pk": "live#3", "status": []}))   # malformed
 
     assert client.get("/stats").json()["queue_age_seconds"] == 300
     # Same filter on the queue endpoint, while its raw counts stay physical.
     body = client.get("/apply-queue").json()
-    assert {i["pk"] for i in body["pending"]} == {"live#1", "live#2"}
-    assert body["total"] == 4
+    assert {i["pk"] for i in body["pending"]} == {"live#1", "live#2", "live#3"}
+    assert body["total"] == 5
 
 
 def test_queue_age_is_none_when_only_finished_entries_remain(queue_client):

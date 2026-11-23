@@ -482,12 +482,17 @@ def test_pending_hides_only_the_four_finished_statuses(q):
     q.r.set("app:list#1", "[]")
     q.put("nostatus#1", "NoStatus", queued_at=103.0)
     q.r.set("app:nostatus#1", json.dumps({"pk": "nostatus#1"}))
-    expected |= {"none#1", "bad#1", "list#1", "nostatus#1"}
+    q.put("lst#1", "ListStatus", queued_at=104.0)       # unhashable status values
+    q.r.set("app:lst#1", json.dumps({"pk": "lst#1", "status": []}))
+    q.put("obj#1", "ObjStatus", queued_at=105.0)
+    q.r.set("app:obj#1", json.dumps({"pk": "obj#1", "status": {}}))
+    expected |= {"none#1", "bad#1", "list#1", "nostatus#1", "lst#1", "obj#1"}
 
-    assert {i["pk"] for i in q.pending()} == expected
+    assert {i["pk"] for i in q.pending(actionable=True)} == expected
     # The physical queue is untouched: nothing was deleted or made dispatchable.
-    assert q.depth()["total"] == len(_HIDDEN) + len(_KEPT) + 4
-    assert len(q.pending(actionable=False)) == len(_HIDDEN) + len(_KEPT) + 4
+    assert q.depth()["total"] == len(_HIDDEN) + len(_KEPT) + 6
+    # The default stays the physical queue: guards and drains must see everything.
+    assert len(q.pending()) == len(_HIDDEN) + len(_KEPT) + 6
 
 
 def test_filtered_pending_keeps_order_rank_backoff_and_busy(q):
@@ -502,7 +507,7 @@ def test_filtered_pending_keeps_order_rank_backoff_and_busy(q):
     _row(q, "beta#1", "capped")                     # parked, still waiting
     q.r.sadd("applyq:inflight", "beta")
 
-    got = q.pending()
+    got = q.pending(actionable=True)
     assert [i["pk"] for i in got] == ["acme#2", "beta#1", "acme#3"]
     by = {i["pk"]: i for i in got}
     assert by["acme#2"]["company_rank"] == 1, "rank counts survivors only"
@@ -518,7 +523,7 @@ def test_the_limit_applies_after_the_filter(q):
     for i in range(6, 9):
         q.put(f"live#{i}", "Live", queued_at=float(i))
 
-    assert [i["pk"] for i in q.pending(limit=2)] == ["live#6", "live#7"]
+    assert [i["pk"] for i in q.pending(limit=2, actionable=True)] == ["live#6", "live#7"]
 
 
 class _CountingRedis(fakeredis.FakeRedis):
@@ -544,7 +549,7 @@ def test_a_large_queue_is_filtered_in_a_few_batched_reads():
             {"pk": f"acme#{i}", "status": "applied" if i <= 1070 else "tailored"}))
     r.sadd("applyq:companies", "acme")
 
-    got = q.pending()
+    got = q.pending(actionable=True)
     assert [i["pk"] for i in got] == [f"acme#{i}" for i in range(1071, 1171)]
     assert 1 <= r.mgets <= 3
 
@@ -557,4 +562,4 @@ def test_an_unreadable_status_read_hides_nothing(q):
         raise ConnectionError("redis went away")
 
     q.r.mget = boom
-    assert [i["pk"] for i in q.pending()] == ["acme#1"]
+    assert [i["pk"] for i in q.pending(actionable=True)] == ["acme#1"]

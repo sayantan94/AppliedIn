@@ -956,9 +956,8 @@ def test_requested_queue_post_put_terminal_wins_atomic_status_cas(monkeypatch):
     assert outcome["result"] == "conflict"
     assert tracking.get(pk) == snapshots[0]
     assert submit_hold.is_held(pk, tracking=tracking)
-    # The physical queue entry survives (the actionable view hides a finished
-    # row); it is subject to the existing dispatch/final-submit guards.
-    assert [x["pk"] for x in ApplyQueue(tracking.r).pending(actionable=False)] == [pk]
+    # The pending item is subject to the existing dispatch/final-submit guards.
+    assert [x["pk"] for x in ApplyQueue(tracking.r).pending()] == [pk]
 
 
 @pytest.mark.parametrize("discovery_source", ["", "career_ops"])

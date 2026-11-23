@@ -1048,7 +1048,7 @@ def create_app() -> FastAPI:
 
             from core.apply_queue import ApplyQueue
 
-            pending = ApplyQueue(stores.tracking.r).pending()
+            pending = ApplyQueue(stores.tracking.r).pending(actionable=True)
             oldest = None
             for item in pending:
                 stamp = float(item.get("queued_at") or 0)
@@ -1952,7 +1952,7 @@ def create_app() -> FastAPI:
         if (_review_row_conflict(row) or row.get("status") != "skipped" or row.get("skip_reason") != "low_score"
                 or submit_hold.blocked(pk, row, tracking=stores.tracking)
                 or row.get("confirmation_id") or pk in q.in_flight()
-                or any(item["pk"] == pk for item in q.pending(actionable=False))):
+                or any(item["pk"] == pk for item in q.pending())):
             return {"ok": False, "error": "Force apply is only available for an unsent role skipped for a low match score."}
         from datetime import datetime, timezone
 
@@ -2744,7 +2744,7 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
 
         q = ApplyQueue(make_stores(settings).tracking.r)
-        return {**q.depth(), "pending": q.pending(), "in_flight": sorted(q.in_flight()),
+        return {**q.depth(), "pending": q.pending(actionable=True), "in_flight": sorted(q.in_flight()),
                 "concurrency": flags.apply_concurrency(),
                 "max_attempts": MAX_ATTEMPTS}
 
@@ -2955,9 +2955,7 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": "Choose skip, restore, reject or undo."}
         stores = make_stores(settings)
         q = ApplyQueue(stores.tracking.r)
-        # Exact physical membership: a stale entry for a skipped row must keep
-        # blocking Restore, or undo would revive it.
-        pending = {it["pk"] for it in q.pending(actionable=False)}
+        pending = {it["pk"] for it in q.pending()}
         results = []
         for pk in pks:
             try:
