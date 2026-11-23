@@ -675,39 +675,33 @@ def test_second_invalid_run_defers_again_then_valid_score_proceeds(harness, monk
     assert not h.stores.tracking.row.get("scorer_retry_at")
 
 
-class _ScoreThenSaveRunner:
-    """Review-only agent double: a current scorer event, then the REAL save boundary."""
-    score = 7
-    agents: list = []
-    seed = r"\role{example-co}{2024}" + "\n" + r"\item One"
+class _SaveTailor(BaseAgent):
+    """Fake tailor STAGE inside the real review graph. It runs after the real
+    scorer, requires the scorer's current validated score in session state, then
+    calls the REAL save_tailored_resume and reports its tool response as an event."""
+    seen: list = Field(default_factory=list)
+    tailored: str = ""
 
-    def __init__(self, *, agent, app_name, session_service):
-        type(self).agents.append(agent)
+    async def _run_async_impl(self, ctx):
+        from google.adk.events import Event
 
-    async def run_async(self, *, user_id, session_id, new_message):
-        from agent.graph import save_tailored_resume
-
-        scored = SimpleNamespace(
-            author="scorer",
-            content=types.Content(role="model", parts=[types.Part(text="scored")]),
-            is_final_response=lambda: True,
-            actions=SimpleNamespace(state_delta={"match_score": {
-                "score": type(self).score, "reasoning": "synthetic fit"}}),
-            get_function_calls=lambda: [], get_function_responses=lambda: [])
-        yield scored
-        result = save_tailored_resume(type(self).seed, SimpleNamespace(
-            state={"pk": session_id, "base_latex": type(self).seed}))
-        yield SimpleNamespace(
-            author="tailor", content=None, get_function_calls=lambda: [],
-            get_function_responses=lambda: [SimpleNamespace(
-                name="save_tailored_resume", response=result)])
+        state = ctx.session.state
+        self.seen.append(MatchScore.model_validate(state.get("match_score")).score)
+        result = G.save_tailored_resume(self.tailored, SimpleNamespace(state=state))
+        yield Event(author=self.name, invocation_id=ctx.invocation_id,
+                    content=types.Content(role="user", parts=[types.Part(
+                        function_response=types.FunctionResponse(
+                            name="save_tailored_resume", response=result))]))
 
 
 @pytest.mark.parametrize("score", [7, 9])
 def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, score):
     """AC3: score at/above the configured floor on the explicit review-only route
-    reaches the real tailor-save boundary and settles `prepared` with a verified
-    current PDF, with approval metadata present and no application-queue effect."""
+    runs the real review graph (real scorer, offline model) into a tailor stage that
+    calls the real save, and settles `prepared` with a verified current PDF, with
+    approval metadata present and no application-queue effect."""
+    import json
+
     import fakeredis
 
     from core.apply_queue import ApplyQueue
@@ -716,6 +710,7 @@ def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, scor
     from discovery.watchlist import Preferences
 
     pk = "example-co#custom-1"
+    seed = "\\role{example-co}{2024}\n\\item One"
     tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
     guarded = pg.analyze(JD)
     assert tracking.put_new(JobRecord(
@@ -724,7 +719,7 @@ def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, scor
         posting_guard=guarded["posting_guard"]))
     row = tracking.get_current(pk)
     row.update(gate_reason="approval")  # approval metadata must not block tailoring
-    tracking.r.set(f"app:{pk}", __import__("json").dumps(row))
+    tracking.r.set(f"app:{pk}", json.dumps(row))
     store = {}
 
     def put(category, name, body, kind):
@@ -742,26 +737,32 @@ def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, scor
     monkeypatch.setattr(R, "_min_score", lambda: 7)
     monkeypatch.setattr(R, "_effective_prefs", lambda company: Preferences())
     monkeypatch.setattr("core.steering.read", lambda: {"content": ""})
+    monkeypatch.setattr(G._steering, "instructions", lambda: "Synthetic steering")
     monkeypatch.setattr("tools.render.render_pdf", lambda source: b"%PDF-synthetic")
     monkeypatch.setattr("core.profiles.resolve_for", lambda row: None)
-    monkeypatch.setattr(R, "_session_service", lambda: SimpleNamespace(
-        get_session=AsyncMock(return_value=None), create_session=AsyncMock()))
+    sessions = InMemorySessionService()
+    monkeypatch.setattr(R, "_session_service", lambda: sessions)
     monkeypatch.setattr(R, "_session_state",
-                        lambda row, jd: {"base_latex": _ScoreThenSaveRunner.seed})
+                        lambda row, jd: {**SYNTHETIC_STATE, "pk": pk, "base_latex": seed})
     monkeypatch.setattr(R, "_save_output", lambda *a, **kw: None)
 
     async def _jd(_):
         return guarded
 
     monkeypatch.setattr(R, "_jd_meta", _jd)
-    monkeypatch.setattr(R, "Runner", _ScoreThenSaveRunner)
-    _ScoreThenSaveRunner.agents = []
-    _ScoreThenSaveRunner.score = score
+    fake = _OfflineModel(model="offline-scorer",
+                         scripted=[_response(f'{{"score":{score},"reasoning":"fit"}}')])
+    scorer = G.review_agent.sub_agents[0]
+    tailor_stage = _SaveTailor(name="synthetic_tailor", tailored=seed)
+    tailor_stage.parent_agent = G.review_agent
+    monkeypatch.setattr(scorer, "model", fake)
+    monkeypatch.setattr(G.review_agent, "sub_agents", [scorer, tailor_stage])
 
     outcome = R.run_job(pk, stores, prepare_only=True)
 
     assert outcome["result"] == "prepared"
-    assert _ScoreThenSaveRunner.agents == [G.review_agent]
+    assert len(fake.requests) == 1          # the real scorer ran, once, on the offline model
+    assert tailor_stage.seen == [score]     # tailor stage got the scorer's current score
     final = tracking.get_current(pk)
     assert final["status"] == "tailored" and final["gate_reason"] == "approval"
     assert final["match_score"] == score
