@@ -217,7 +217,7 @@ def _unit_path(value: Path, *, word: bool) -> str:
     # when the checkout name contains spaces.
     raw = raw.replace("%", "%%").replace("\\", "\\\\")
     if word:
-        return '"' + raw.replace('"', '\\"').replace("$", "$") + '"'
+        return '"' + raw.replace('"', '\\"').replace("$", "$$") + '"'
     return raw.replace(" ", "\\x20")
 
 

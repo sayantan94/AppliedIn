@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=@WORKDIR@
 ExecStart=@PYTHON@ -m daemon
 Environment=APPLIEDIN_MODE=local
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=APPLIEDIN_USER_SERVICE=1
 KillMode=process
 TimeoutStopSec=10s

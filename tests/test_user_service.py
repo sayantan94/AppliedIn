@@ -30,6 +30,7 @@ def test_installed_unit_starts_real_module_at_login_not_setup(world):
     assert "KillMode=process" in template
     assert "Restart=on-failure" in template
     assert "APPLIEDIN_USER_SERVICE=1" in template
+    assert "Environment=PATH=%h/.local/bin:" in template
     assert "ExecStartPre" not in template
     assert "systemd-run" not in template
     rendered = cli._render_unit()
@@ -37,6 +38,8 @@ def test_installed_unit_starts_real_module_at_login_not_setup(world):
     assert "checkout with spaces" in rendered
     assert "checkout\\x20with\\x20spaces" in rendered
     assert "@WORKDIR@" not in rendered and "@PYTHON@" not in rendered
+    assert '$$' in cli._unit_path(Path("/tmp/check$one"), word=True)
+    assert '%%' in cli._unit_path(Path("/tmp/check%one"), word=True)
 
 
 def test_install_enable_is_idempotent_without_rewriting_existing_unit(world, monkeypatch):
