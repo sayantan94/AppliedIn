@@ -680,3 +680,52 @@ def test_workable_queued_burst_expires_during_bounded_lock_acquisition(monkeypat
     assert results == [None] * 24
     assert len(lock.waits) == 24
     assert all(0 < budget <= 15.0 for budget in lock.waits)
+
+
+def test_three_part_workday_native_detail_carries_only_matched_company(monkeypatch):
+    url = "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1"
+    payload = {"jobPostingInfo": {
+        "externalPath": "/example/job/ROLE-1", "jobReqId": "DIFFERENT-REQ",
+        "title": "Platform Engineer", "companyName": "Example Co",
+        "jobDescription": HTML}}
+    result, seen = _positive_bypass(monkeypatch, payload, url)
+    assert len(seen) == 1
+    assert result["title"] == "Platform Engineer"
+    assert result["company"] == "Example Co"
+    assert result["source_kind"] == "ats_html"
+    assert jd.matched_source_witness({"jd_url": url}, result)
+
+
+def test_three_part_workday_mismatched_external_path_uses_page_not_api(monkeypatch):
+    url = "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1"
+    payload = {"jobPostingInfo": {
+        "externalPath": "/example/job/OTHER-1", "title": "Foreign Title",
+        "companyName": "Foreign Co", "jobDescription": HTML}}
+    seen = []
+    monkeypatch.setattr(jd.httpx, "Client", lambda **_: Client(payload, seen))
+    html = ("<html><body><h1>Platform Engineer</h1><p>" +
+            "Synthetic source-matched role with reliable integrations. " * 12 +
+            "</p></body></html>")
+    monkeypatch.setattr(jd, "_get", lambda *_: (html, url))
+    monkeypatch.setattr(jd, "_from_chrome",
+                        lambda *_: pytest.fail("complete HTML should avoid browser"))
+
+    result = jd.fetch_jd_meta(url)
+    assert len(seen) == 1
+    assert result["source_kind"] == "http_html"
+    assert result["title"] == "Platform Engineer"
+    assert result.get("company") != "Foreign Co"
+    assert jd.matched_source_witness({"jd_url": url}, result)
+
+
+@pytest.mark.parametrize("url", [
+    "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1",
+    "https://example-co.wd3.myworkdayjobs.com/en-US/example/job/ROLE-1",
+    "https://example-co.wd3.myworkdayjobs.com/example/job/US/ROLE-1",
+    "https://example-co.wd3.myworkdayjobs.com/en-US/example/job/US/ROLE-1",
+])
+def test_workday_short_long_and_locale_forms_keep_exact_external_path(url):
+    parsed = jd._api_url(url)
+    assert parsed and parsed[0] == "workday"
+    assert parsed[2] == "/" + url.split(".com/", 1)[1].removeprefix("en-US/")
+    assert parsed[3].endswith(parsed[2])
