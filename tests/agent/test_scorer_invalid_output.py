@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from google.adk.agents import BaseAgent
@@ -674,23 +675,100 @@ def test_second_invalid_run_defers_again_then_valid_score_proceeds(harness, monk
     assert not h.stores.tracking.row.get("scorer_retry_at")
 
 
+class _ScoreThenSaveRunner:
+    """Review-only agent double: a current scorer event, then the REAL save boundary."""
+    score = 7
+    agents: list = []
+    seed = r"\role{example-co}{2024}" + "\n" + r"\item One"
+
+    def __init__(self, *, agent, app_name, session_service):
+        type(self).agents.append(agent)
+
+    async def run_async(self, *, user_id, session_id, new_message):
+        from agent.graph import save_tailored_resume
+
+        scored = SimpleNamespace(
+            author="scorer",
+            content=types.Content(role="model", parts=[types.Part(text="scored")]),
+            is_final_response=lambda: True,
+            actions=SimpleNamespace(state_delta={"match_score": {
+                "score": type(self).score, "reasoning": "synthetic fit"}}),
+            get_function_calls=lambda: [], get_function_responses=lambda: [])
+        yield scored
+        result = save_tailored_resume(type(self).seed, SimpleNamespace(
+            state={"pk": session_id, "base_latex": type(self).seed}))
+        yield SimpleNamespace(
+            author="tailor", content=None, get_function_calls=lambda: [],
+            get_function_responses=lambda: [SimpleNamespace(
+                name="save_tailored_resume", response=result)])
+
+
 @pytest.mark.parametrize("score", [7, 9])
-def test_floor_score_reaches_tailoring_with_approval_metadata(harness, score):
-    """The at-floor row is never held by gate_reason; it reaches the tailor stage."""
-    h = harness
-    if not h.prep:
-        pytest.skip("AC3 is the explicit review-only (prepare_only) route")
-    h.stores.tracking.row.update(
-        jd_url="https://jobs.example.com/custom/synthetic-role", gate_reason="approval",
-        match_score=None)
-    h.fake.scripted = [_response(f'{{"score":{score},"reasoning":"fit"}}')]
-    _run(h)
-    row = h.stores.tracking.row
-    assert h.next.observed == [score]               # the next (tailor) stage ran
-    assert row["status"] == Status.TAILORED.value   # settled by it, not just TAILORING
-    assert row["resume_s3_key"] == "resumes/synthetic-new.pdf"
-    assert row["match_score"] == score
-    assert not hasattr(h.stores, "queue")           # no queue entry can have been made
+def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, score):
+    """AC3: score at/above the configured floor on the explicit review-only route
+    reaches the real tailor-save boundary and settles `prepared` with a verified
+    current PDF, with approval metadata present and no application-queue effect."""
+    import fakeredis
+
+    from core.apply_queue import ApplyQueue
+    from core.models import JobRecord
+    from core.storage.local import RedisTracking
+    from discovery.watchlist import Preferences
+
+    pk = "example-co#custom-1"
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    guarded = pg.analyze(JD)
+    assert tracking.put_new(JobRecord(
+        company="example-co", job_id="custom-1", ats="custom", title="Synthetic Engineer",
+        jd_url="https://jobs.example.com/custom/synthetic-role", jd_text=guarded["text"],
+        posting_guard=guarded["posting_guard"]))
+    row = tracking.get_current(pk)
+    row.update(gate_reason="approval")  # approval metadata must not block tailoring
+    tracking.r.set(f"app:{pk}", __import__("json").dumps(row))
+    store = {}
+
+    def put(category, name, body, kind):
+        key = category + "/" + name
+        store[key] = body
+        return key
+
+    stores = SimpleNamespace(tracking=tracking,
+                             artifacts=SimpleNamespace(put=put, get=lambda key: store[key]))
+    queued = []
+    monkeypatch.setattr(R, "_enqueue_apply",
+                        lambda *a, **kw: queued.append("enqueue") or {"result": "queued"})
+    monkeypatch.setattr(ApplyQueue, "put", lambda self, *a, **kw: queued.append("put") or True)
+    monkeypatch.setattr("core.events.emit", lambda *a, **kw: None)
+    monkeypatch.setattr(R, "_min_score", lambda: 7)
+    monkeypatch.setattr(R, "_effective_prefs", lambda company: Preferences())
+    monkeypatch.setattr("core.steering.read", lambda: {"content": ""})
+    monkeypatch.setattr("tools.render.render_pdf", lambda source: b"%PDF-synthetic")
+    monkeypatch.setattr("core.profiles.resolve_for", lambda row: None)
+    monkeypatch.setattr(R, "_session_service", lambda: SimpleNamespace(
+        get_session=AsyncMock(return_value=None), create_session=AsyncMock()))
+    monkeypatch.setattr(R, "_session_state",
+                        lambda row, jd: {"base_latex": _ScoreThenSaveRunner.seed})
+    monkeypatch.setattr(R, "_save_output", lambda *a, **kw: None)
+
+    async def _jd(_):
+        return guarded
+
+    monkeypatch.setattr(R, "_jd_meta", _jd)
+    monkeypatch.setattr(R, "Runner", _ScoreThenSaveRunner)
+    _ScoreThenSaveRunner.agents = []
+    _ScoreThenSaveRunner.score = score
+
+    outcome = R.run_job(pk, stores, prepare_only=True)
+
+    assert outcome["result"] == "prepared"
+    assert _ScoreThenSaveRunner.agents == [G.review_agent]
+    final = tracking.get_current(pk)
+    assert final["status"] == "tailored" and final["gate_reason"] == "approval"
+    assert final["match_score"] == score
+    assert final["resume_s3_key"].endswith(".pdf")
+    assert store[final["resume_s3_key"]] == b"%PDF-synthetic"  # current verified bytes
+    assert not final.get("apply_requested_at")
+    assert queued == [] and ApplyQueue(tracking.r).pending() == []
 
 
 def test_below_floor_with_approval_metadata_is_not_promoted(harness):
@@ -709,3 +787,35 @@ def test_historical_skipped_approval_rows_are_not_eligible(reason):
     row = {"pk": "example-co#old", "company": "example-co", "status": "skipped",
            "skip_reason": reason, "gate_reason": "approval", "match_score": 8}
     assert not R._reader_eligible(row, now=NOW)
+
+
+def test_deferred_review_only_attempt_stays_review_only_on_the_due_retry(harness, monkeypatch):
+    """The daemon sweep calls run_job() without prepare_only; the deferred row must
+    carry its review-only choice so the retry never falls back to root_agent."""
+    h = harness
+    if not h.prep:
+        pytest.skip("the review-only graph is the one patched by the prepare_only fixture")
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    chosen = []
+    real_runner = R.Runner
+    monkeypatch.setattr(R, "Runner", lambda **kw: chosen.append(kw["agent"]) or real_runner(**kw))
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert R.run_job(h.pk, h.stores, prepare_only=True)["result"] == "deferred"
+    assert h.stores.tracking.row["jd_read_prepare_only"] is True
+    # Due: the sweep path (no prepare_only argument) with a valid score.
+    clock["now"] = NOW + timedelta(minutes=31)
+    h.fake.scripted = [_response('{"score":8,"reasoning":"fit"}')]
+    R.run_job(h.pk, h.stores)
+    assert chosen[-1] is G.review_agent
+    assert chosen[0] is G.review_agent
+    assert h.next.observed == [8]
+
+
+def test_deferred_normal_attempt_does_not_invent_review_only(harness):
+    h = harness
+    if h.prep:
+        pytest.skip("normal-route variant")
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    assert not h.stores.tracking.row.get("jd_read_prepare_only")

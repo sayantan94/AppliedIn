@@ -821,9 +821,12 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
         detail = ("The scorer did not return a valid score after one correction. "
                   "Nothing was tailored or queued; it will be scored again later "
                   f"(not before {retry_at.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}).")
+        # A review-only attempt stays review-only on the due retry (the daemon
+        # sweep calls run_job without prepare_only): never fall back to root_agent.
         committed, _ = _reader_patch(pk, row, stores, {
             "status": Status.FOUND, "scorer_retry_at": retry_at.isoformat(),
-            "match_score": None})
+            "match_score": None,
+            **({"jd_read_prepare_only": True} if prepare_only else {})})
         if not committed:
             return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
         emit("response", pk=pk, detail=detail, url=row.get("jd_url"))
