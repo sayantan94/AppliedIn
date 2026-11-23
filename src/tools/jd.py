@@ -14,11 +14,14 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import httpx
+import tldextract
 
 from core.logging import get_logger
 from tools import posting_guard as pg
 
 log = get_logger(__name__)
+
+_OFFLINE_TLD = tldextract.TLDExtract(suffix_list_urls=())
 
 
 class PostingReadUnavailable(RuntimeError):
@@ -509,28 +512,51 @@ def _posting_page_metadata(html: str, url: str) -> dict:
                 kind = item.get("@type", "")
                 if "JobPosting" in (kind if isinstance(kind, list) else [kind]):
                     entries.append(item)
-    # A foreign URL is not job-specific proof. An unbound JobPosting is usable
-    # only when it is the sole posting in this selected page.
-    matching = [item for item in entries if isinstance(item.get("url"), str)
-                and _same_posting_url(url, item["url"])]
-    unbound = [item for item in entries if not item.get("url")]
-    selected = matching if matching else (unbound if len(entries) == 1 else [])
-    posting = selected[0] if len(selected) == 1 else {}
-    json_title = posting.get("title") if isinstance(posting.get("title"), str) else ""
-    company = _employer_name(posting.get("hiringOrganization"))
 
     headings = [(tag, " ".join(label.split()), hint)
                 for tag, label, hint in parser.headings
                 if label and len(label) <= 120 and not _GENERIC_HEADING.match(label)]
+    # A hero or site banner is not a role heading even when its slogan is new.
+    banner = re.compile(r"(?:^|[\s_-])(?:hero|banner|masthead|site-header)(?:$|[\s_-])", re.I)
     marked = [label for _, label, hint in headings if _ROLE_HINT.search(hint)]
-    heading = marked[0] if marked else (headings[0][1] if headings else "")
+    candidates = [(tag, label) for tag, label, hint in headings
+                  if not banner.search(hint)]
+    heading = (marked[0] if marked else
+               next((label for tag, label in candidates if tag == "h1"), "")
+               or next((label for tag, label in candidates if tag == "h2"), "")
+               or (candidates[0][1] if candidates else ""))
+
+    matching = [item for item in entries if isinstance(item.get("url"), str)
+                and _same_posting_url(url, item["url"])]
+    # An unbound recommendation widget can be the page's sole JobPosting.
+    # Corroborate its role identity with the visible posting heading first.
+    unbound = [item for item in entries if not item.get("url")]
+    candidate = unbound[0] if len(entries) == 1 and unbound else {}
+    json_candidate = candidate.get("title") if isinstance(candidate.get("title"), str) else ""
+    normalized_heading = re.sub(r"[\W_]+", " ", heading.casefold()).strip()
+    normalized_json = re.sub(r"[\W_]+", " ", json_candidate.casefold()).strip()
+    same_role = bool(normalized_heading and normalized_json
+                     and (normalized_json == normalized_heading
+                          or (normalized_json.endswith(" " + normalized_heading)
+                              and all(word in {"senior", "junior", "staff", "principal",
+                                               "lead", "sr", "jr"}
+                                      for word in normalized_json[:-len(normalized_heading)].split()))))
+    selected = matching if matching else ([candidate] if same_role else [])
+    posting = selected[0] if len(selected) == 1 else {}
+    json_title = posting.get("title") if isinstance(posting.get("title"), str) else ""
+    company = _employer_name(posting.get("hiringOrganization"))
+
     og_title = " ".join(unescape(parser.meta.get("og:title", "")).split())
     og_kind = parser.meta.get("og:type", "").lower()
     # OG site branding and hero slogans alone don't prove a posting.
     title_match = bool(heading and heading.casefold() in og_title.casefold())
     og_specific = bool(og_title and not _GENERIC_HEADING.match(og_title)
                        and (title_match or og_kind in {"job", "jobposting"}))
-    if not company and og_specific:
+    # A shared ATS host's site_name brands the provider, not the hiring employer.
+    # Reuse the existing generic-provider vocabulary, not a site-specific blocklist.
+    host = urlsplit(url).hostname or ""
+    host_brand = _OFFLINE_TLD(host).domain.casefold()
+    if not company and og_specific and host_brand not in _GENERIC_EMPLOYERS:
         company = _employer_name(parser.meta.get("og:site_name"))
     # A vendor/site suffix in OG title should not be stored as the role name.
     role_og = og_title if og_specific and og_title.casefold() != heading.casefold() else ""
