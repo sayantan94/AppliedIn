@@ -575,10 +575,15 @@ def _defer_posting_read(pk: str, row: dict, stores: Any, reason: str) -> dict:
         detail = (f"Posting reader unavailable: {reason}. Attempt {attempts}; "
                   f"next eligible not before {cutoff_text}. "
                   "No application was prepared or sent by this read.")
+        legacy = row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
         committed, _ = _reader_patch(pk, row, stores, {
             "status": Status.FOUND, "jd_read_attempts": attempts,
             "jd_read_retry_at": cutoff.isoformat(), "jd_read_error": detail,
-            "fail_kind": "", "fail_reason": "", "error": "",
+            # A legacy terminal read marker is not permanent-removal proof.
+            # Retain its historical evidence until a verified new read succeeds.
+            "fail_kind": row.get("fail_kind") if legacy else "",
+            "fail_reason": row.get("fail_reason", "") if legacy else "",
+            "error": row.get("error", "") if legacy else "",
         })
     except Exception as exc:
         return _reader_storage_error(pk, stores, row, exc)
