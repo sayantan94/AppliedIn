@@ -9,6 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
@@ -73,14 +74,14 @@ def _api_url(url: str):
             locale = None
             if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
                 locale, parts = parts[0], parts[1:]
-            if (len(parts) != 4 or parts[1] != "job" or
+            if (len(parts) not in (3, 4) or parts[1] != "job" or
                     not all(_ATS_TOKEN.fullmatch(x) for x in [tenant, *parts])):
                 return None
-            site, _, location, leaf = parts
-            external = f"/{site}/job/{location}/{leaf}"
+            site = parts[0]
+            external = "/" + "/".join(parts)
             return ("workday", url, external,
                     (f"https://{tenant}.{region}.myworkdayjobs.com/"
-                     f"wday/cxs/{tenant}/{site}/job/{location}/{leaf}"),
+                     f"wday/cxs/{tenant}/{site}/job/" + "/".join(parts[2:])),
                     {"tenant": tenant, "site": site, "external": external, "locale": locale})
         if host == "apply.workable.com":
             if (len(parts) != 3 or parts[1] != "j"
@@ -222,7 +223,7 @@ def _api_incomplete(value: object) -> bool:
     return any(_api_incomplete(item) for item in value.values())
 
 
-def _api_meta(url: str, title: str, fragments: list[str]) -> dict | None:
+def _api_meta(url: str, title: str, fragments: list[str], *, company: object = None) -> dict | None:
     """Accept only complete native HTML; the normal guard owns all safety decisions."""
     if not title or not fragments or not all(_html_piece(x) for x in fragments):
         return None
@@ -232,6 +233,8 @@ def _api_meta(url: str, title: str, fragments: list[str]) -> dict | None:
     result = _guarded(title, text, html_variants=fragments, source_required=True,
                       source_complete=True)
     result.update(source_kind="ats_html", source_url=url)
+    if employer := _employer_name(company):
+        result["company"] = employer
     if (not pg.valid(result["text"], result["posting_guard"])
             or result["posting_guard"].get("source_verified") is not True
             or "source_html_unavailable" in result["posting_guard"].get("reasons", [])
@@ -279,7 +282,8 @@ def _from_new_ats(url: str) -> dict | None:
                 return None
             body = info.get("jobDescription")
             fragments = [body] if isinstance(body, str) else []
-            return _api_meta(original, str(info.get("title") or ""), fragments)
+            return _api_meta(original, str(info.get("title") or ""), fragments,
+                             company=info.get("hiringOrganization") or info.get("companyName"))
         if vendor == "workable":
             jobs = payload.get("jobs") if isinstance(payload, dict) else None
             matches = [j for j in jobs or [] if isinstance(j, dict)
@@ -293,7 +297,8 @@ def _from_new_ats(url: str) -> dict | None:
                     return None
             description = job.get("description")
             return _api_meta(original, str(job.get("title") or ""),
-                             [description] if isinstance(description, str) else [])
+                             [description] if isinstance(description, str) else [],
+                             company=job.get("company"))
         if vendor == "eightfold":
             if not isinstance(payload, dict) or str(payload.get("id") or "") != identity["id"]:
                 return None
@@ -307,7 +312,8 @@ def _from_new_ats(url: str) -> dict | None:
                     return None
             description = payload.get("job_description")
             return _api_meta(original, str(payload.get("title") or ""),
-                             [description] if isinstance(description, str) else [])
+                             [description] if isinstance(description, str) else [],
+                             company=payload.get("hiringOrganization"))
         if vendor == "personio":
             root = ET.fromstring(payload or "")
             if root.tag != "workzag-jobs":
@@ -349,7 +355,8 @@ def _from_new_ats(url: str) -> dict | None:
                 value = sections.get(key, {}).get("text")
                 if value:
                     fragments.append(value)
-            return _api_meta(original, str(payload.get("name") or ""), fragments)
+            return _api_meta(original, str(payload.get("name") or ""), fragments,
+                             company=company if isinstance(company, dict) else None)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError, ET.ParseError):
         return None
     return None
@@ -405,6 +412,11 @@ class _JobHTMLIdentity(HTMLParser):
         self.canonicals: list[str] = []
         self.structured: list[str] = []
         self._ld: list[str] | None = None
+        self.meta: dict[str, str] = {}
+        self.headings: list[tuple[str, str, str]] = []
+        self._heading: list[str] | None = None
+        self._heading_tag = ""
+        self._heading_hint = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         fields = dict(attrs)
@@ -412,15 +424,119 @@ class _JobHTMLIdentity(HTMLParser):
             self.canonicals.append(fields.get("href") or "")
         if tag == "script" and (fields.get("type") or "").lower() == "application/ld+json":
             self._ld = []
+        if tag == "meta":
+            key = (fields.get("property") or fields.get("name") or "").lower()
+            if key in {"og:title", "og:site_name", "og:type"}:
+                self.meta[key] = fields.get("content") or ""
+        if tag in {"h1", "h2", "h3"} and self._heading is None:
+            self._heading = []
+            self._heading_tag = tag
+            self._heading_hint = (fields.get("class") or "") + " " + (fields.get("id") or "")
 
     def handle_data(self, data: str) -> None:
         if self._ld is not None:
             self._ld.append(data)
+        if self._heading is not None:
+            self._heading.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "script" and self._ld is not None:
             self.structured.append("".join(self._ld))
             self._ld = None
+        if tag == self._heading_tag and self._heading is not None:
+            self.headings.append((tag, unescape("".join(self._heading)).strip(),
+                                  self._heading_hint))
+            self._heading = None
+            self._heading_tag = ""
+            self._heading_hint = ""
+
+
+
+# These are hosting/generic labels, not source-evidenced employers.
+_GENERIC_EMPLOYERS = {
+    "company", "unknown", "jobs", "job", "careers", "apply", "recruiting",
+    "greenhouse", "ashby", "ashbyhq", "lever", "linkedin", "workday",
+    "myworkdayjobs", "workable", "smartrecruiters", "personio", "breezy",
+    "homerun", "phenom", "eightfold", "teamtailor", "jobvite",
+}
+_GENERIC_HEADING = re.compile(
+    r"^(?:welcome|join (?:our|the) team|build your future|"
+    r"discover (?:your|our)|explore (?:our|your)|"
+    r"careers(?: at .*)?|jobs(?: at .*)?|work with us)(?:\b|$)", re.I,
+)
+_ROLE_HINT = re.compile(
+    r"(?:^|[\s_-])(?:job|posting|position|role|vacancy)[\s_-]*title"
+    r"|(?:^|[\s_-])title[\s_-]*(?:job|posting|position|role)(?:$|[\s_-])",
+    re.I,
+)
+
+
+def _employer_name(value: object) -> str:
+    """Sanitize a human-readable company, excluding common provider labels."""
+    if isinstance(value, dict):
+        value = value.get("name")
+    if not isinstance(value, str):
+        return ""
+    name = " ".join(unescape(re.sub(r"<[^>]*>", "", value)).split()).strip(" #")
+    if (not name or len(name) > 120 or "#" in name
+            or name.casefold() in _GENERIC_EMPLOYERS
+            or re.search(r"(?:^|[\s_-])(?:careers|jobs|recruiting)$", name, re.I)):
+        return ""
+    return pg.analyze(name)["text"][:120].strip()
+
+
+def _posting_page_metadata(html: str, url: str) -> dict:
+    """JobPosting, then job-specific OG, then role heading on this HTTP page."""
+    parser = _JobHTMLIdentity()
+    parser.feed(html)
+    parser.close()
+    entries: list[dict] = []
+    for raw in parser.structured:
+        try:
+            queue = [json.loads(raw)]
+        except (TypeError, ValueError):
+            continue
+        while queue:
+            item = queue.pop()
+            if isinstance(item, list):
+                queue.extend(item)
+            elif isinstance(item, dict):
+                graph = item.get("@graph")
+                if isinstance(graph, list):
+                    queue.extend(graph)
+                kind = item.get("@type", "")
+                if "JobPosting" in (kind if isinstance(kind, list) else [kind]):
+                    entries.append(item)
+    # A foreign URL is not job-specific proof. An unbound JobPosting is usable
+    # only when it is the sole posting in this selected page.
+    matching = [item for item in entries if isinstance(item.get("url"), str)
+                and _same_posting_url(url, item["url"])]
+    unbound = [item for item in entries if not item.get("url")]
+    selected = matching if matching else (unbound if len(entries) == 1 else [])
+    posting = selected[0] if len(selected) == 1 else {}
+    json_title = posting.get("title") if isinstance(posting.get("title"), str) else ""
+    company = _employer_name(posting.get("hiringOrganization"))
+
+    headings = [(tag, " ".join(label.split()), hint)
+                for tag, label, hint in parser.headings
+                if label and len(label) <= 120 and not _GENERIC_HEADING.match(label)]
+    marked = [label for _, label, hint in headings if _ROLE_HINT.search(hint)]
+    heading = marked[0] if marked else (headings[0][1] if headings else "")
+    og_title = " ".join(unescape(parser.meta.get("og:title", "")).split())
+    og_kind = parser.meta.get("og:type", "").lower()
+    # OG site branding and hero slogans alone don't prove a posting.
+    title_match = bool(heading and heading.casefold() in og_title.casefold())
+    og_specific = bool(og_title and not _GENERIC_HEADING.match(og_title)
+                       and (title_match or og_kind in {"job", "jobposting"}))
+    if not company and og_specific:
+        company = _employer_name(parser.meta.get("og:site_name"))
+    # A vendor/site suffix in OG title should not be stored as the role name.
+    role_og = og_title if og_specific and og_title.casefold() != heading.casefold() else ""
+    if role_og and heading and role_og.casefold().startswith(heading.casefold()):
+        suffix = role_og[len(heading):]
+        if re.match(r"^\s*[|–—-]\s*", suffix):
+            role_og = heading
+    return {"title": json_title or role_og or heading, "company": company}
 
 
 def _html_source_identity(html: str) -> dict:
@@ -669,15 +785,15 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     html, effective_url = (html_read if isinstance(html_read, tuple)
                            else (html_read, url))
     same_source = _same_posting_url(url, effective_url)
-    raw_title = (m.group(1).strip() if (m := _TITLE_RX.search(html)) else "")
-    h1 = _text(m.group(1)) if (m := _H1_RX.search(html)) else ""
-    title = h1 or _SPLIT_RX.split(_text(raw_title))[0].strip()
-    hit = _guarded(title, html, html_variants=[html], source_required=True,
+    posting = _posting_page_metadata(html, url) if same_source else {}
+    hit = _guarded(posting.get("title", ""), html, html_variants=[html], source_required=True,
                    source_complete=same_source)
     # A redirect to a different posting is not original-HTML evidence even
     # when that page returns HTTP 200 and its visible text looks clean.
     hit.update(source_kind="http_html", source_url=effective_url,
                source_identity=_html_source_identity(html) if same_source else {})
+    if posting.get("company"):
+        hit["company"] = posting["company"]
     if len(hit["text"]) < 400:
         try:
             seen = _from_chrome(url, kind)
@@ -696,7 +812,10 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
             # Retain only the canonical/JobPosting proof parsed from the HTTP HTML.
             hit = {**seen, "source_kind": "http_html",
                    "source_url": effective_url,
-                   "source_identity": hit["source_identity"] if same_source else {}}
+                   "source_identity": hit["source_identity"] if same_source else {},
+                   "title": hit["title"] or seen.get("title", "")}
+            if same_source and posting.get("company"):
+                hit["company"] = posting["company"]
     if ats:
         complete_ats = bool(ats["posting_guard"].get("source_verified"))
         # Never substitute another redirected page's JD for an ATS posting.
@@ -707,6 +826,10 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
         hit.update(combined)
         if complete_ats and ats.get("source_url") == url:
             hit.update(source_kind="ats_html", source_url=url)
+            if not same_source:
+                hit.pop("company", None)
+            if ats.get("company"):
+                hit["company"] = ats["company"]
     return hit
 
 def _get(url: str, headers: dict) -> tuple[str, str] | None:
