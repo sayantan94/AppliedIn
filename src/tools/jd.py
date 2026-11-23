@@ -407,6 +407,15 @@ def _valid_reader_url(value: object) -> bool:
         return False
 
 
+_BANNER_HINT = re.compile(
+    r"(?:^|[\\s_-])(?:hero|banner|masthead|site-header)(?:$|[\\s_-])", re.I,
+)
+_HTML_VOID_TAGS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+
 class _JobHTMLIdentity(HTMLParser):
     """Capture only HTML-authored canonical and JobPosting JSON-LD witnesses."""
 
@@ -416,10 +425,12 @@ class _JobHTMLIdentity(HTMLParser):
         self.structured: list[str] = []
         self._ld: list[str] | None = None
         self.meta: dict[str, str] = {}
-        self.headings: list[tuple[str, str, str]] = []
+        self.headings: list[tuple[str, str, str, bool]] = []
         self._heading: list[str] | None = None
         self._heading_tag = ""
         self._heading_hint = ""
+        self._heading_in_banner = False
+        self._ancestors: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         fields = dict(attrs)
@@ -435,6 +446,10 @@ class _JobHTMLIdentity(HTMLParser):
             self._heading = []
             self._heading_tag = tag
             self._heading_hint = (fields.get("class") or "") + " " + (fields.get("id") or "")
+            self._heading_in_banner = any(marked for _, marked in self._ancestors)
+        if tag not in _HTML_VOID_TAGS:
+            hint = (fields.get("class") or "") + " " + (fields.get("id") or "")
+            self._ancestors.append((tag, bool(_BANNER_HINT.search(hint))))
 
     def handle_data(self, data: str) -> None:
         if self._ld is not None:
@@ -448,10 +463,16 @@ class _JobHTMLIdentity(HTMLParser):
             self._ld = None
         if tag == self._heading_tag and self._heading is not None:
             self.headings.append((tag, unescape("".join(self._heading)).strip(),
-                                  self._heading_hint))
+                                  self._heading_hint, self._heading_in_banner))
             self._heading = None
             self._heading_tag = ""
             self._heading_hint = ""
+            self._heading_in_banner = False
+        # Restore the actual ancestor scope when a marked section/header ends.
+        for index in range(len(self._ancestors) - 1, -1, -1):
+            if self._ancestors[index][0] == tag:
+                del self._ancestors[index:]
+                break
 
 
 
@@ -461,7 +482,8 @@ _GENERIC_EMPLOYERS = {
     "greenhouse", "ashby", "ashbyhq", "lever", "linkedin", "workday",
     "myworkdayjobs", "workable", "smartrecruiters", "personio", "breezy",
     "homerun", "breezy hr", "homerun jobs", "phenom", "phenom people",
-    "eightfold", "teamtailor", "jobvite",
+    "eightfold", "teamtailor", "jobvite", "recruitee",
+    "recruitee hiring platform",
 }
 _GENERIC_HEADING = re.compile(
     r"^(?:welcome|join (?:our|the) team|build your future|"
@@ -513,31 +535,45 @@ def _posting_page_metadata(html: str, url: str) -> dict:
                 if "JobPosting" in (kind if isinstance(kind, list) else [kind]):
                     entries.append(item)
 
-    headings = [(tag, " ".join(label.split()), hint)
-                for tag, label, hint in parser.headings
+    headings = [(tag, " ".join(label.split()), hint, in_banner)
+                for tag, label, hint, in_banner in parser.headings
                 if label and len(label) <= 120 and not _GENERIC_HEADING.match(label)]
-    # A hero or site banner is not a role heading even when its slogan is new.
-    banner = re.compile(r"(?:^|[\s_-])(?:hero|banner|masthead|site-header)(?:$|[\s_-])", re.I)
-    marked = [label for _, label, hint in headings if _ROLE_HINT.search(hint)]
-    candidates = [(tag, label) for tag, label, hint in headings
-                  if not banner.search(hint)]
+    candidates = []
+    for index, (tag, label, hint, in_banner) in enumerate(headings):
+        if _BANNER_HINT.search(hint):
+            continue
+        # A slogan H1 inside a marked ancestor is not the posting's H1 when
+        # a following role H2/H3 (or explicitly marked heading) is outside it.
+        following_role = any(
+            not later_banner and not _BANNER_HINT.search(later_hint)
+            and (later_tag in {"h2", "h3"} or _ROLE_HINT.search(later_hint))
+            for later_tag, _, later_hint, later_banner in headings[index + 1:]
+        )
+        if tag == "h1" and in_banner and following_role:
+            continue
+        candidates.append((tag, label, hint))
+    marked = [label for _, label, hint in candidates if _ROLE_HINT.search(hint)]
     heading = (marked[0] if marked else
-               next((label for tag, label in candidates if tag == "h1"), "")
-               or next((label for tag, label in candidates if tag == "h2"), "")
+               next((label for tag, label, _ in candidates if tag == "h1"), "")
+               or next((label for tag, label, _ in candidates if tag == "h2"), "")
                or (candidates[0][1] if candidates else ""))
 
     matching = [item for item in entries if isinstance(item.get("url"), str)
                 and _same_posting_url(url, item["url"])]
-    # An unbound recommendation widget can be the page's sole JobPosting.
-    # Corroborate its role identity with the visible posting heading first.
-    unbound = [item for item in entries if not item.get("url")]
-    candidate = unbound[0] if len(entries) == 1 and unbound else {}
+    # Equal titles never bind a URL-less recommendation to this source.
+    # A sole URL-less JobPosting additionally needs its own explicit URL-valued
+    # mainEntityOfPage witness AND the page's visible role heading.
+    candidate = entries[0] if len(entries) == 1 and not entries[0].get("url") else {}
+    source_page = candidate.get("mainEntityOfPage")
+    if isinstance(source_page, dict):
+        source_page = source_page.get("@id") or source_page.get("url")
     json_candidate = candidate.get("title") if isinstance(candidate.get("title"), str) else ""
     normalized_heading = re.sub(r"[\W_]+", " ", heading.casefold()).strip()
     normalized_json = re.sub(r"[\W_]+", " ", json_candidate.casefold()).strip()
-    # Seniority is part of the identity: a related job is not the same posting.
     same_role = bool(normalized_heading and normalized_json == normalized_heading)
-    selected = matching if matching else ([candidate] if same_role else [])
+    bound_page = (isinstance(source_page, str)
+                  and _same_posting_url(url, source_page))
+    selected = matching if matching else ([candidate] if same_role and bound_page else [])
     posting = selected[0] if len(selected) == 1 else {}
     json_title = posting.get("title") if isinstance(posting.get("title"), str) else ""
     company = _employer_name(posting.get("hiringOrganization"))
