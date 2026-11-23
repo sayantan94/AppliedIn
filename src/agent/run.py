@@ -26,6 +26,7 @@ from core.logging import get_logger
 from core.models import Status
 from core.stores import make_stores
 from tools import submit_hold
+from tools.jd import _unreadable
 
 from .graph import root_agent
 
@@ -1221,21 +1222,6 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
     log.info("browser prefetch filled %d and closed %d of %d posting(s)",
              filled, closed, len(need))
     return filled
-
-
-_JD_FLOOR = 80
-_JD_NOISE = ("something went wrong", "page not found", "access denied", "enable javascript")
-
-
-def _unreadable(jd_text: str) -> bool:
-    """Too little to tailor from: a transient read, never a terminal JD.
-
-    The floor is intentionally low so legitimate short postings still pass.
-    """
-    t = " ".join((jd_text or "").lower().split())
-    if len(t) < _JD_FLOOR:
-        return True
-    return any(n in t for n in _JD_NOISE) and len(t) < 400
 
 
 # Phrases that mean the employer will NOT sponsor a work visa. You require
