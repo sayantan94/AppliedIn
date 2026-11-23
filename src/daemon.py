@@ -839,7 +839,12 @@ def _instance_owner():
     """
     from core.config import get_settings
 
-    path = Path(get_settings().local_dir) / "daemon.lock"
+    settings = get_settings()
+    if settings.mode != "local":
+        # Cloud never owns a local daemon lock or changes its local state.
+        yield
+        return
+    path = Path(settings.local_dir) / "daemon.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         try:

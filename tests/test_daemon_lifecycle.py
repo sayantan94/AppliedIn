@@ -184,7 +184,7 @@ def test_two_same_instance_daemons_cannot_enter_recovery_concurrently(tmp_path, 
     # The second owner is refused before touching the store/recovery/worker
     # boundary. A dead owner releases its kernel lock without queue mutations.
     monkeypatch.setattr("core.config.get_settings",
-                        lambda: SimpleNamespace(local_dir=str(tmp_path / "synthetic")))
+                        lambda: SimpleNamespace(mode="local", local_dir=str(tmp_path / "synthetic")))
     with daemon._instance_owner():
         with pytest.raises(SystemExit, match="already running"):
             with daemon._instance_owner():
@@ -210,3 +210,11 @@ def test_stopped_worker_loops_do_not_begin_next_cycle(loop_name, monkeypatch):
         from core import flags
         monkeypatch.setattr(flags, "beat_workers", lambda *a: pytest.fail("heartbeat after stop"))
     getattr(daemon, loop_name)(stop_event)
+
+
+def test_cloud_mode_does_not_acquire_a_local_daemon_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.config.get_settings",
+                        lambda: SimpleNamespace(mode="cloud", local_dir=str(tmp_path / "synthetic")))
+    with daemon._instance_owner():
+        pass
+    assert not (tmp_path / "synthetic").exists()
