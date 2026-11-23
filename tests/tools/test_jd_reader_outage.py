@@ -1135,7 +1135,7 @@ def test_actual_skip_then_retry_remains_review_only(
     assert not tracking.r.exists(f"lock:job:{pk}")
 
 
-def test_actual_reopen_refuses_exhaustion_after_skip(monkeypatch):
+def test_actual_reopen_retries_exhaustion_after_skip_without_scoring(monkeypatch):
     from fastapi import BackgroundTasks
     from core.apply_queue import ApplyQueue
     import server
@@ -1809,8 +1809,13 @@ def test_apply_role_transient_response_has_no_placeholder_then_valid_reentry(mon
         "<html><body>" + removed_text + "</body></html>"], source_required=True),
         "source_kind": "http_html", "source_url": url}
     other = {**verified, "source_url": "https://different.example/jobs/2"}
+    short_text = "The posting is loading."
+    short = {**pg.analyze(short_text, html_variants=[
+        "<html><body><p>" + short_text + "</p></body></html>"], source_required=True),
+        "source_kind": "http_html", "source_url": url}
     responses = [
-        jd.PostingReadUnavailable("synthetic read refused"), removed, other, verified]
+        jd.PostingReadUnavailable("synthetic read refused"),
+        removed, other, short, verified]
     seen = []
     def read(address, *args, **kw):
         seen.append(address)
@@ -1820,7 +1825,7 @@ def test_apply_role_transient_response_has_no_placeholder_then_valid_reentry(mon
         return answer
     monkeypatch.setattr(jd, "fetch_jd_meta", read)
     for expected in ("posting_reader_unavailable", "posting_removed",
-                     "posting_source_unverified"):
+                     "posting_source_unverified", "posting_reader_unavailable"):
         tasks = BackgroundTasks()
         result = callback({"url": url}, tasks)
         assert result["ok"] is False and result["error"] == expected
@@ -1835,4 +1840,4 @@ def test_apply_role_transient_response_has_no_placeholder_then_valid_reentry(mon
     assert success["status"] == "running"
     assert len(tracking.all()) == 1
     assert len(tasks.tasks) == 1  # Not executed: no real preparation
-    assert seen == [url] * 4
+    assert seen == [url] * 5
