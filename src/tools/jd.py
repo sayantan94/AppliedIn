@@ -535,12 +535,8 @@ def _posting_page_metadata(html: str, url: str) -> dict:
     json_candidate = candidate.get("title") if isinstance(candidate.get("title"), str) else ""
     normalized_heading = re.sub(r"[\W_]+", " ", heading.casefold()).strip()
     normalized_json = re.sub(r"[\W_]+", " ", json_candidate.casefold()).strip()
-    same_role = bool(normalized_heading and normalized_json
-                     and (normalized_json == normalized_heading
-                          or (normalized_json.endswith(" " + normalized_heading)
-                              and all(word in {"senior", "junior", "staff", "principal",
-                                               "lead", "sr", "jr"}
-                                      for word in normalized_json[:-len(normalized_heading)].split()))))
+    # Seniority is part of the identity: a related job is not the same posting.
+    same_role = bool(normalized_heading and normalized_json == normalized_heading)
     selected = matching if matching else ([candidate] if same_role else [])
     posting = selected[0] if len(selected) == 1 else {}
     json_title = posting.get("title") if isinstance(posting.get("title"), str) else ""
