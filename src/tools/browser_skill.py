@@ -35,6 +35,8 @@ class Unavailable(RuntimeError):
     reason: str | None = None
     # The bsk verb that raised it, set where the argv is known (`command`, `_sync`).
     verb: str = ""
+    # Set only by the adapter after a validated, effect-free posting evaluate.
+    page_read_race = False
 
 
 # Only these two-token bsk verbs name a subcommand. Any other second token is an
@@ -163,6 +165,14 @@ def _document_changed_read(problem: Unavailable) -> bool:
     return (problem.code == "permission_denied"
             and problem.reason == _DOCUMENT_CHANGED
             and problem.identifiers == {"permission_denied", _DOCUMENT_CHANGED}
+            and problem.effect_state == "none")
+
+
+def _posting_changed_read(problem: Unavailable) -> bool:
+    """Exact page-scoped, no-effect refusal; never classify by CLI prose."""
+    return (problem.code == "permission_denied"
+            and problem.reason in {"observation_changed", "document_changed"}
+            and problem.identifiers == {"permission_denied", problem.reason}
             and problem.effect_state == "none")
 
 
@@ -490,6 +500,8 @@ class Session:
         succeeded never fails because its own sync was refused: the next action
         syncs instead."""
         wants = bool(args) and args[0] not in _NO_CONTEXT
+        # A retry may not cross a session/owner change during its fresh sync.
+        original_id, original_owner = self.id, self.owner
         async with self._lock:
             for attempt in (0, 1):
                 extra = ()
@@ -512,6 +524,13 @@ class Session:
                 try:
                     result = await command(*args, *extra, "--session", self.id, **kwargs)
                 except Unavailable as exc:
+                    posting_race = (self.kind in {"jd", "jd_sweep"}
+                                    and args == ("evaluate", PAGE)
+                                    and _posting_changed_read(exc)
+                                    and self.id == original_id
+                                    and self.owner is original_owner
+                                    and (original_owner is None
+                                         or original_owner is asyncio.current_task()))
                     if not wants or attempt or not (
                             _sync_required(exc)
                             or (self.kind == "crawl"
@@ -520,9 +539,18 @@ class Session:
                                 and exc.identifiers == {"permission_denied", "observation_changed"}
                                 and exc.effect_state == "none")
                             or (self.kind == "apply" and self._fixed_application_read(args)
-                                and _document_changed_read(exc))):
+                                and _document_changed_read(exc))
+                            or posting_race):
+                        if posting_race:
+                            # The public run_task boundary receives a trusted
+                            # classification, even on a second refusal.
+                            exc.page_read_race = True
                         raise
                     await self.sync_context()
+                    if (self.id != original_id or self.owner is not original_owner
+                            or (original_owner is not None
+                                and original_owner is not asyncio.current_task())):
+                        raise Unavailable("BrowserSkill operation unavailable: session ownership changed")
                     continue
                 if wants and args[0] in _NAVIGATES:
                     # The page changed; the tab is bound whether or not the sync lands.
@@ -846,7 +874,16 @@ async def run_task(task: str, *, report_key: str, model: str = "", timeout_s: in
         async with asyncio.timeout(timeout_s):
             async with Session(kind or "jd") as session:
                 if report_key == "postings":
-                    results = [await _read(session, url) for url in urls]
+                    results = []
+                    for url in urls:
+                        try:
+                            results.append(await _read(session, url))
+                        except Unavailable as exc:
+                            if not exc.page_read_race:
+                                raise
+                            # No effect and unchanged session ownership: retain
+                            # earlier members and keep reading independent URLs.
+                            log.info("BrowserSkill posting observation race; member deferred")
                     return {"postings": results}, ""
                 if report_key == "description":
                     return await _read(session, urls[0]), ""
@@ -856,6 +893,9 @@ async def run_task(task: str, *, report_key: str, model: str = "", timeout_s: in
     except asyncio.CancelledError:
         return {}, "BrowserSkill stopped: browser operation cancelled"
     except (Unavailable, TimeoutError, ValueError, OSError) as exc:
+        if isinstance(exc, Unavailable) and exc.page_read_race:
+            # Fixed sanitized category, not an arbitrary CLI error string.
+            return {}, "BrowserSkill posting observation changed; retry this posting"
         return {}, str(exc) or "BrowserSkill operation unavailable: timed out"
 
 
