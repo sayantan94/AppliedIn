@@ -408,7 +408,7 @@ def _valid_reader_url(value: object) -> bool:
 
 
 _BANNER_HINT = re.compile(
-    r"(?:^|[\\s_-])(?:hero|banner|masthead|site-header)(?:$|[\\s_-])", re.I,
+    r"(?:^|[\s_-])(?:hero|banner|masthead|site-header)(?:$|[\s_-])", re.I,
 )
 _HTML_VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
