@@ -563,7 +563,7 @@ def _manual_role_identity(url: str) -> dict | None:
         personio = re.fullmatch(r"([a-z0-9_-]+)\.jobs\.personio\.(?:de|com)", host)
         if workday:
             ats, tenant = "workday", workday[1]
-            if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+            if len(parts) in (4, 5) and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
                 parts = parts[1:]
             if len(parts) not in (3, 4) or parts[1] != "job":
                 return None
