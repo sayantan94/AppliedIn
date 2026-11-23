@@ -181,13 +181,23 @@ def test_unbound_related_role_cannot_override_marked_posting_heading(monkeypatch
     assert jd.matched_source_witness({"jd_url": url}, meta)
 
 
-def test_unbound_same_role_with_seniority_can_supply_metadata(monkeypatch):
+def test_unbound_exact_role_can_supply_metadata(monkeypatch):
     """A corroborated URL-less JobPosting still supplies its employer and title."""
     url = "https://jobs.example.com.vn/role/1"
     meta = read_page(monkeypatch, url, page(
-        url, company="Example Co", title="Senior Platform Engineer", unbound=True))
-    assert meta["title"] == "Senior Platform Engineer"
+        url, company="Example Co", title="Platform Engineer", unbound=True))
+    assert meta["title"] == "Platform Engineer"
     assert meta["company"] == "Example Co"
+
+
+def test_unbound_seniority_mismatch_cannot_supply_employer(monkeypatch):
+    """A recommendation for a related level is not independent role identity."""
+    url = "https://jobs.example.com.vn/role/1"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Different Fiction", title="Senior Platform Engineer",
+        unbound=True))
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
 
 
 def test_provider_og_site_brand_is_not_employer_identity(monkeypatch):
