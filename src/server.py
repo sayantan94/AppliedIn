@@ -624,9 +624,9 @@ def _manual_role_identity(url: str) -> dict | None:
                                   label, re.I) is not None)
     if ats != "custom" and generic_label:
         return None
-    # ATS provider-host tenants are not employer proof. Keep posting identity,
-    # then allow the page's evidenced employer or refuse before insert.
-    company = ("" if provider_host or generic_label else
+    # Known ATS paths expose an independent employer-bearing tenant; unknown
+    # shared-provider hosts do not. Keep posting identity for the page read.
+    company = ("" if ats == "custom" and (provider_host or generic_label) else
                " ".join(p for p in re.split(r"[-_]+", label) if p).title())
     return {"ats": ats, "company": company, "job_id": identity_id,
             "linkedin_id": linkedin_id}
