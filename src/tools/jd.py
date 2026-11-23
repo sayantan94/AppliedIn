@@ -884,7 +884,7 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
     # An actual HTTP 200 at the original posting route can independently
     # confirm removal. Do not invoke the browser for this short terminal notice:
     # a browser outage must not turn proven removal into perpetual deferral.
-    if (_GONE_RX.search(hit["text"][:400])
+    if (is_removal_notice(hit["text"])
             and matched_source_witness({"jd_url": url}, hit)):
         return hit
     if len(hit["text"]) < 400:
@@ -1014,7 +1014,7 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
             if not isinstance(observed_url, str) or not _same_posting_url(u, observed_url):
                 # A reported requested URL does not witness where the browser landed.
                 continue
-            if entry.get("gone") is True or _GONE_RX.search(text[:400]):
+            if entry.get("gone") is True or is_removal_notice(text):
                 gone.add(u)
                 continue
             if len(text) < 400:
@@ -1026,6 +1026,27 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
 
 _GONE_RX = re.compile(r"no longer available|position[- ]not[- ]available|has been removed|"
                       r"job (?:posting )?(?:is )?closed", re.I)
+
+# A dedicated removal notice names THIS posting as unavailable and is not a
+# full job description. A phrase about another role or option ("The previous
+# position is no longer available", "Remote work is no longer available") on
+# an otherwise open page is not a notice.
+_REMOVAL_NOTICE_RX = re.compile(
+    r"\b(?:this|the)\s+(?:job|posting|position|role|vacancy|listing|opening|page)"
+    r"(?:\s+posting)?\b[^.\n]{0,40}?"
+    r"\b(?:no longer available|has been removed|(?:is|has been) closed|not available)"
+    r"|position[- ]not[- ]available|job (?:posting )?(?:is )?closed", re.I)
+_REMOVAL_NOTICE_MAX_CHARS = 1200
+
+
+def is_removal_notice(text: object) -> bool:
+    """True only for a short page whose opening states this posting is gone."""
+    if not isinstance(text, str):
+        return False
+    body = text.strip()
+    if len(body) >= _REMOVAL_NOTICE_MAX_CHARS:
+        return False
+    return bool(_REMOVAL_NOTICE_RX.search(body[:400]))
 
 
 def run_task(*args, **kwargs):

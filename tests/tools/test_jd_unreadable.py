@@ -632,6 +632,56 @@ def test_http_removal_requires_matched_original_source_without_browser(
     assert visits == ([original, other] if redirected else [original])
 
 
+@pytest.mark.parametrize("text", [
+    "This job is no longer available.",
+    "Sorry, this posting has been removed.",
+    "The position is no longer available. Browse other openings.",
+    "Job posting closed",
+])
+def test_dedicated_removal_notice_is_recognized(text):
+    from tools import jd
+
+    assert jd.is_removal_notice(text)
+
+
+@pytest.mark.parametrize("text", [
+    "The previous position is no longer available. " + "Build and run APIs. " * 40,
+    "Remote work is no longer available for this team. " + "Own the platform. " * 40,
+    "The previous position is no longer available.",
+    "Remote work is no longer available.",
+    "",
+    None,
+])
+def test_phrase_about_another_role_or_option_is_not_a_removal_notice(text):
+    from tools import jd
+
+    assert not jd.is_removal_notice(text)
+
+
+def test_open_posting_with_unavailable_phrase_about_another_role_is_read(
+        monkeypatch):
+    """An exact-URL 200 page that is a real open role stays readable."""
+    from tools import jd, posting_guard as pg
+
+    original = "https://example.test/jobs/123"
+    body = ("The previous position is no longer available. Remote work is no "
+            "longer available. Senior Backend Engineer: you will design and "
+            "operate payment APIs, own on-call for them, and mentor engineers. "
+            * 6)
+    page = "<html><body><p>" + body + "</p></body></html>"
+
+    monkeypatch.setattr(httpx, "Client", _patched(
+        lambda request: httpx.Response(200, text=page)))
+    monkeypatch.setattr(jd, "_from_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_new_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_chrome", lambda *args: None)
+
+    meta = jd.fetch_jd_meta(original)
+    assert "Senior Backend Engineer" in meta["text"]
+    assert pg.valid(meta["text"], meta["posting_guard"])
+    assert not jd.is_removal_notice(meta["text"])
+
+
 def test_browser_report_cannot_claim_a_different_observed_route(
         monkeypatch, _no_browser):
     from tools import browser_runtime, jd

@@ -2227,7 +2227,7 @@ def create_app() -> FastAPI:
                 or not pg.valid(meta.get("text"), meta.get("posting_guard"))
                 or not jd.matched_source_witness({"jd_url": read_url}, meta)):
             return {"ok": False, "error": "posting_source_unverified"}
-        if jd._GONE_RX.search((meta.get("text") or "")[:400]):
+        if jd.is_removal_notice(meta.get("text")):
             # A verified removal notice is not a verified job description.
             return {"ok": False, "error": "posting_removed"}
         if jd._unreadable(meta["text"]):

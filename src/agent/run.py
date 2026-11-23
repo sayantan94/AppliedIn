@@ -628,7 +628,7 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
                  and pg.valid(jd_meta["text"], jd_meta.get("posting_guard")))
         # Only independently source-matched removal can finish a reader claim.
         # Cached text, a browser echo and foreign HTTP redirects do not qualify.
-        removed = bool(valid and _jd._GONE_RX.search(jd_meta["text"][:400])
+        removed = bool(valid and _jd.is_removal_notice(jd_meta["text"])
                        and _jd.matched_source_witness(row, jd_meta))
         if not valid or (not removed and _unreadable(jd_meta["text"])):
             raise PostingReadUnavailable("Posting content is incomplete or unreadable")
@@ -905,7 +905,7 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
                 or not pg.valid(remote["text"], remote.get("posting_guard"))
                 or not _jd.matched_source_witness(row, remote)):
             raise _jd.PostingReadUnavailable("No complete matching posting source")
-        if approval or _jd._GONE_RX.search(remote["text"][:400]):
+        if approval or _jd.is_removal_notice(remote["text"]):
             # A verified removal notice is not replacement JD text and must
             # remain recognizable before unreadable-content classification.
             return remote
@@ -962,7 +962,7 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
         # canonical + JobPosting identifier, never projected into persisted jd_url.
         remote = {**remote, "reader_effective_url": url}
     source_witness = _jd.matched_source_witness(row, remote)
-    if source_witness and _jd._GONE_RX.search(rtext[:400]):
+    if source_witness and _jd.is_removal_notice(rtext):
         # Keep the independent current source metadata for conditional JOB_GONE.
         return remote
     # A deferred or legacy posting must NOT settle from browser-only text or
