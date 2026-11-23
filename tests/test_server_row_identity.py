@@ -113,6 +113,7 @@ class FakeReader:
     def __init__(self):
         self.calls = []
         self.title = "Synthetic Platform Engineer"
+        self.company = ""
         self.fail = False
         self.unverified = False
 
@@ -124,7 +125,7 @@ class FakeReader:
         inspected = pg.analyze(JD_TEXT, html_variants=[html],
                                source_required=True,
                                source_complete=not self.unverified)
-        return {**inspected, "title": self.title,
+        return {**inspected, "title": self.title, "company": self.company,
                 "source_kind": "ats_html", "source_url": url,
                 "source_identity": {}}
 
@@ -726,3 +727,128 @@ def test_tailor_completed_repeat_refuses_late_hold_before_restage(env):
     assert env.tracking.rows[pk]["status"] == "tailored"
     assert env.tracking.rows[pk]["submit_hold"] is True
     assert env.runs == [pk]
+
+
+@pytest.mark.parametrize("url", [
+    "https://jobs.example.com.vn/role/1",
+    "https://example.breezy.hr/p/role",
+    "https://example.homerun.co/role",
+    "https://careers.example-careers.com/role/1",
+    "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1",
+])
+def test_apply_role_persists_source_employer_and_title_not_host(env, url):
+    env.reader.company = "Example Co"
+    env.reader.title = "Platform Engineer"
+    result = _apply(env, url, title="Untrusted Body Title")
+    assert result.json()["ok"] is True
+    pk = result.json()["pk"]
+    assert len(env.tracking.rows) == 1
+    row = env.tracking.rows[pk]
+    assert row["company"] == "Example Co"
+    assert row["title"] == "Platform Engineer"
+    assert row["pk"] == make_pk(row["company"], row["job_id"])
+    assert row["posting_guard"]["source_verified"] is True
+    assert env.tracking.guard_calls == [(pk, True)]
+    assert env.runs == [pk]
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.breezy.hr/p/role",
+    "https://example.homerun.co/role",
+    "https://careers.example-careers.com/role/1",
+])
+def test_provider_or_careers_host_without_employer_has_no_phantom(env, url):
+    result = _apply(env, url)
+    assert result.json() == {"ok": False, "error": "employer_identity_unverified"}
+    assert env.reader.calls == [url]
+    assert not env.tracking.rows
+    assert not env.runs
+
+
+def test_multisuffix_fallback_never_uses_public_suffix_as_company(env):
+    result = _apply(env, "https://jobs.example.com.vn/role/1")
+    assert result.json()["ok"] is True
+    row = env.tracking.rows[result.json()["pk"]]
+    assert row["company"] == "Example"
+    assert row["company"] != "Com"
+
+
+def test_source_employer_dedupe_reuses_verified_posting_and_protected_fields(env):
+    url = "https://example.breezy.hr/p/role"
+    env.reader.company = "Example Co"
+    initial = _apply(env, url)
+    pk = initial.json()["pk"]
+    row = env.tracking.rows[pk]
+    row.update(attempts=3, approved=True, resume_s3_key="synthetic-artifact",
+               submission_attempts=1, submit_review_evidence="synthetic",
+               display_company="Preserved Display")
+    protected = {k: row[k] for k in ("attempts", "approved", "resume_s3_key",
+                                     "submission_attempts", "submit_review_evidence",
+                                     "display_company", "job_id", "jd_url", "company")}
+    env.reader.title = "Principal Platform Engineer"
+    repeated = _apply(env, url + "/?utm_source=synthetic")
+    assert repeated.json()["ok"] is True
+    assert repeated.json()["status"] == "existing"
+    assert repeated.json()["pk"] == pk
+    assert len(env.tracking.rows) == 1
+    assert env.tracking.rows[pk]["title"] == env.reader.title
+    assert {k: row[k] for k in protected} == protected
+    assert env.runs == [pk]
+    assert env.tracking.status_calls == []
+    assert env.reader.calls == [url, url]
+
+
+def test_existing_source_employer_mismatch_refuses_mutation(env):
+    url = "https://jobs.example.com.vn/role/1"
+    env.reader.company = "Example Co"
+    initial = _apply(env, url)
+    pk = initial.json()["pk"]
+    row = env.tracking.rows[pk]
+    row.update(status="tailored", attempts=2, approved=True,
+               confirmation_id="synthetic-receipt")
+    saved = deepcopy(row)
+    env.reader.company = "Other Fiction"
+    response = _apply(env, url)
+    assert response.json() == {"ok": False, "error": "employer_identity_conflict"}
+    assert env.tracking.rows[pk] == saved
+    assert len(env.tracking.rows) == 1
+    assert env.runs == [pk]
+
+
+def test_older_tenant_key_is_not_duplicated_when_new_page_company_differs(env):
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+    original = _apply(env, url)
+    assert original.json()["ok"] is True
+    pk = original.json()["pk"]
+    env.reader.company = "Different Fiction"
+    before = deepcopy(env.tracking.rows)
+    result = _apply(env, url + "/?utm_source=synthetic")
+    assert result.json() == {"ok": False, "error": "employer_identity_conflict"}
+    assert env.tracking.rows == before
+    assert len(env.tracking.rows) == 1
+    assert pk in env.tracking.rows
+
+
+def test_new_role_with_no_page_title_never_uses_untrusted_request_title(env):
+    env.reader.title = ""
+    result = _apply(env, "https://jobs.example.com.vn/role/1",
+                    title="Body Supplied Fiction")
+    assert result.json() == {"ok": False, "error": "posting_title_invalid"}
+    assert not env.tracking.rows
+    assert not env.runs
+
+
+def test_short_workday_identity_is_stable_across_decorations(env):
+    url = "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1"
+    identity = server._manual_role_identity(url)
+    assert identity["ats"] == "workday"
+    assert identity["job_id"] == "workday:example-co:example:ROLE-1"
+    assert server._manual_role_identity(url + "/?utm_source=fake")["job_id"] == identity["job_id"]
+    first = _apply(env, url)
+    second = _apply(env, url + "/?utm_source=fake")
+    assert first.json()["ok"] and second.json()["ok"]
+    assert first.json()["pk"] == second.json()["pk"]
+    assert len(env.tracking.rows) == 1
+    for malformed in (url.replace("/job/ROLE-1", "/job/../../ROLE-1"),
+                      url.replace("/job/ROLE-1", "/jobs/ROLE-1")):
+        assert server._manual_role_identity(malformed) is None
