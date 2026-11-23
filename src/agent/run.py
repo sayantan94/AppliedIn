@@ -699,6 +699,10 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
             "rescore_requested": False,
             "jd_read_attempts": 0,
             "jd_read_retry_at": None, "jd_read_error": "",
+            # Legacy reader failure markers clear only after this fresh,
+            # guarded, readable read has committed its new source metadata.
+            **({"fail_kind": "", "fail_reason": "", "error": ""}
+               if row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"} else {}),
             # The refusal itself is settled only once the new generation is bound.
             **(_REFUSAL_MARKER_CLEARED if guard_recovery is not None else {}),
         })
