@@ -52,6 +52,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import cast
 
 from core.config import get_settings
 from core.logging import get_logger
@@ -238,7 +239,7 @@ def _unit_owner() -> str:
         return "absent"
     unit = _service_unit()
     if not unit.exists():
-        return "absent"
+        return "foreign" if _systemctl("cat", _SERVICE).returncode == 0 else "absent"
     try:
         return "ours" if unit.read_text() == _render_unit() else "foreign"
     except (OSError, ValueError):
@@ -444,12 +445,13 @@ def start(no_discover: bool = False) -> dict:
             "discovery": "off" if no_discover else "on", "log": str(logfile)}
 
 
-def _signal_verified(pid: int, original: str, sig: signal.Signals) -> bool:
-    # Check identity again immediately before both TERM and the failure fallback.
+def _signal_verified(pid: int, original: str, pidfd: int,
+                     sig: signal.Signals) -> bool:
+    # The pidfd keeps a reuse after this check from redirecting the signal.
     if _daemon_identity(pid) != original:
         return False
     try:
-        os.kill(pid, sig)
+        signal.pidfd_send_signal(pidfd, sig)
         return True
     except ProcessLookupError:
         return False
@@ -475,25 +477,39 @@ def stop() -> dict:
     original = _daemon_identity(pid)
     if original is None:
         return {"status": "refused", "error": "daemon PID identity could not be verified"}
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if not callable(pidfd_open) or not callable(pidfd_send_signal):
+        return {"status": "stop failed", "error": "PID-bound signaling is unavailable"}
     try:
-        signalled = _signal_verified(pid, original, signal.SIGTERM)
+        pidfd = cast(int, pidfd_open(pid, 0))
     except OSError as exc:
         return {"status": "stop failed", "error": type(exc).__name__}
-    if not signalled:
-        return {"status": "refused", "error": "daemon PID changed before SIGTERM"}
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        if _daemon_identity(pid) != original:
-            _clear_pid_file(pid)
-            return {"status": "stopped", "pid": pid}
-        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     try:
-        forced = _signal_verified(pid, original, signal.SIGKILL)
-    except OSError:
-        forced = False
-    _clear_pid_file(pid)
-    return {"status": "timeout", "pid": pid, "forced_pid_only": forced,
-            "error": "SIGTERM-only deadline failed; PID-only SIGKILL attempted as cleanup"}
+        try:
+            signalled = _signal_verified(pid, original, pidfd, signal.SIGTERM)
+        except OSError as exc:
+            return {"status": "stop failed", "error": type(exc).__name__}
+        if not signalled:
+            return {"status": "refused", "error": "daemon PID changed before SIGTERM"}
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if _daemon_identity(pid) != original:
+                _clear_pid_file(pid)
+                return {"status": "stopped", "pid": pid}
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        try:
+            forced = _signal_verified(pid, original, pidfd, signal.SIGKILL)
+        except OSError:
+            forced = False
+        _clear_pid_file(pid)
+        return {"status": "timeout", "pid": pid, "forced_pid_only": forced,
+                "error": "SIGTERM-only deadline failed; PID-bound SIGKILL attempted as cleanup"}
+    finally:
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
 
 
 def status() -> dict:

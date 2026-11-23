@@ -48,7 +48,8 @@ def test_install_enable_is_idempotent_without_rewriting_existing_unit(world, mon
 
     def systemctl(*args):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "0\n", "")
+        code = 1 if args == ("cat", cli._SERVICE) else 0
+        return subprocess.CompletedProcess(args, code, "0\n", "")
 
     monkeypatch.setattr(cli, "_systemctl", systemctl)
     monkeypatch.setattr(cli, "_live_pid", lambda: None)
@@ -60,9 +61,25 @@ def test_install_enable_is_idempotent_without_rewriting_existing_unit(world, mon
     assert first["status"] == second["status"] == "enabled (startup unverified)"
     assert first["pid"] is None and "no verified daemon MainPID" in first["hint"]
     assert unit.read_text() == saved and unit.stat().st_mtime_ns == mtime
+    assert calls.count(("cat", cli._SERVICE)) == 1
     assert calls.count(("daemon-reload",)) == 2
     assert calls.count(("enable", "--now", "appliedin.service")) == 2
     assert cli._unit_owner() == "ours"
+
+
+def test_systemd_unit_outside_xdg_path_is_not_shadowed(world, monkeypatch):
+    calls = []
+
+    def systemctl(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "[Service]\nExecStart=/foreign/daemon\n", "")
+
+    monkeypatch.setattr(cli, "_systemctl", systemctl)
+    result = cli.install_service()
+
+    assert result["status"] == "refused"
+    assert calls == [("cat", cli._SERVICE)]
+    assert not cli._service_unit().exists()
 
 
 def test_missing_setup_and_foreign_unit_fail_without_systemd_side_effect(world, monkeypatch):
@@ -124,10 +141,15 @@ def test_install_enables_without_competing_with_manual_daemon(world, monkeypatch
     calls = []
     monkeypatch.setattr(cli, "_live_pid", lambda: 500)
     monkeypatch.setattr(cli, "_service_pid", lambda: None)
-    monkeypatch.setattr(cli, "_systemctl",
-                        lambda *a: (calls.append(a) or
-                                    subprocess.CompletedProcess(a, 0, "", "")))
+
+    def systemctl(*args):
+        calls.append(args)
+        code = 1 if args == ("cat", cli._SERVICE) else 0
+        return subprocess.CompletedProcess(args, code, "", "")
+
+    monkeypatch.setattr(cli, "_systemctl", systemctl)
     result = cli.install_service()
     assert result["status"] == "enabled (existing manual daemon)" and result["pid"] == 500
-    assert calls == [("daemon-reload",), ("enable", "appliedin.service")]
+    assert calls == [("cat", "appliedin.service"), ("daemon-reload",),
+                     ("enable", "appliedin.service")]
     assert cli._service_unit().read_text() == cli._render_unit()

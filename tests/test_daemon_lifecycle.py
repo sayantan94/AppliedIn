@@ -12,6 +12,28 @@ import cli
 import daemon
 
 
+def _fake_pidfd(monkeypatch, signals, identity, *, on_open=None, on_signal=None):
+    bindings = {}
+    closed = []
+
+    def open_pidfd(pid, flags=0):
+        assert pid > 1 and flags == 0
+        bindings[73] = identity(pid)
+        if on_open:
+            on_open()
+        return 73
+
+    def send(pidfd, sig):
+        if on_signal:
+            on_signal(sig)
+        signals.append((bindings[pidfd], sig))
+
+    monkeypatch.setattr(cli.os, "pidfd_open", open_pidfd, raising=False)
+    monkeypatch.setattr(cli.signal, "pidfd_send_signal", send, raising=False)
+    monkeypatch.setattr(cli.os, "close", closed.append)
+    return closed
+
+
 class SelfExit(BaseException):
     pass
 
@@ -99,17 +121,75 @@ def test_stop_sigterm_only_succeeds_when_original_pid_disappears(tmp_path, monke
                         lambda pid: "start-tick" if alive["value"] else None)
     monkeypatch.setattr(cli, "_pid_file", lambda: tmp_path / "daemon.pid")
     (tmp_path / "daemon.pid").write_text("412")
+    closed = _fake_pidfd(
+        monkeypatch, signals, lambda _pid: "start-tick",
+        on_signal=lambda sig: alive.update(value=False)
+        if sig == signal.SIGTERM else None)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_a: pytest.fail("PID-bound stop must not call os.kill"))
 
-    def fake_kill(pid, sig):
-        signals.append((pid, sig))
-        if sig == signal.SIGTERM:
-            alive["value"] = False
-
-    monkeypatch.setattr(cli.os, "kill", fake_kill)
     result = cli.stop()
     assert result == {"status": "stopped", "pid": 412}
-    assert signals == [(412, signal.SIGTERM)]
+    assert signals == [("start-tick", signal.SIGTERM)]
+    assert closed == [73]
     assert not (tmp_path / "daemon.pid").exists()
+
+
+def test_pidfd_pins_original_process_across_pid_reuse_at_signal_time(tmp_path, monkeypatch):
+    state = {"identity": "original"}
+    signals = []
+    monkeypatch.setattr(cli, "_live_pid", lambda: 420)
+    monkeypatch.setattr(cli, "_daemon_identity", lambda _pid: state["identity"])
+    monkeypatch.setattr(cli, "_pid_file", lambda: tmp_path / "daemon.pid")
+    (tmp_path / "daemon.pid").write_text("420")
+
+    def reuse_between_check_and_send(sig):
+        if sig == signal.SIGTERM:
+            state["identity"] = "reused"
+
+    closed = _fake_pidfd(
+        monkeypatch, signals, lambda _pid: state["identity"],
+        on_signal=reuse_between_check_and_send)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_a: pytest.fail("PID-bound stop must not call os.kill"))
+
+    result = cli.stop()
+    assert result == {"status": "stopped", "pid": 420}
+    # The descriptor was opened for the original process; reuse before the
+    # syscall cannot redirect SIGTERM to the new process with the same number.
+    assert signals == [("original", signal.SIGTERM)]
+    assert closed == [73]
+
+
+def test_pid_change_after_pidfd_open_is_refused_before_signal(tmp_path, monkeypatch):
+    state = {"identity": "original"}
+    signals = []
+    monkeypatch.setattr(cli, "_live_pid", lambda: 423)
+    monkeypatch.setattr(cli, "_daemon_identity", lambda _pid: state["identity"])
+    monkeypatch.setattr(cli, "_pid_file", lambda: tmp_path / "daemon.pid")
+    (tmp_path / "daemon.pid").write_text("423")
+
+    def reuse_after_open():
+        state["identity"] = "reused"
+
+    closed = _fake_pidfd(
+        monkeypatch, signals, lambda _pid: state["identity"], on_open=reuse_after_open)
+    result = cli.stop()
+    assert result == {"status": "refused", "error": "daemon PID changed before SIGTERM"}
+    assert signals == []
+    assert closed == [73]
+
+
+def test_stop_fails_closed_when_pidfd_signaling_is_unavailable(monkeypatch):
+    monkeypatch.setattr(cli, "_live_pid", lambda: 424)
+    monkeypatch.setattr(cli, "_daemon_identity", lambda _pid: "start-tick")
+    monkeypatch.delattr(cli.os, "pidfd_open", raising=False)
+    monkeypatch.delattr(cli.signal, "pidfd_send_signal", raising=False)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_a: pytest.fail("unsafe PID-only fallback is forbidden"))
+
+    assert cli.stop() == {
+        "status": "stop failed", "error": "PID-bound signaling is unavailable"}
 
 
 def test_blocked_daemon_escalates_only_same_pid_after_ten_second_failure(tmp_path, monkeypatch):
@@ -121,11 +201,14 @@ def test_blocked_daemon_escalates_only_same_pid_after_ten_second_failure(tmp_pat
     monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed["value"])
     monkeypatch.setattr(cli.time, "sleep",
                         lambda seconds: elapsed.update(value=elapsed["value"] + seconds))
-    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    closed = _fake_pidfd(monkeypatch, signals, lambda _pid: "start-tick")
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_a: pytest.fail("PID-bound stop must not call os.kill"))
     result = cli.stop()
     assert result["status"] == "timeout" and result["forced_pid_only"]
     assert elapsed["value"] >= 10.0
-    assert signals == [(418, signal.SIGTERM), (418, signal.SIGKILL)]
+    assert signals == [("start-tick", signal.SIGTERM), ("start-tick", signal.SIGKILL)]
+    assert closed == [73]
 
 
 def test_reused_pid_cannot_receive_fallback_sigkill(tmp_path, monkeypatch):
@@ -134,7 +217,9 @@ def test_reused_pid_cannot_receive_fallback_sigkill(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_live_pid", lambda: 425)
     monkeypatch.setattr(cli, "_daemon_identity", lambda pid: state["tick"])
     monkeypatch.setattr(cli, "_pid_file", lambda: tmp_path / "daemon.pid")
-    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    closed = _fake_pidfd(monkeypatch, signals, lambda _pid: state["tick"])
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_a: pytest.fail("PID-bound stop must not call os.kill"))
     monkeypatch.setattr(cli.time, "monotonic", lambda: state["now"])
 
     def advance(seconds):
@@ -143,7 +228,8 @@ def test_reused_pid_cannot_receive_fallback_sigkill(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.time, "sleep", advance)
     result = cli.stop()
     assert result["status"] == "stopped"
-    assert signals == [(425, signal.SIGTERM)]
+    assert signals == [("original", signal.SIGTERM)]
+    assert closed == [73]
 
 
 def test_unrelated_port_listener_cannot_be_stopped(monkeypatch):
