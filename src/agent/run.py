@@ -2757,7 +2757,11 @@ def _retry_live_gate(pk: str, row: dict, stores: Any, posting_retry: bool) -> di
                 "detail": "Cannot safely inspect an in-flight application; restore queue inspection."}
     if lease:
         return {"result": "already_running", "pk": pk, "reason": "apply_in_flight"}
-    if posting_retry:
+    # A legacy transient closed row may still have a pending application
+    # item despite its stale status. Re-reading it cannot outrun that item.
+    transient = (row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+                 or int(row.get("jd_read_attempts") or 0) >= 3)
+    if posting_retry or transient:
         pending = _pending_apply_item(pk, stores)
         if pending is not False:
             return _pending_refusal(pk, pending)
@@ -2850,7 +2854,9 @@ def _retry_job(pk: str, stores: Any = None, *,
             if lease is None or lease:
                 return {"result": "refused", "pk": pk, "reason": "apply_lease_unknown"
                         if lease is None else "apply_in_flight"}
-            if posting_retry:
+            transient = (row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+                         or int(row.get("jd_read_attempts") or 0) >= 3)
+            if posting_retry or transient:
                 pending = _pending_apply_item(pk, stores)
                 if pending is not False:
                     return _pending_refusal(pk, pending)
