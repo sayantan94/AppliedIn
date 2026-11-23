@@ -15,13 +15,15 @@ DETAIL = ("Build reliable integrations, implement independent source checks, "
 
 def page(url, *, company="", title="Platform Engineer", hero=False,
          og_title="", og_company="", jsonld=True, graph=False, foreign_url="",
-         unbound=False):
+         unbound=False, main_entity=None):
     fields = ""
     if jsonld:
         posting = {"@context": "https://schema.org", "@type": "JobPosting",
                    "title": title}
         if not unbound:
             posting["url"] = foreign_url or url
+        if main_entity is not None:
+            posting["mainEntityOfPage"] = main_entity
         if company:
             posting["hiringOrganization"] = {"@type": "Organization", "name": company}
         data = {"@graph": [{"@type": "Organization", "name": "Unrelated Inc"},
@@ -221,6 +223,7 @@ def test_unfamiliar_hero_h1_yields_to_plain_role_h2(monkeypatch):
     assert meta["title"] == "Platform Engineer"
     assert not meta.get("company")
 
+
 def test_url_less_same_title_foreign_employer_is_not_bound(monkeypatch):
     """source-01: same-title recommendation does not prove its different employer."""
     url = "https://jobs.example.com.vn/role/1"
@@ -273,3 +276,28 @@ def test_recruitee_exact_url_jsonld_employer_remains_usable(monkeypatch):
         og_company="Recruitee Hiring Platform"))
     assert meta["title"] == "Platform Engineer"
     assert meta["company"] == "Example Co"
+
+
+@pytest.mark.parametrize("main_entity", [
+    "https://jobs.example.com.vn/role/1",
+    {"@id": "https://jobs.example.com.vn/role/1"},
+])
+def test_unbound_jobposting_requires_independent_same_page_url(
+        monkeypatch, main_entity):
+    """A URL-less item's explicit mainEntityOfPage can bind the same role."""
+    url = "https://jobs.example.com.vn/role/1"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Example Co", title="Platform Engineer", unbound=True,
+        main_entity=main_entity))
+    assert meta["title"] == "Platform Engineer"
+    assert meta["company"] == "Example Co"
+
+
+def test_unbound_jobposting_foreign_main_entity_does_not_bind_employer(monkeypatch):
+    """An independent URL witness has to match this exact posting."""
+    url = "https://jobs.example.com.vn/role/1"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Different Fiction", title="Platform Engineer", unbound=True,
+        main_entity="https://jobs.example.com.vn/role/2"))
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
