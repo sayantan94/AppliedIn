@@ -613,11 +613,12 @@ def _manual_role_identity(url: str) -> dict | None:
                "greenhouse", "ashby", "ashbyhq", "lever", "linkedin",
                "workday", "workable", "personio", "smartrecruiters",
                "breezy", "homerun", "phenom", "eightfold", "jobvite",
-               "myworkdayjobs", "teamtailor"}
-    provider_host = (host.endswith((".breezy.hr", ".homerun.co",
+               "myworkdayjobs", "teamtailor", "recruitee"}
+    provider_host = (host.endswith((".breezy.hr", ".homerun.co", ".recruitee.com",
                                   ".myworkdayjobs.com", ".eightfold.ai",
                                   ".jobs.personio.com", ".jobs.personio.de"))
-                     or host in {"breezy.hr", "homerun.co", "apply.workable.com",
+                     or host in {"breezy.hr", "homerun.co", "recruitee.com",
+                                 "apply.workable.com",
                                  "jobs.smartrecruiters.com", "jobs.ashbyhq.com",
                                  "boards.greenhouse.io", "jobs.lever.co"})
     generic_label = (label.lower() in generic
