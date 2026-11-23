@@ -32,6 +32,9 @@ from .base import (
     canonical_repair_patch, direct_gate_patch, grants_replace_patch,
 )
 
+# Full-store walk paging (RedisTracking.all).
+_ALL_SCAN_COUNT = 1000
+_ALL_MGET_BATCH = 500
 
 class FileArtifactStore(AbstractArtifactStore):
     """S3 ArtifactStore analogue, backed by a directory tree."""
@@ -489,11 +492,16 @@ class RedisTracking(AbstractTracking):
         return [row for pk in pks if (row := self.get(pk))]
 
     def all(self) -> list[dict]:
+        # A full walk runs on many request paths at once (board list, apply-role
+        # duplicate checks, sweeps). One GET per row with SCAN's default page of
+        # 10 made each walk ~16k round trips over ~15k rows, enough to saturate
+        # the daemon's interpreter. Page keys widely and read them in batches.
         rows = []
-        for key in self.r.scan_iter("app:*"):
-            raw = self.r.get(key)
-            if raw:
-                rows.append(json.loads(raw))
+        keys = list(self.r.scan_iter("app:*", count=_ALL_SCAN_COUNT))
+        for start in range(0, len(keys), _ALL_MGET_BATCH):
+            for raw in self.r.mget(keys[start:start + _ALL_MGET_BATCH]):
+                if raw:
+                    rows.append(json.loads(raw))
         return rows
 
     def try_increment_daily_cap(self, date_str: str, cap: int) -> bool:
