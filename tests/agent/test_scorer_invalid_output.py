@@ -8,7 +8,9 @@ the real root/review SequentialAgent boundaries; no network or browser exists.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from google.adk.agents import BaseAgent
@@ -420,20 +422,30 @@ def test_non_json_then_valid_keeps_original_model_and_material(harness):
     [(_response('{"score":9,"reasoning":"interim"}', partial=True),
       _response("  ")), _response("  ")],
 ])
-def test_terminal_invalid_stops_both_graphs_without_artifacts(harness, responses):
+def test_terminal_invalid_defers_both_graphs_without_artifacts(harness, monkeypatch, responses):
     h = harness
+    now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(R, "_utc_now", lambda: now)
+    h.stores.tracking.row.update(rescore_requested=False, jd_read_attempts=1)
     h.fake.scripted = list(responses)
     result = _run(h)
-    assert result["result"] == "skipped"
+    row = h.stores.tracking.row
+    assert result["result"] == "deferred"
     assert result["reason"] == "scorer_invalid_output"
-    assert h.stores.tracking.row["status"] == Status.SKIPPED.value
-    assert h.stores.tracking.row["skip_reason"] == "scorer_invalid_output"
-    assert h.stores.tracking.row["match_score"] is None
-    assert h.stores.tracking.row["resume_s3_key"] == "resumes/historical.pdf"
+    # Not terminal: back in the ordinary FOUND pool with a FUTURE scorer deadline.
+    assert row["status"] == Status.FOUND.value
+    assert row.get("skip_reason") != "scorer_invalid_output"
+    assert datetime.fromisoformat(row["scorer_retry_at"]) == now + R._SCORER_RETRY_DELAY
+    assert row["match_score"] is None
+    assert row["resume_s3_key"] == "resumes/historical.pdf"
+    # The posting-reader budget and the manual re-score flag are untouched.
+    assert row["jd_read_attempts"] == 0  # reset at admission, never spent by the scorer
+    assert row.get("jd_read_retry_at") in (None, "")
+    assert row["rescore_requested"] is False
     assert h.next.observed == []
     assert h.saved == []  # no diagnostic, tailoring, approval, enqueue, submit
     assert len(h.fake.requests) == 2
-
+    assert not R._reader_eligible(row, now=now)
 
 @pytest.mark.parametrize("score,override,expected_next", [(2, False, []), (7, False, [7]),
                                                            (2, True, [2])])
@@ -586,3 +598,229 @@ def test_callback_mutation_failure_reasks_without_state_patch(harness, monkeypat
     assert len(h.fake.requests) == 2
     assert h.next.observed == [8]
     assert h.saved[0]["match_score"] == 8
+
+
+NOW = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+
+
+def _found(**extra):
+    return {"pk": "example-co#due", "company": "example-co", "status": "found", **extra}
+
+
+def test_deferred_scorer_retry_is_eligible_only_once_due():
+    due = (NOW + timedelta(minutes=30)).isoformat()
+    row = _found(scorer_retry_at=due)
+    assert not R._reader_eligible(row, now=NOW)
+    assert not R._reader_eligible(row, now=NOW + timedelta(minutes=29, seconds=59))
+    assert R._reader_eligible(row, now=NOW + timedelta(minutes=30))
+    # Independent of the posting-reader deadline and counter: three reader
+    # attempts is a saturated display counter, never a terminal budget (#403),
+    # so a due scorer retry stays eligible, and a not-yet-due one stays held.
+    assert R._reader_eligible(
+        _found(scorer_retry_at=due, jd_read_attempts=3), now=NOW + timedelta(hours=1))
+    assert not R._reader_eligible(
+        _found(scorer_retry_at=due, jd_read_attempts=3), now=NOW)
+    # A corrupt deadline never authorizes an immediate retry.
+    assert not R._reader_eligible(_found(scorer_retry_at="garbage"), now=NOW)
+    assert not R._reader_eligible(_found(scorer_retry_at="2026-11-23T12:00:00"), now=NOW)
+    assert R._reader_eligible(_found(), now=NOW)
+
+
+def test_daemon_sweep_follows_the_scorer_deadline(monkeypatch):
+    import daemon
+    from core import flags
+
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    monkeypatch.setattr(flags, "skipped_companies", lambda: set())
+    rows = [_found(pk="example-co#deferred",
+                   scorer_retry_at=(NOW + timedelta(minutes=30)).isoformat()),
+            {"pk": "example-co#skipped", "company": "example-co", "status": "skipped",
+             "gate_reason": "approval", "match_score": 7}]
+    queued = []
+    stores = SimpleNamespace(
+        tracking=SimpleNamespace(query_status=lambda status: [
+            r for r in rows if r["status"] == status.value]),
+        queue=SimpleNamespace(enqueue=lambda q, item: queued.append(item["pk"])),
+        tailor_queue="tailor")
+    daemon._sweep_found(stores)
+    assert queued == []                       # not due yet
+    clock["now"] = NOW + timedelta(minutes=31)
+    daemon._sweep_found(stores)
+    assert queued == ["example-co#deferred"]  # due: the normal lane claims it again
+    # A historical SKIPPED/approval row is never swept into a new run.
+    assert "example-co#skipped" not in queued
+
+
+def test_second_invalid_run_defers_again_then_valid_score_proceeds(harness, monkeypatch):
+    h = harness
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    first = h.stores.tracking.row["scorer_retry_at"]
+    # Not due: the run is refused without another generation.
+    assert _run(h)["result"] == "already_done"
+    assert len(h.fake.requests) == 2
+    # Due, but invalid again: a LATER deadline, still FOUND, no spin.
+    clock["now"] = NOW + timedelta(minutes=31)
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    second = h.stores.tracking.row["scorer_retry_at"]
+    assert datetime.fromisoformat(second) > datetime.fromisoformat(first)
+    assert h.stores.tracking.row["status"] == Status.FOUND.value
+    assert h.next.observed == []
+    # Due again with a valid score: ordinary score gate, deadline cleared.
+    clock["now"] = NOW + timedelta(hours=2)
+    h.fake.scripted = [_response('{"score":8,"reasoning":"fit"}')]
+    _run(h)
+    assert h.next.observed == [8]
+    assert h.stores.tracking.row["match_score"] == 8
+    assert not h.stores.tracking.row.get("scorer_retry_at")
+
+
+class _SaveTailor(BaseAgent):
+    """Fake tailor STAGE inside the real review graph. It runs after the real
+    scorer, requires the scorer's current validated score in session state, then
+    calls the REAL save_tailored_resume and reports its tool response as an event."""
+    seen: list = Field(default_factory=list)
+    tailored: str = ""
+
+    async def _run_async_impl(self, ctx):
+        from google.adk.events import Event
+
+        state = ctx.session.state
+        self.seen.append(MatchScore.model_validate(state.get("match_score")).score)
+        result = G.save_tailored_resume(self.tailored, SimpleNamespace(state=state))
+        yield Event(author=self.name, invocation_id=ctx.invocation_id,
+                    content=types.Content(role="user", parts=[types.Part(
+                        function_response=types.FunctionResponse(
+                            name="save_tailored_resume", response=result))]))
+
+
+@pytest.mark.parametrize("score", [7, 9])
+def test_floor_score_prepare_only_saves_a_current_verified_pdf(monkeypatch, score):
+    """AC3: score at/above the configured floor on the explicit review-only route
+    runs the real review graph (real scorer, offline model) into a tailor stage that
+    calls the real save, and settles `prepared` with a verified current PDF, with
+    approval metadata present and no application-queue effect."""
+    import json
+
+    import fakeredis
+
+    from core.apply_queue import ApplyQueue
+    from core.models import JobRecord
+    from core.storage.local import RedisTracking
+    from discovery.watchlist import Preferences
+
+    pk = "example-co#custom-1"
+    seed = "\\role{example-co}{2024}\n\\item One"
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    guarded = pg.analyze(JD)
+    assert tracking.put_new(JobRecord(
+        company="example-co", job_id="custom-1", ats="custom", title="Synthetic Engineer",
+        jd_url="https://jobs.example.com/custom/synthetic-role", jd_text=guarded["text"],
+        posting_guard=guarded["posting_guard"]))
+    row = tracking.get_current(pk)
+    row.update(gate_reason="approval")  # approval metadata must not block tailoring
+    tracking.r.set(f"app:{pk}", json.dumps(row))
+    store = {}
+
+    def put(category, name, body, kind):
+        key = category + "/" + name
+        store[key] = body
+        return key
+
+    stores = SimpleNamespace(tracking=tracking,
+                             artifacts=SimpleNamespace(put=put, get=lambda key: store[key]))
+    queued = []
+    monkeypatch.setattr(R, "_enqueue_apply",
+                        lambda *a, **kw: queued.append("enqueue") or {"result": "queued"})
+    monkeypatch.setattr(ApplyQueue, "put", lambda self, *a, **kw: queued.append("put") or True)
+    monkeypatch.setattr("core.events.emit", lambda *a, **kw: None)
+    monkeypatch.setattr(R, "_min_score", lambda: 7)
+    monkeypatch.setattr(R, "_effective_prefs", lambda company: Preferences())
+    monkeypatch.setattr("core.steering.read", lambda: {"content": ""})
+    monkeypatch.setattr(G._steering, "instructions", lambda: "Synthetic steering")
+    monkeypatch.setattr("tools.render.render_pdf", lambda source: b"%PDF-synthetic")
+    monkeypatch.setattr("core.profiles.resolve_for", lambda row: None)
+    sessions = InMemorySessionService()
+    monkeypatch.setattr(R, "_session_service", lambda: sessions)
+    monkeypatch.setattr(R, "_session_state",
+                        lambda row, jd: {**SYNTHETIC_STATE, "pk": pk, "base_latex": seed})
+    monkeypatch.setattr(R, "_save_output", lambda *a, **kw: None)
+
+    async def _jd(_):
+        return guarded
+
+    monkeypatch.setattr(R, "_jd_meta", _jd)
+    fake = _OfflineModel(model="offline-scorer",
+                         scripted=[_response(f'{{"score":{score},"reasoning":"fit"}}')])
+    scorer = G.review_agent.sub_agents[0]
+    tailor_stage = _SaveTailor(name="synthetic_tailor", tailored=seed)
+    tailor_stage.parent_agent = G.review_agent
+    monkeypatch.setattr(scorer, "model", fake)
+    monkeypatch.setattr(G.review_agent, "sub_agents", [scorer, tailor_stage])
+
+    outcome = R.run_job(pk, stores, prepare_only=True)
+
+    assert outcome["result"] == "prepared"
+    assert len(fake.requests) == 1          # the real scorer ran, once, on the offline model
+    assert tailor_stage.seen == [score]     # tailor stage got the scorer's current score
+    final = tracking.get_current(pk)
+    assert final["status"] == "tailored" and final["gate_reason"] == "approval"
+    assert final["match_score"] == score
+    assert final["resume_s3_key"].endswith(".pdf")
+    assert store[final["resume_s3_key"]] == b"%PDF-synthetic"  # current verified bytes
+    assert not final.get("apply_requested_at")
+    assert queued == [] and ApplyQueue(tracking.r).pending() == []
+
+
+def test_below_floor_with_approval_metadata_is_not_promoted(harness):
+    h = harness
+    h.stores.tracking.row.update(gate_reason="approval", match_score=None)
+    h.fake.scripted = [_response('{"score":6,"reasoning":"weak fit"}')]
+    result = _run(h)
+    assert result["result"] == "skipped"
+    assert h.stores.tracking.row["skip_reason"] == "low_score"
+    assert h.next.observed == []
+
+
+@pytest.mark.parametrize("reason", ["user_skipped", "review_rejected", "low_score",
+                                    "title_filter", "preferences"])
+def test_historical_skipped_approval_rows_are_not_eligible(reason):
+    row = {"pk": "example-co#old", "company": "example-co", "status": "skipped",
+           "skip_reason": reason, "gate_reason": "approval", "match_score": 8}
+    assert not R._reader_eligible(row, now=NOW)
+
+
+def test_deferred_review_only_attempt_stays_review_only_on_the_due_retry(harness, monkeypatch):
+    """The daemon sweep calls run_job() without prepare_only; the deferred row must
+    carry its review-only choice so the retry never falls back to root_agent."""
+    h = harness
+    if not h.prep:
+        pytest.skip("the review-only graph is the one patched by the prepare_only fixture")
+    clock = {"now": NOW}
+    monkeypatch.setattr(R, "_utc_now", lambda: clock["now"])
+    chosen = []
+    real_runner = R.Runner
+    monkeypatch.setattr(R, "Runner", lambda **kw: chosen.append(kw["agent"]) or real_runner(**kw))
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert R.run_job(h.pk, h.stores, prepare_only=True)["result"] == "deferred"
+    assert h.stores.tracking.row["jd_read_prepare_only"] is True
+    # Due: the sweep path (no prepare_only argument) with a valid score.
+    clock["now"] = NOW + timedelta(minutes=31)
+    h.fake.scripted = [_response('{"score":8,"reasoning":"fit"}')]
+    R.run_job(h.pk, h.stores)
+    assert chosen[-1] is G.review_agent
+    assert chosen[0] is G.review_agent
+    assert h.next.observed == [8]
+
+
+def test_deferred_normal_attempt_does_not_invent_review_only(harness):
+    h = harness
+    if h.prep:
+        pytest.skip("normal-route variant")
+    h.fake.scripted = [_response("not-json"), _response("still not json")]
+    assert _run(h)["result"] == "deferred"
+    assert not h.stores.tracking.row.get("jd_read_prepare_only")
