@@ -500,3 +500,32 @@ def test_http_reader_still_works_during_browser_only_outage(monkeypatch):
     read = jd.fetch_jd_meta(url)
     assert "build distributed systems" in read["text"]
     assert read["source_url"] == url
+
+
+def test_adapter_incomplete_page_is_local_to_one_batch_member(monkeypatch):
+    from tools import browser_skill as bsk
+
+    seen = []
+    class SyntheticSession:
+        def __init__(self, kind):
+            assert kind == "jd_sweep"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def navigate(self, url):
+            seen.append(url)
+            if url == URLS[1]:
+                return {"url": url, "description": "Loading", "truncated": False}
+            return {"url": url, "title": "Synthetic role",
+                    "description": GOOD, "truncated": False}
+
+    monkeypatch.setattr(bsk, "Session", SyntheticSession)
+    report, problem = asyncio.run(bsk.run_task(
+        "Read postings", report_key="postings", kind="jd_sweep", urls=URLS[:3]))
+    assert problem == ""
+    assert seen == URLS[:3]
+    assert [entry["url"] for entry in report["postings"]] == [URLS[0], URLS[2]]
