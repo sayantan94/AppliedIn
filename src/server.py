@@ -1953,10 +1953,10 @@ def create_app() -> FastAPI:
 
     @app.post("/actions/reopen/{pk:path}")
     def reopen(pk: str, background: BackgroundTasks):
-        """Only safely closed, unsent, inactive rows can be reopened.
+        """Reopen closed unsent rows; route old transient JDs through Retry.
 
-        A suspended reader or an in-flight submit must not be resurrected by a
-        stale status-only reset. Reopen preserves the reader budget and intent.
+        An old reader failure must not bypass fresh source proof by scoring
+        cached text. Neither route may resurrect a claim or a submit hold.
         """
         from agent.run import (_active_apply_lease, _claimed, _reader_check,
                                _reader_patch)
@@ -1974,14 +1974,24 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": "refused",
                     "note": "Only inactive, closed, unsent jobs can be reopened; "
                             "do not re-open a live or submitted application."}
-        # Skip changes status but intentionally preserves exhausted reader
-        # evidence. Reopen must not produce an ineligible FOUND row from it.
-        if (int(row.get("jd_read_attempts") or 0) >= 3
-                or row.get("fail_kind") in (
-                    "jd_reader_exhausted", "jd_tracking_storage_error",
-                    "jd_retry_session_error")):
+        # Legacy no_jd/exhausted markers are NOT evidence of removal. Send
+        # them through the existing guarded fresh-read Retry, never the generic
+        # Reopen -> FOUND -> scoring shortcut. A skipped old exhaustion retains
+        # its attempt marker even if Skip cleared the former fail_kind.
+        transient = (row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+                     or int(row.get("jd_read_attempts") or 0) >= 3)
+        if transient:
+            from agent.run import retry_job, retry_precheck
+
+            check = retry_precheck(pk, stores)
+            if check:
+                return {"ok": False, "error": check.get("reason", "retry_refused"),
+                        "note": check.get("detail", "Reader retry is not safe yet.")}
+            background.add_task(retry_job, pk, stores)
+            return {"ok": True, "pk": pk, "was": status, "status": "retry_scheduled"}
+        if row.get("fail_kind") in {"jd_tracking_storage_error", "jd_retry_session_error"}:
             return {"ok": False, "error": "jd_reader_attention",
-                    "note": "Reader attention requires Retry, not Reopen."}
+                    "note": "Restore tracking/session storage, then use Retry."}
         try:
             check = _reader_check(pk, row, stores)
             if check:
@@ -2179,6 +2189,12 @@ def create_app() -> FastAPI:
         # read must not leave a placeholder pk or a source-unverified JD.
         try:
             meta = jd.fetch_jd_meta(read_url)
+        except jd.PostingReadUnavailable:
+            # No new row exists to hold a retry deadline. The caller can retry
+            # this same source URL through this route after a bounded delay;
+            # every invocation must revalidate identity and source witness.
+            return {"ok": False, "error": "posting_reader_unavailable",
+                    "retryable": True, "retry_after_seconds": 60}
         except Exception:
             return {"ok": False, "error": "posting_reader_unavailable"}
         if (not isinstance(meta, dict)
