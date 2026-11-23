@@ -2213,7 +2213,8 @@ def create_app() -> FastAPI:
         if not isinstance(title, str) or not title.strip():
             return {"ok": False, "error": "posting_title_invalid"}
         page_company = jd._employer_name(meta.get("company"))
-        if row and page_company and page_company.casefold() != row["company"].casefold():
+        if (row and not funded_tag and page_company
+                and page_company.casefold() != row["company"].casefold()):
             # New text cannot silently re-key or overwrite a protected identity.
             return {"ok": False, "error": "employer_identity_conflict"}
         if not row and not funded_tag:
