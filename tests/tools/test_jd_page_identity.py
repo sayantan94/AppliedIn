@@ -14,11 +14,14 @@ DETAIL = ("Build reliable integrations, implement independent source checks, "
 
 
 def page(url, *, company="", title="Platform Engineer", hero=False,
-         og_title="", og_company="", jsonld=True, graph=False, foreign_url=""):
+         og_title="", og_company="", jsonld=True, graph=False, foreign_url="",
+         unbound=False):
     fields = ""
     if jsonld:
         posting = {"@context": "https://schema.org", "@type": "JobPosting",
-                   "url": foreign_url or url, "title": title}
+                   "title": title}
+        if not unbound:
+            posting["url"] = foreign_url or url
         if company:
             posting["hiringOrganization"] = {"@type": "Organization", "name": company}
         data = {"@graph": [{"@type": "Organization", "name": "Unrelated Inc"},
@@ -154,3 +157,56 @@ def test_provider_brand_in_same_page_jsonld_is_not_a_company(monkeypatch):
         url, company="Breezy HR", title="Platform Engineer"))
     assert not meta.get("company")
     assert meta["title"] == "Platform Engineer"
+
+
+def test_unbound_unrelated_jobposting_cannot_override_unmarked_role_heading(monkeypatch):
+    """source-01: uniqueness of URL-less JSON-LD does not bind a recommendation."""
+    url = "https://jobs.example.com.vn/role/1"
+    html = page(url, company="Different Fiction", title="Sales Manager",
+                unbound=True).replace('class="job-title"', "")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+    assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_unbound_related_role_cannot_override_marked_posting_heading(monkeypatch):
+    """source-02: a related-but-different URL-less JSON-LD is not this posting."""
+    url = "https://careers.example-careers.com/role/1"
+    html = page(url, company="Different Fiction",
+                title="Platform Engineering Manager", unbound=True, graph=True)
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+    assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_unbound_same_role_with_seniority_can_supply_metadata(monkeypatch):
+    """A corroborated URL-less JobPosting still supplies its employer and title."""
+    url = "https://jobs.example.com.vn/role/1"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Example Co", title="Senior Platform Engineer", unbound=True))
+    assert meta["title"] == "Senior Platform Engineer"
+    assert meta["company"] == "Example Co"
+
+
+def test_provider_og_site_brand_is_not_employer_identity(monkeypatch):
+    """A job-specific OG title does not turn shared-provider site_name into employer."""
+    url = "https://example.homerun.co/role"
+    meta = read_page(monkeypatch, url, page(
+        url, jsonld=False, og_title="Platform Engineer",
+        og_company="Homerun Hiring Platform"))
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
+    assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_unfamiliar_hero_h1_yields_to_plain_role_h2(monkeypatch):
+    """A structural hero banner must not win on a newly invented slogan."""
+    url = "https://careers.example-careers.com/role/1"
+    html = page(url, jsonld=False).replace(
+        '<h2 class="job-title">Platform Engineer</h2>',
+        "<h1 class='hero'>Shape what's next</h1><h2>Platform Engineer</h2>")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+    assert not meta.get("company")
