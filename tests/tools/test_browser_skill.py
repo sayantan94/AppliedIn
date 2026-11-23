@@ -634,7 +634,7 @@ async def test_typed_posting_url_is_not_reparsed_with_prompt_punctuation(monkeyp
             return False
         async def navigate(self, value):
             seen.append(value)
-            return page()
+            return {**page(), "url": value}
     monkeypatch.setattr(bsk, 'Session', Reader)
     report, problem = await bsk.run_task(f'Open {url}, wait for it to load.',
                                          report_key='description', urls=[url])
@@ -692,7 +692,8 @@ def test_native_select_can_derive_the_option_without_a_model_guessed_value():
 
 async def test_workday_shell_is_not_a_job_description():
     url = 'https://tenant.wd1.myworkdayjobs.com/careers/job/Remote/Lead_R1'
-    shell = {**page(text='Cookies and navigation. ' * 30), 'description': ''}
+    shell = {**page(text='Cookies and navigation. ' * 30),
+             'url': url, 'description': ''}
     session = SimpleNamespace(navigate=AsyncMock(return_value=shell))
     with pytest.raises(bsk.Unavailable, match='container is empty'):
         await bsk._read(session, url)
@@ -3356,7 +3357,8 @@ async def test_other_document_changed_shapes_get_no_new_retry(cooperative, probl
 
 @pytest.mark.asyncio
 async def test_non_apply_session_and_non_fixed_scripts_get_no_new_retry(cooperative):
-    session = await _opened('jd')
+    # Crawl document_changed remains outside the JD-only passive retry.
+    session = await _opened('crawl')
     cooperative.outcomes = [_refusal(), {'ok': True}]
     with pytest.raises(bsk.Unavailable):
         await session.call('evaluate', bsk.PAGE)
@@ -3411,3 +3413,133 @@ def test_user_service_reuses_reachable_shared_helper(monkeypatch):
     monkeypatch.setattr(bsk.subprocess, 'Popen',
                         lambda *a, **kw: pytest.fail('unexpected new helper'))
     assert bsk.ensure_daemon() == (True, '')
+
+
+# Issue #403: only a fixed, passive posting evaluate has a page-local retry.
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['observation_changed', 'document_changed'])
+async def test_posting_read_retries_exact_no_effect_page_race_once(cooperative, reason):
+    session = await _opened('jd')
+    syncs_before = len(cooperative.syncs())
+    cooperative.outcomes = [
+        _refusal(reason=reason),
+        {'ok': True, 'value': {'url': 'http://x.test/', 'text': GOOD}},
+    ]
+    read = await session.call('evaluate', bsk.PAGE)
+    assert read['value']['text'] == GOOD
+    assert len(_reads(cooperative)) == 2
+    assert len(cooperative.syncs()) == syncs_before + 1
+    contexts = [args[args.index('--context') + 1] for args in _reads(cooperative)]
+    assert len(set(contexts)) == 2
+    await session.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['observation_changed', 'document_changed'])
+async def test_posting_second_page_race_is_sanitized_and_does_not_replay(cooperative, reason):
+    session = await _opened('jd_sweep')
+    cooperative.outcomes = [_refusal(reason=reason), _refusal(reason=reason),
+                            {'ok': True, 'value': {'url': 'http://x.test/'}}]
+    with pytest.raises(bsk.Unavailable) as refusal:
+        await session.call('evaluate', bsk.PAGE)
+    assert refusal.value.page_read_race is True
+    assert len(_reads(cooperative)) == 2
+    assert len(cooperative.outcomes) == 1  # Third attempt is prohibited.
+    await session.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('problem', [
+    _refusal(reason='observation_changed', effect=None),
+    _refusal(reason='document_changed', effect='unknown'),
+    _refusal(reason='observation_changed', effect='applied'),
+    _refusal(reason='observation_changed', extra_reason='other'),
+    _refusal(reason='document_changed', top_reason='conflict'),
+    _refusal(reason='observation_changed', code='cdp_failed'),
+    _refusal(reason='other'),
+])
+async def test_posting_read_refuses_unproven_no_effect_variants(cooperative, problem):
+    session = await _opened('jd')
+    cooperative.outcomes = [problem, {'ok': True}]
+    with pytest.raises(bsk.Unavailable) as refusal:
+        await session.call('evaluate', bsk.PAGE)
+    assert refusal.value.page_read_race is False
+    assert len(_reads(cooperative)) == 1
+    await session.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_posting_page_race_never_retries_generated_or_mutating_ipc(cooperative):
+    session = await _opened('jd')
+    for args in (('evaluate', 'document.title'), ('evaluate', bsk.PAGE, '--extra'),
+                 ('click', '#submit'), ('fill', '#field', '--value', 'Test User')):
+        cooperative.outcomes = [_refusal(reason='observation_changed'), {'ok': True}]
+        before = len(cooperative.actions(args[0]))
+        with pytest.raises(bsk.Unavailable):
+            await session.call(*args)
+        assert len(cooperative.actions(args[0])) == before + 1
+    await session.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_posting_read_refuses_changed_session_on_resync(cooperative, monkeypatch):
+    session = await _opened('jd')
+    async def swapped_context():
+        await _REAL_SESSION_SYNC(session)
+        session.id = 'different-session'
+    monkeypatch.setattr(session, 'sync_context', swapped_context)
+    cooperative.outcomes = [_refusal(reason='observation_changed'), {'ok': True}]
+    with pytest.raises(bsk.Unavailable, match='ownership changed'):
+        await session.call('evaluate', bsk.PAGE)
+    assert len(_reads(cooperative)) == 1
+    session.id = 's1'
+    await session.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_posting_reader_classifies_second_refusal_without_cli_prose(cooperative):
+    url = 'https://example.test/jobs/1'
+    cooperative.outcomes = [
+        {'ok': True}, _refusal(reason='document_changed'),
+        _refusal(reason='document_changed'),
+    ]
+    report, problem = await bsk.run_task('Read posting', report_key='description',
+                                         kind='jd', urls=[url])
+    assert not report
+    assert problem == 'BrowserSkill posting observation changed; retry this posting'
+    assert len(_reads(cooperative)) == 2
+
+
+@pytest.mark.parametrize("content", [
+    GOOD,
+    "This job is no longer available.",
+])
+async def test_posting_reader_refuses_foreign_observed_url_before_result(content):
+    """The DOM's location.href, not the requested URL, owns JD provenance."""
+    expected = "https://example.test/jobs/123"
+    foreign = "https://example.test/jobs/other"
+
+    class Redirected:
+        async def navigate(self, url):
+            assert url == expected
+            return {"url": foreign, "title": "Different job", "text": content}
+
+    with pytest.raises(bsk.Unavailable, match="posting source changed"):
+        await bsk._read(Redirected(), expected)
+
+
+async def test_posting_reader_reports_observed_same_posting_route():
+    expected = "https://example.test/jobs/123"
+    observed = expected + "/"
+
+    class SamePosting:
+        async def navigate(self, url):
+            assert url == expected
+            return {"url": observed, "title": "Test role", "text": GOOD}
+
+    report = await bsk._read(SamePosting(), expected)
+    assert report["url"] == expected
+    assert report["source_url"] == observed
+    assert report["description"] == GOOD.strip()
+    assert report["gone"] is False
+

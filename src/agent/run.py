@@ -26,6 +26,7 @@ from core.logging import get_logger
 from core.models import Status
 from core.stores import make_stores
 from tools import submit_hold
+from tools.jd import _unreadable
 
 from .graph import root_agent
 
@@ -256,8 +257,9 @@ def _reader_eligible(row: dict, *, now: datetime | None = None) -> bool:
     if row.get("status") != "found":
         return False
     try:
-        if int(row.get("jd_read_attempts") or 0) >= 3:
+        if int(row.get("jd_read_attempts") or 0) < 0:
             return False
+        # Three is a saturated display/retry counter, never a terminal budget.
         if _scorer_retry_pending(row, now):
             return False
         deadline = row.get("jd_read_retry_at")
@@ -580,6 +582,44 @@ def run_job(pk: str, stores: Any = None, *, prepare_only: bool = False) -> dict:
         _release(pk, stores)
 
 
+def _defer_posting_read(pk: str, row: dict, stores: Any, reason: str) -> dict:
+    """Durably defer only the admitted reader generation, never a submission.
+
+    Saturate the counter without making it an eligibility ceiling. The original
+    URL, guard, application authority and stored content remain unchanged.
+    """
+    try:
+        check = _reader_check(pk, row, stores)
+        if check:
+            return check
+        attempts = min(3, max(0, int(row.get("jd_read_attempts") or 0)) + 1)
+        cutoff = _utc_now() + timedelta(seconds=60 if attempts == 1 else 300)
+        cutoff_text = cutoff.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        detail = (f"Posting reader unavailable: {reason}. Attempt {attempts}; "
+                  f"next eligible not before {cutoff_text}. "
+                  "No application was prepared or sent by this read.")
+        legacy = row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+        committed, _ = _reader_patch(pk, row, stores, {
+            "status": Status.FOUND, "jd_read_attempts": attempts,
+            "jd_read_retry_at": cutoff.isoformat(), "jd_read_error": detail,
+            # A legacy terminal read marker is not permanent-removal proof.
+            # Retain its historical evidence until a verified new read succeeds.
+            "fail_kind": row.get("fail_kind") if legacy else "",
+            "fail_reason": row.get("fail_reason", "") if legacy else "",
+            "error": row.get("error", "") if legacy else "",
+        })
+    except Exception as exc:
+        return _reader_storage_error(pk, stores, row, exc)
+    if not committed:
+        return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
+    from core.events import emit
+
+    emit("response", pk=pk, detail=detail, url=row.get("jd_url"))
+    log.warning("posting read deferred for pk=%s: %s", pk, detail)
+    return {"result": "deferred", "pk": pk, "reason": "jd_reader_unavailable",
+            "detail": detail}
+
+
 async def _run_job_async(pk: str, row: dict, stores: Any, *,
                          prepare_only: bool = False,
                          guard_recovery: dict | None = None) -> dict:
@@ -603,6 +643,17 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
     try:
         jd_meta = await (_jd_meta(row, fresh=True) if guard_recovery is not None
                          else _jd_meta(row))
+        from tools import jd as _jd, posting_guard as pg
+
+        valid = (isinstance(jd_meta, dict)
+                 and isinstance(jd_meta.get("text"), str)
+                 and pg.valid(jd_meta["text"], jd_meta.get("posting_guard")))
+        # Only independently source-matched removal can finish a reader claim.
+        # Cached text, a browser echo and foreign HTTP redirects do not qualify.
+        removed = bool(valid and _jd.is_removal_notice(jd_meta["text"])
+                       and _jd.matched_source_witness(row, jd_meta))
+        if not valid or (not removed and _unreadable(jd_meta["text"])):
+            raise PostingReadUnavailable("Posting content is incomplete or unreadable")
         jd_text = jd_meta["text"]
     except JDURLUnresolvable as exc:
         if guard_recovery is not None:
@@ -633,49 +684,31 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
             return _guard_recovery_refused(
                 pk, row, guard_recovery, stores, "posting_source_unavailable",
                 f"No complete matching current posting source: {exc}")
+        return _defer_posting_read(pk, row, stores, str(exc))
+
+    if removed:
+        # Existing JOB_GONE settlement, against the admitted TAILORING
+        # generation. Never bind the removal shell as a new JD or start ADK.
         try:
             check = _reader_check(pk, row, stores)
             if check:
                 return check
-            attempts = int(row.get("jd_read_attempts") or 0) + 1
-            if attempts >= 3:
-                patch = {
-                    "status": Status.ERROR,
-                    "jd_read_attempts": 3, "jd_read_retry_at": None,
-                    "jd_read_error": "", "fail_kind": "jd_reader_exhausted",
-                    "error": ("Posting reader exhausted three attempts; this read attempt "
-                              "did not prepare or send an application. Restore reader "
-                              "availability and use Retry."),
-                }
-            else:
-                cutoff = _utc_now() + timedelta(seconds=60 if attempts == 1 else 300)
-                cutoff_text = cutoff.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-                patch = {
-                    "status": Status.FOUND, "jd_read_attempts": attempts,
-                    "jd_read_retry_at": cutoff.isoformat(),
-                    "jd_read_error": (
-                        f"Posting reader unavailable: {exc}. Attempt {attempts} of 3; "
-                        f"next eligible not before {cutoff_text}. "
-                        "This read attempt did not prepare or send an application."),
-                    "fail_kind": "", "fail_reason": "", "error": "",
-                }
-            committed, _ = _reader_patch(pk, row, stores, patch)
-        except Exception as fault:
-            return _reader_storage_error(pk, stores, row, fault)
+            committed, _ = _reader_patch(pk, row, stores, {
+                "status": Status.JOB_GONE,
+                "fail_reason": "The posting has been removed.",
+                "fail_kind": "", "error": "",
+                "jd_read_attempts": 0, "jd_read_retry_at": None,
+                "jd_read_error": "",
+            })
+        except Exception as exc:
+            return _reader_storage_error(pk, stores, row, exc)
         if not committed:
             return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
         from core.events import emit
 
-        if attempts >= 3:
-            detail = patch["error"]
-            emit("error", pk=pk, detail=detail, url=row.get("jd_url"))
-            return {"result": "error", "pk": pk, "reason": "jd_reader_exhausted",
-                    "detail": detail}
-        detail = patch["jd_read_error"]
-        emit("response", pk=pk, detail=detail, url=row.get("jd_url"))
-        log.warning("posting read deferred for pk=%s: %s", pk, detail)
-        return {"result": "deferred", "pk": pk, "reason": "jd_reader_unavailable",
-                "detail": detail}
+        emit("gone", pk=pk, url=row.get("jd_url"),
+             detail="The posting has been removed.")
+        return {"result": "gone", "pk": pk, "reason": "posting_removed"}
 
     # A current board URL, HTTP 200, or guessed effective address cannot
     # certify the historic original posting. Without an independent same-job
@@ -722,6 +755,10 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
             "rescore_requested": False,
             "jd_read_attempts": 0,
             "jd_read_retry_at": None, "jd_read_error": "",
+            # Legacy reader failure markers clear only after this fresh,
+            # guarded, readable read has committed its new source metadata.
+            **({"fail_kind": "", "fail_reason": "", "error": ""}
+               if row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"} else {}),
             "scorer_retry_at": None,
             # The refusal itself is settled only once the new generation is bound.
             **(_REFUSAL_MARKER_CLEARED if guard_recovery is not None else {}),
@@ -733,27 +770,6 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
     row = settled
     admitted.update(row)
     jd_text = row.get("jd_text") or ""
-
-    # Distinguish a known infrastructure outage from a successfully returned
-    # but unreadable/unsponsored page. Both content-derived terminal exits use
-    # the same guarded precondition, including the second post-metadata race.
-    if _unreadable(jd_text):
-        why = ("Could not read the posting — the page returned an error or almost "
-               "no text. Nothing was tailored. Retry once the site is reachable.")
-        try:
-            check = _reader_check(pk, row, stores)
-            if check:
-                return check
-            committed, _ = _reader_patch(pk, row, stores, {
-                "status": Status.FAILED, "fail_reason": why, "fail_kind": "no_jd"})
-        except Exception as exc:
-            return _reader_storage_error(pk, stores, row, exc)
-        if not committed:
-            return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
-        from core.events import emit
-        emit("failed", pk=pk, detail="posting unreadable — not tailored",
-             url=row.get("jd_url"))
-        return {"result": "failed", "pk": pk, "reason": "no_jd"}
 
     from core import steering
     conflict = _eligibility_conflict(
@@ -920,7 +936,9 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
                 or not pg.valid(remote["text"], remote.get("posting_guard"))
                 or not _jd.matched_source_witness(row, remote)):
             raise _jd.PostingReadUnavailable("No complete matching posting source")
-        if approval:
+        if approval or _jd.is_removal_notice(remote["text"]):
+            # A verified removal notice is not replacement JD text and must
+            # remain recognizable before unreadable-content classification.
             return remote
         # Findings already recorded for this posting are never dropped.
         captured = row.get("jd_text") or ""
@@ -946,27 +964,51 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
                        source_required="source_html_unavailable" in old.get("reasons", []))
     local["source_kind"] = ""
     need_source = "source_html_unavailable" in old.get("reasons", [])
-    if not url or (len(captured) >= 400 and not need_source):
+    retry_read = bool(row.get("jd_read_attempts") or row.get("jd_read_retry_at")
+                      or row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"})
+    if not url:
+        if retry_read:
+            raise _jd.PostingReadUnavailable("Original posting URL unavailable for fresh read")
+        return local
+    if len(captured) >= 400 and not need_source and not retry_read:
         return local
     try:
         remote = await asyncio.to_thread(
             _jd.fetch_jd_meta, url, "jd_sweep" if yielding else "jd")
     except _jd.PostingReadUnavailable:
-        if historical or _unreadable(local["text"]):
+        if historical or retry_read or _unreadable(local["text"]):
             raise
         return local
     if not isinstance(remote, dict):
+        if retry_read:
+            raise _jd.PostingReadUnavailable("Fresh posting read returned no metadata")
         return local
     rtext, guard = remote.get("text"), remote.get("posting_guard")
     if not isinstance(rtext, str) or not pg.valid(rtext, guard):
+        if retry_read:
+            raise _jd.PostingReadUnavailable("Fresh posting has no valid source guard")
         return local
     if historical:
         # This tag is transient and is matched to independently parsed HTML
         # canonical + JobPosting identifier, never projected into persisted jd_url.
         remote = {**remote, "reader_effective_url": url}
     source_witness = _jd.matched_source_witness(row, remote)
+    if source_witness and _jd.is_removal_notice(rtext):
+        # Keep the independent current source metadata for conditional JOB_GONE.
+        return remote
+    # A deferred or legacy posting must NOT settle from browser-only text or
+    # any other source lacking current original-posting proof. Previous guard
+    # verification cannot be inherited by an unrelated replacement.
+    if retry_read and (not rtext or _unreadable(rtext)
+                       or (not historical and not source_witness)):
+        # Historical relative rows retain their separate same-job review gate.
+        raise _jd.PostingReadUnavailable("Fresh matching posting content unavailable")
+    if (not source_witness and old.get("source_verified") is True
+            and rtext != local["text"]):
+        raise _jd.PostingReadUnavailable("Replacement posting source is unverified")
     use_remote = bool(rtext) and (
-        len(rtext) > len(local["text"]) or (need_source and source_witness))
+        retry_read or len(rtext) > len(local["text"])
+        or (need_source and source_witness))
     selected = (rtext.strip() if not need_source else rtext) if use_remote else local["text"]
     combined = pg.merge(selected, guard, old, source_witness=source_witness)
     return {**combined,
@@ -1214,7 +1256,16 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
             check = _reader_check(pk, observed, stores)
             if check:
                 continue
+            guarded = observed.get("posting_guard") or {}
+            protected_read = bool(
+                observed.get("jd_read_attempts") or observed.get("jd_read_retry_at")
+                or (isinstance(guarded, dict)
+                    and guarded.get("source_verified") is True))
             if url in gone:
+                # A browser-only "gone" also lacks independent source HTML.
+                # Never close a previously verified or deferred row from it.
+                if protected_read:
+                    continue
                 patch = {"status": Status.JOB_GONE,
                          "fail_reason": "The posting has been removed."}
             else:
@@ -1224,6 +1275,11 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
                 meta = (result if isinstance(result, dict) else
                         pg.analyze(str(result), source_required=True,
                                    strip_trailing=True))
+                # The browser's URL-keyed prose is not independent original
+                # source HTML. It cannot clear backoff or inherit prior proof.
+                if (protected_read
+                        and not _jd.matched_source_witness(observed, meta)):
+                    continue
                 updated = _commit_posting_meta(pk, observed, meta, stores)
                 if updated is None:
                     continue
@@ -1244,24 +1300,6 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
     log.info("browser prefetch filled %d and closed %d of %d posting(s)",
              filled, closed, len(need))
     return filled
-
-
-_JD_FLOOR = 80
-_JD_NOISE = ("something went wrong", "page not found", "access denied", "enable javascript")
-
-
-def _unreadable(jd_text: str) -> bool:
-    """Too little to tailor from.
-
-    Empty, a bare title, or an error page. The floor is low on purpose — a
-    three-line posting from a small company is real and must pass — so this
-    catches what is plainly not a posting, and nothing more. A row it stops is
-    closed as `no_jd` and can be retried, because the owner may know better.
-    """
-    t = " ".join((jd_text or "").lower().split())
-    if len(t) < _JD_FLOOR:
-        return True
-    return any(n in t for n in _JD_NOISE) and len(t) < 400
 
 
 # Phrases that mean the employer will NOT sponsor a work visa. You require
@@ -2783,7 +2821,11 @@ def _retry_live_gate(pk: str, row: dict, stores: Any, posting_retry: bool) -> di
                 "detail": "Cannot safely inspect an in-flight application; restore queue inspection."}
     if lease:
         return {"result": "already_running", "pk": pk, "reason": "apply_in_flight"}
-    if posting_retry:
+    # A legacy transient closed row may still have a pending application
+    # item despite its stale status. Re-reading it cannot outrun that item.
+    transient = (row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+                 or int(row.get("jd_read_attempts") or 0) >= 3)
+    if posting_retry or transient:
         pending = _pending_apply_item(pk, stores)
         if pending is not False:
             return _pending_refusal(pk, pending)
@@ -2853,8 +2895,11 @@ def _retry_job(pk: str, stores: Any = None, *,
     jd_attention = not review_restart and not posting_retry and (
         int(row.get("jd_read_attempts") or 0) >= 3
         or row.get("fail_kind") in (
-            "jd_reader_exhausted", "jd_tracking_storage_error",
+            "no_jd", "jd_reader_exhausted", "jd_tracking_storage_error",
             "jd_retry_session_error", "jd_url_unresolvable"))
+    if jd_attention and row.get("jd_read_retry_at") and not _reader_eligible(
+            {**row, "status": "found"}):
+        return {"result": "already_done", "pk": pk, "reason": "jd_read_not_eligible"}
     claim = _claim(pk, stores)
     if claim is None:
         return {"result": "error", "pk": pk, "reason": "jd_tracking_storage_error",
@@ -2873,7 +2918,9 @@ def _retry_job(pk: str, stores: Any = None, *,
             if lease is None or lease:
                 return {"result": "refused", "pk": pk, "reason": "apply_lease_unknown"
                         if lease is None else "apply_in_flight"}
-            if posting_retry:
+            transient = (row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"}
+                         or int(row.get("jd_read_attempts") or 0) >= 3)
+            if posting_retry or transient:
                 pending = _pending_apply_item(pk, stores)
                 if pending is not False:
                     return _pending_refusal(pk, pending)
@@ -2889,14 +2936,12 @@ def _retry_job(pk: str, stores: Any = None, *,
                 # read can restore the closed refusal unchanged.
                 changes = {"status": Status.TAILORING, "jd_read_prepare_only": True}
             if jd_attention:
-                changes.update({
-                    "jd_read_attempts": 0, "jd_read_retry_at": None,
-                    "jd_read_error": "", "error": "",
-                    "jd_read_prepare_only": True,
-                    # This prior document was prepared against an older JD.
-                    # Its PDF key is not evidence of a successful NEW tailor.
+                # Do not clear old reader-defer evidence at admission. The
+                # fresh guarded read settles it, not a session reset or cached JD.
+                changes = {
+                    "status": Status.TAILORING, "jd_read_prepare_only": True,
                     "resume_s3_key": "",
-                })
+                }
             else:
                 changes["error"] = ""
             if review_restart:

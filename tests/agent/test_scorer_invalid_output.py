@@ -613,9 +613,13 @@ def test_deferred_scorer_retry_is_eligible_only_once_due():
     assert not R._reader_eligible(row, now=NOW)
     assert not R._reader_eligible(row, now=NOW + timedelta(minutes=29, seconds=59))
     assert R._reader_eligible(row, now=NOW + timedelta(minutes=30))
-    # Independent of the posting-reader deadline and budget.
-    assert not R._reader_eligible(
+    # Independent of the posting-reader deadline and counter: three reader
+    # attempts is a saturated display counter, never a terminal budget (#403),
+    # so a due scorer retry stays eligible, and a not-yet-due one stays held.
+    assert R._reader_eligible(
         _found(scorer_retry_at=due, jd_read_attempts=3), now=NOW + timedelta(hours=1))
+    assert not R._reader_eligible(
+        _found(scorer_retry_at=due, jd_read_attempts=3), now=NOW)
     # A corrupt deadline never authorizes an immediate retry.
     assert not R._reader_eligible(_found(scorer_retry_at="garbage"), now=NOW)
     assert not R._reader_eligible(_found(scorer_retry_at="2026-11-23T12:00:00"), now=NOW)

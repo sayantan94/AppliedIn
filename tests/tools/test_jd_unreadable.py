@@ -456,3 +456,247 @@ def test_short_historical_http_preserves_independent_identity_after_chrome_text(
     assert observed["source_url"] == url
     assert pg.valid(observed["text"], observed["posting_guard"])
     assert jd.matched_source_witness(original, observed) is verified
+
+
+# Issue #403: a cached historical no_jd/exhaustion marker is not a fresh read.
+@pytest.mark.parametrize("marker", ["no_jd", "jd_reader_exhausted"])
+def test_legacy_transient_cache_is_not_accepted_when_fresh_read_refuses(
+        monkeypatch, marker):
+    from agent import run
+    from tools import jd
+
+    url = "https://example.test/jobs/1"
+    row = {"jd_url": url, "jd_text": "An earlier cached description. " * 30,
+           "jd_read_attempts": 3, "fail_kind": marker}
+    calls = []
+    def refuses(target, kind="jd"):
+        calls.append((target, kind))
+        raise jd.PostingReadUnavailable("synthetic observation race")
+    monkeypatch.setattr(jd, "fetch_jd_meta", refuses)
+
+    with pytest.raises(jd.PostingReadUnavailable, match="observation race"):
+        asyncio.run(run._jd_meta(row))
+    assert calls == [(url, "jd_sweep")]
+    assert row["jd_text"].startswith("An earlier cached")
+
+
+@pytest.mark.parametrize("case", ["short", "invalid_guard", "wrong_html_source"])
+def test_deferred_fresh_read_requires_usable_source_without_cached_fallback(
+        monkeypatch, case):
+    from agent import run
+    from tools import jd, posting_guard as pg
+
+    url = "https://example.test/jobs/1"
+    captured = "Previously cached description. " * 30
+    row = {"jd_url": url, "jd_text": captured, "jd_read_attempts": 2,
+           "jd_read_retry_at": "2030-01-01T00:00:00+00:00"}
+    text = ("Error page" if case == "short"
+            else "Build distributed systems and maintain safety. " * 20)
+    inspected = pg.analyze(text, html_variants=[
+        "<html><body><p>" + text + "</p></body></html>"],
+        source_required=True)
+    remote = {**inspected, "source_kind": "http_html", "source_url": url}
+    if case == "invalid_guard":
+        remote["posting_guard"] = {}
+    if case == "wrong_html_source":
+        remote["source_url"] = "https://different.example/jobs/9"
+    monkeypatch.setattr(jd, "fetch_jd_meta", lambda target, kind="jd": remote)
+
+    with pytest.raises(jd.PostingReadUnavailable):
+        asyncio.run(run._jd_meta(row))
+    assert row["jd_text"] == captured
+
+
+def test_deferred_row_without_original_url_cannot_settle_from_cached_text(monkeypatch):
+    from agent import run
+    from tools import jd
+
+    row = {"jd_url": "", "jd_text": "A previously cached description. " * 30,
+           "jd_read_attempts": 3}
+    monkeypatch.setattr(jd, "fetch_jd_meta",
+                        lambda *a, **kw: pytest.fail("No URL may reach a reader"))
+    with pytest.raises(jd.PostingReadUnavailable, match="Original posting URL"):
+        asyncio.run(run._jd_meta(row))
+
+
+@pytest.mark.parametrize("first_text", [
+    "Loading...",
+    "Something went wrong. " * 9,
+])
+def test_manual_apply_role_readability_without_worker_private_import(
+        monkeypatch, first_text):
+    """The route verifies the posting without importing ADK worker internals.
+
+    Other HTTP suites intentionally stub agent.run with only run_job. A page
+    that is guarded but unreadable must still defer without creating a row;
+    a later source-verified read may enter the normal background workflow.
+    """
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import fakeredis
+    from fastapi.testclient import TestClient
+
+    import server
+    from core.storage.local import RedisTracking
+    from tools import jd, posting_guard as pg, submit_review
+
+    assert jd._unreadable is _unreadable
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    stores = SimpleNamespace(tracking=tracking)
+    monkeypatch.setattr(server, "make_stores", lambda _settings: stores)
+    monkeypatch.setattr(server.submit_hold, "blocked", lambda *a, **kw: False)
+    monkeypatch.setattr(submit_review, "recover_orphans", lambda: None)
+
+    runs = []
+    worker = ModuleType("agent.run")
+    worker.run_job = lambda pk, _stores: runs.append(pk)
+    events = ModuleType("core.events")
+    events.emit = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "agent.run", worker)
+    monkeypatch.setitem(sys.modules, "core.events", events)
+
+    good_text = "Build reliable systems and maintain safe integrations. " * 15
+    pending = [first_text, good_text]
+    visited = []
+
+    def reader(url):
+        visited.append(url)
+        text = pending.pop(0)
+        inspected = pg.analyze(
+            text, html_variants=["<article>" + text + "</article>"],
+            source_required=True, source_complete=True)
+        assert pg.valid(inspected["text"], inspected["posting_guard"])
+        return {**inspected, "title": "Test Engineer",
+                "source_kind": "ats_html", "source_url": url,
+                "source_identity": {}}
+
+    monkeypatch.setattr(jd, "fetch_jd_meta", reader)
+    url = "https://jobs.ashbyhq.com/example-co/role-123"
+    with TestClient(server.create_app()) as client:
+        deferred = client.post("/actions/apply-role", json={"url": url})
+        assert deferred.status_code == 200
+        assert deferred.json() == {
+            "ok": False, "error": "posting_reader_unavailable",
+            "retryable": True, "retry_after_seconds": 60,
+        }
+        assert tracking.all() == []
+        assert runs == []
+
+        accepted = client.post("/actions/apply-role", json={"url": url})
+        assert accepted.status_code == 200
+        result = accepted.json()
+        assert result["ok"] is True and result["status"] == "running"
+
+    assert visited == [url, url]
+    assert runs == [result["pk"]]
+    row = tracking.get(result["pk"])
+    assert row["jd_url"] == url and row["jd_text"] == good_text
+    assert row["posting_guard"]["source_verified"] is True
+
+
+@pytest.mark.parametrize("redirected", [False, True])
+def test_http_removal_requires_matched_original_source_without_browser(
+        monkeypatch, redirected):
+    """An exact HTTP 200 removal is terminal; a redirect's shell is not."""
+    from tools import jd, posting_guard as pg
+
+    original = "https://example.test/jobs/123"
+    other = "https://example.test/jobs/other"
+    notice = "This job is no longer available."
+    page = "<html><body><p>" + notice + "</p></body></html>"
+    visits = []
+
+    def response(request):
+        url = str(request.url)
+        visits.append(url)
+        if redirected and url == original:
+            return httpx.Response(302, headers={"Location": other})
+        assert url == (other if redirected else original)
+        return httpx.Response(200, text=page)
+
+    monkeypatch.setattr(httpx, "Client", _patched(response))
+    monkeypatch.setattr(jd, "_from_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_new_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_chrome",
+                        (lambda *args: None) if redirected else
+                        (lambda *args: pytest.fail(
+                            "Verified HTTP removal must not open a browser")))
+
+    meta = jd.fetch_jd_meta(original)
+    assert meta["text"] == notice
+    assert pg.valid(meta["text"], meta["posting_guard"])
+    assert jd._GONE_RX.search(meta["text"])
+    assert jd.matched_source_witness({"jd_url": original}, meta) is not redirected
+    assert meta["posting_guard"]["source_verified"] is not redirected
+    assert visits == ([original, other] if redirected else [original])
+
+
+@pytest.mark.parametrize("text", [
+    "This job is no longer available.",
+    "Sorry, this posting has been removed.",
+    "The position is no longer available. Browse other openings.",
+    "Job posting closed",
+])
+def test_dedicated_removal_notice_is_recognized(text):
+    from tools import jd
+
+    assert jd.is_removal_notice(text)
+
+
+@pytest.mark.parametrize("text", [
+    "The previous position is no longer available. " + "Build and run APIs. " * 40,
+    "Remote work is no longer available for this team. " + "Own the platform. " * 40,
+    "The previous position is no longer available.",
+    "Remote work is no longer available.",
+    "",
+    None,
+])
+def test_phrase_about_another_role_or_option_is_not_a_removal_notice(text):
+    from tools import jd
+
+    assert not jd.is_removal_notice(text)
+
+
+def test_open_posting_with_unavailable_phrase_about_another_role_is_read(
+        monkeypatch):
+    """An exact-URL 200 page that is a real open role stays readable."""
+    from tools import jd, posting_guard as pg
+
+    original = "https://example.test/jobs/123"
+    body = ("The previous position is no longer available. Remote work is no "
+            "longer available. Senior Backend Engineer: you will design and "
+            "operate payment APIs, own on-call for them, and mentor engineers. "
+            * 6)
+    page = "<html><body><p>" + body + "</p></body></html>"
+
+    monkeypatch.setattr(httpx, "Client", _patched(
+        lambda request: httpx.Response(200, text=page)))
+    monkeypatch.setattr(jd, "_from_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_new_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_chrome", lambda *args: None)
+
+    meta = jd.fetch_jd_meta(original)
+    assert "Senior Backend Engineer" in meta["text"]
+    assert pg.valid(meta["text"], meta["posting_guard"])
+    assert not jd.is_removal_notice(meta["text"])
+
+
+def test_browser_report_cannot_claim_a_different_observed_route(
+        monkeypatch, _no_browser):
+    from tools import browser_runtime, jd
+
+    url = "https://example.test/jobs/123"
+    other = "https://example.test/jobs/other"
+    monkeypatch.setattr(jd, "_browser_retry", (0, ""))
+    monkeypatch.setattr(browser_runtime, "available", lambda: (True, ""))
+    monkeypatch.setattr(browser_runtime, "configuration",
+                        lambda: {"engine": "browser_skill"})
+
+    async def misplaced(*args, **kwargs):
+        return {"title": "Wrong posting", "description": "Wrong text. " * 100,
+                "source_url": other}, ""
+
+    monkeypatch.setattr(browser_runtime, "run_task", misplaced)
+    with pytest.raises(jd.PostingReadUnavailable, match="source changed"):
+        _no_browser(url)

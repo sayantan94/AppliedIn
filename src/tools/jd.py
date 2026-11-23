@@ -28,6 +28,21 @@ class PostingReadUnavailable(RuntimeError):
     """The reader failed before it could establish what is on the page."""
 
 
+_JD_FLOOR = 80
+_JD_NOISE = ("something went wrong", "page not found", "access denied", "enable javascript")
+
+
+def _unreadable(jd_text: str) -> bool:
+    """Too little to tailor from: a transient read, never a terminal JD.
+
+    The floor is intentionally low so legitimate short postings still pass.
+    """
+    t = " ".join((jd_text or "").lower().split())
+    if len(t) < _JD_FLOOR:
+        return True
+    return any(n in t for n in _JD_NOISE) and len(t) < 400
+
+
 # A shared CLI outage must not launch another session for every row in a sweep.
 # HTTP/ATS reads still run; only the browser reader backs off for five minutes.
 _browser_retry: tuple[float, str] = (0, "")
@@ -42,7 +57,19 @@ def _note_browser_problem(problem: str) -> None:
     from tools.browser_runtime import is_infrastructure
 
     global _browser_retry
-    if is_infrastructure(problem):
+    # Only a shared CLI/daemon/profile/configuration fault can pause other
+    # postings. A structured page race is classified at the adapter; generic
+    # operation failures, malformed reports and unreadable JDs prove no outage.
+    shared_browser = problem.startswith((
+        "BrowserSkill unavailable:", "BrowserSkill configuration unavailable:",
+        "Browser configuration unavailable:",
+    )) or problem in {
+        "BrowserSkill operation unavailable: daemon_unavailable",
+        "BrowserSkill operation unavailable: daemon_disconnected",
+    }
+    other_engine = (not problem.startswith(("BrowserSkill", "Browser configuration"))
+                    and is_infrastructure(problem))
+    if shared_browser or other_engine:
         _browser_retry = (time.monotonic() + 300, problem)
 
 _TAG_RX = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.S | re.I)
@@ -854,6 +881,12 @@ def fetch_jd_meta(url: str, kind: str = "jd") -> dict:
                source_identity=_html_source_identity(html) if same_source else {})
     if posting.get("company"):
         hit["company"] = posting["company"]
+    # An actual HTTP 200 at the original posting route can independently
+    # confirm removal. Do not invoke the browser for this short terminal notice:
+    # a browser outage must not turn proven removal into perpetual deferral.
+    if (is_removal_notice(hit["text"])
+            and matched_source_witness({"jd_url": url}, hit)):
+        return hit
     if len(hit["text"]) < 400:
         try:
             seen = _from_chrome(url, kind)
@@ -936,6 +969,7 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
     _check_browser_reader()
     ok, why = available()
     if not ok:
+        _note_browser_problem(why)
         raise PostingReadUnavailable(why)
 
     out: dict = {}
@@ -976,7 +1010,11 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
             if u not in wanted:
                 log.warning("posting batch returned a URL that was not asked for: %s", u[:80])
                 continue
-            if entry.get("gone") is True or _GONE_RX.search(text[:400]):
+            observed_url = entry.get("source_url", u)
+            if not isinstance(observed_url, str) or not _same_posting_url(u, observed_url):
+                # A reported requested URL does not witness where the browser landed.
+                continue
+            if entry.get("gone") is True or is_removal_notice(text):
                 gone.add(u)
                 continue
             if len(text) < 400:
@@ -988,6 +1026,27 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
 
 _GONE_RX = re.compile(r"no longer available|position[- ]not[- ]available|has been removed|"
                       r"job (?:posting )?(?:is )?closed", re.I)
+
+# A dedicated removal notice names THIS posting as unavailable and is not a
+# full job description. A phrase about another role or option ("The previous
+# position is no longer available", "Remote work is no longer available") on
+# an otherwise open page is not a notice.
+_REMOVAL_NOTICE_RX = re.compile(
+    r"\b(?:this|the)\s+(?:job|posting|position|role|vacancy|listing|opening|page)"
+    r"(?:\s+posting)?\b[^.\n]{0,40}?"
+    r"\b(?:no longer available|has been removed|(?:is|has been) closed|not available)"
+    r"|position[- ]not[- ]available|job (?:posting )?(?:is )?closed", re.I)
+_REMOVAL_NOTICE_MAX_CHARS = 1200
+
+
+def is_removal_notice(text: object) -> bool:
+    """True only for a short page whose opening states this posting is gone."""
+    if not isinstance(text, str):
+        return False
+    body = text.strip()
+    if len(body) >= _REMOVAL_NOTICE_MAX_CHARS:
+        return False
+    return bool(_REMOVAL_NOTICE_RX.search(body[:400]))
 
 
 def run_task(*args, **kwargs):
@@ -1024,6 +1083,7 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
     _check_browser_reader()
     ok, why = available()
     if not ok:
+        _note_browser_problem(why)
         raise PostingReadUnavailable(why)
     from tools.browser_runtime import TAB_HYGIENE
 
@@ -1047,11 +1107,21 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
         why = problem or "The browser reader returned no posting report. Try reading it again."
         _note_browser_problem(why)
         raise PostingReadUnavailable(why)
-    # BrowserSkill's ordinary reader is normalized; the older Claude Chrome
-    # string-return reader preserves harmless terminal spaces. Both are guarded
-    # before their distinct text contracts are returned.
-    return _guarded(str(report.get("title", "")), str(report.get("description", "")),
+    # BrowserSkill binds source_url to the actual PAGE inventory. Never let a
+    # redirected report claim it read the requested posting. Legacy Chrome
+    # reports have no observed URL, hence no source witness of their own.
+    observed_url = report.get("source_url")
+    if observed_url is not None and (
+            not isinstance(observed_url, str)
+            or not _same_posting_url(url, observed_url)):
+        raise PostingReadUnavailable("Browser posting source changed")
+    # Browser prose is *not* independent source HTML even at the same URL.
+    # Do not promote the existing source_verified flag using its text alone.
+    meta = _guarded(str(report.get("title", "")), str(report.get("description", "")),
                     normalize_terminal=configuration()["engine"] == "browser_skill")
+    if observed_url is not None:
+        meta["source_url"] = observed_url
+    return meta
 
 
 def fetch_jd(url: str, kind: str = "jd") -> str:

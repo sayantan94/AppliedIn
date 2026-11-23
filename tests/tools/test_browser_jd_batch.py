@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from agent.run import _unreadable, prefetch_browser_jds
 from tools import jd
 
@@ -425,3 +427,154 @@ def test_invalid_browser_batch_targets_are_dropped_before_runtime(monkeypatch):
     bad = ["//foreign.example/jobs/42", "javascript:alert(1)",
            "https://user@example.test/jobs/42", "https://example.test/jobs\\42"]
     assert jd.read_postings(bad, with_gone=True) == ({}, set())
+
+
+# Issue #403: the adapter keeps a batch usable after one no-effect page race.
+def test_adapter_page_local_refusal_keeps_later_batch_member(monkeypatch):
+    from tools import browser_skill as bsk
+
+    seen = []
+    class SyntheticSession:
+        def __init__(self, kind):
+            assert kind == "jd_sweep"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def navigate(self, url):
+            seen.append(url)
+            if url == URLS[0]:
+                refusal = bsk.Unavailable("synthetic page race")
+                refusal.page_read_race = True  # the validated adapter classification
+                raise refusal
+            return {"url": url, "title": "Synthetic engineer",
+                    "description": GOOD, "truncated": False}
+
+    monkeypatch.setattr(bsk, "Session", SyntheticSession)
+    monkeypatch.setattr(jd, "available", lambda: (True, ""))
+    monkeypatch.setattr(jd, "_browser_retry", (0, ""))
+
+    async def through_adapter(task, *, report_key, kind, urls, **kwargs):
+        return await bsk.run_task(task, report_key=report_key, kind=kind, urls=urls)
+    monkeypatch.setattr(jd, "run_task", through_adapter)
+
+    got = jd.read_postings(URLS[:2], batch=2)
+    assert seen == URLS[:2]
+    assert got == {URLS[1]: GOOD.strip()}
+    assert jd._browser_retry == (0, "")
+
+
+def test_a_page_race_does_not_drop_prior_or_later_batches_but_daemon_does(monkeypatch):
+    monkeypatch.setattr(jd, "_browser_retry", (0, ""))
+    monkeypatch.setattr(jd, "available", lambda: (True, ""))
+    visited = []
+    async def read(task, *, urls, **kwargs):
+        visited.extend(urls)
+        if urls == [URLS[1]]:
+            return {"postings": []}, ""  # adapter isolated a page-local refusal
+        if urls == [URLS[3]]:
+            return {}, "BrowserSkill unavailable: daemon disconnected"
+        return {"postings": [{"url": urls[0], "description": GOOD}]}, ""
+    monkeypatch.setattr(jd, "run_task", read)
+
+    got = jd.read_postings(URLS[:4], batch=1)
+    assert got == {URLS[0]: GOOD.strip(), URLS[2]: GOOD.strip()}
+    assert visited == URLS[:4]
+    assert jd._browser_retry[0] > jd.time.monotonic()
+    # A real shared outage defers future browser work, but does not erase
+    # members that were already independently read.
+    import pytest
+    with pytest.raises(jd.PostingReadUnavailable, match="daemon disconnected"):
+        jd.read_postings([URLS[4]], batch=1)
+
+
+def test_http_reader_still_works_during_browser_only_outage(monkeypatch):
+    monkeypatch.setattr(jd, "_browser_retry",
+                        (jd.time.monotonic() + 300, "BrowserSkill unavailable: daemon offline"))
+    monkeypatch.setattr(jd, "_from_new_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_ats", lambda url: None)
+    url = "https://example.test/jobs/1"
+    html = "<html><body><h1>Test role</h1><p>" + GOOD + "</p></body></html>"
+    monkeypatch.setattr(jd, "_get", lambda target, headers: (html, url))
+    read = jd.fetch_jd_meta(url)
+    assert "build distributed systems" in read["text"]
+    assert read["source_url"] == url
+
+
+def test_adapter_incomplete_page_is_local_to_one_batch_member(monkeypatch):
+    from tools import browser_skill as bsk
+
+    seen = []
+    class SyntheticSession:
+        def __init__(self, kind):
+            assert kind == "jd_sweep"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def navigate(self, url):
+            seen.append(url)
+            if url == URLS[1]:
+                return {"url": url, "description": "Loading", "truncated": False}
+            return {"url": url, "title": "Synthetic role",
+                    "description": GOOD, "truncated": False}
+
+    monkeypatch.setattr(bsk, "Session", SyntheticSession)
+    report, problem = asyncio.run(bsk.run_task(
+        "Read postings", report_key="postings", kind="jd_sweep", urls=URLS[:3]))
+    assert problem == ""
+    assert seen == URLS[:3]
+    assert [entry["url"] for entry in report["postings"]] == [URLS[0], URLS[2]]
+
+
+def test_batch_rejects_report_with_foreign_observed_page(monkeypatch):
+    """A requested entry URL does not override the final page URL."""
+    from tools import posting_guard as pg
+
+    expected, other = URLS[:2]
+    run_task, _ = _fake_run_task([{"postings": [
+        {"url": expected, "source_url": "https://different.example/jobs/42",
+         "description": GOOD},
+        {"url": other, "source_url": other, "description": GOOD},
+    ]}])
+    monkeypatch.setattr(jd, "available", lambda: (True, ""))
+    monkeypatch.setattr(jd, "run_task", run_task)
+    result = jd.read_postings([expected, other], with_meta=True)
+    assert set(result) == {other}
+    assert pg.valid(result[other]["text"], result[other]["posting_guard"])
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_prefetch_never_settles_deferred_verified_row_from_browser_echo(
+        monkeypatch, gone):
+    """The batch prefetch cannot bypass the guarded single-posting retry."""
+    from tools import posting_guard as pg
+
+    url = "https://example.test/jobs/42"
+    short = "Loading"
+    previous = pg.analyze(short, html_variants=["<p>" + short + "</p>"],
+                          source_required=True)
+    assert previous["posting_guard"]["source_verified"] is True
+    original = {
+        "pk": "example-co#42", "company": "example-co", "job_id": "42",
+        "ats": "custom", "status": "found", "jd_url": url,
+        "jd_text": short, "posting_guard": previous["posting_guard"],
+        "jd_read_attempts": 1, "jd_read_retry_at": None,
+        "jd_read_revision": 2,
+    }
+    stores = _Stores([original])
+    monkeypatch.setattr("agent.run._browser_companies", lambda: {"example-co"})
+    echo = pg.analyze(GOOD)
+    echo.update(source_url="https://foreign.example/jobs/other")
+    assert not jd.matched_source_witness(original, echo)
+    monkeypatch.setattr(jd, "read_postings",
+                        lambda urls, **kw: (
+                            ({}, {url}) if gone else ({url: echo}, set())))
+    assert prefetch_browser_jds([dict(original)], stores) == 0
+    assert stores.tracking.get(original["pk"]) == original

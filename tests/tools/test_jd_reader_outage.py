@@ -85,7 +85,7 @@ def test_unavailable_reader_keeps_job_found_with_real_reason_and_never_tailors(m
     assert result['result'] == 'deferred'
     assert row['status'] == 'found'
     assert LIMIT in row['jd_read_error']
-    assert 'Attempt 1 of 3' in row['jd_read_error']
+    assert 'Attempt 1;' in row['jd_read_error']
     assert 'UTC' in row['jd_read_error']
     assert not row.get('fail_kind')
     assert not tracking.r.exists(f"lock:job:{pk}")
@@ -191,18 +191,24 @@ def test_persisted_budget_deadlines_and_real_ui_projection(monkeypatch):
     clock[0] += timedelta(seconds=299)
     assert run.run_job(pk, stores)["reason"] == "jd_read_not_eligible"
     clock[0] += timedelta(seconds=1)
-    assert run.run_job(pk, stores)["reason"] == "jd_reader_exhausted"
+    assert run.run_job(pk, stores)["result"] == "deferred"
     row = tracking.get(pk)
-    assert row["status"] == "error"
+    assert row["status"] == "found"
     assert row["jd_read_attempts"] == 3
     assert row["jd_read_revision"] == 6
-    assert row["jd_read_retry_at"] is None
-    assert row["jd_read_error"] == ""
-    assert row["fail_kind"] == "jd_reader_exhausted"
-    assert "Retry" in _to_ui(row, artifacts)["closed_reason"]
-    assert "did not prepare or send" in row["error"]
+    assert row["jd_read_retry_at"] == (clock[0] + timedelta(seconds=300)).isoformat()
+    assert row["fail_kind"] == ""
+    assert "No application was prepared or sent" in row["jd_read_error"]
+    clock[0] += timedelta(seconds=299)
+    assert run.run_job(pk, stores)["reason"] == "jd_read_not_eligible"
+    clock[0] += timedelta(seconds=1)
+    assert run.run_job(pk, stores)["result"] == "deferred"
+    row = tracking.get(pk)
+    assert row["jd_read_attempts"] == 3  # saturated, not a retry ceiling
+    assert row["jd_read_revision"] == 8
+    assert row["jd_read_retry_at"] == (clock[0] + timedelta(seconds=300)).isoformat()
     assert tracking.get(other) == other_before
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 @pytest.mark.parametrize("outcome", ["unavailable", "usable", "unreadable", "sponsorship"])
@@ -331,7 +337,8 @@ def test_retry_owns_session_reset_without_a_found_gap(monkeypatch):
         row = tracking.get(pk)
         assert row["status"] == "tailoring"
         assert row["jd_read_revision"] == 9
-        assert row["jd_read_attempts"] == 0
+        assert row["jd_read_attempts"] == 3  # not cleared by admission
+        assert row["fail_kind"] == "jd_reader_exhausted"
         assert row["jd_read_prepare_only"] is True
         assert run.run_job(pk, stores)["result"] == "already_done"
         assert run.retry_job(pk, stores)["result"] == "already_running"
@@ -395,9 +402,10 @@ def test_reopen_refuses_active_and_exhausted_without_events_or_tasks(monkeypatch
                         fail_kind="jd_reader_exhausted")
     before = tracking.get(pk)
     tasks = BackgroundTasks()
-    assert "Retry" in callback(pk, tasks)["note"]
-    assert tracking.get(pk) == before
-    assert not tasks.tasks
+    result = callback(pk, tasks)
+    assert result["ok"] is True and result["status"] == "retry_scheduled"
+    assert tracking.get(pk) == before  # deferred read, not an immediate scoring reset
+    assert len(tasks.tasks) == 1
     tracking.set_status(pk, Status.SKIPPED, jd_read_attempts=0,
                         fail_kind="", confirmation_id="")
     before = tracking.get(pk)
@@ -1127,7 +1135,7 @@ def test_actual_skip_then_retry_remains_review_only(
     assert not tracking.r.exists(f"lock:job:{pk}")
 
 
-def test_actual_reopen_refuses_exhaustion_after_skip(monkeypatch):
+def test_actual_reopen_retries_exhaustion_after_skip_without_scoring(monkeypatch):
     from fastapi import BackgroundTasks
     from core.apply_queue import ApplyQueue
     import server
@@ -1152,12 +1160,11 @@ def test_actual_reopen_refuses_exhaustion_after_skip(monkeypatch):
     pending, leases = queue.pending(), queue.in_flight()
     tasks = BackgroundTasks()
     result = reopen(pk, tasks)
-    assert result["ok"] is False
-    assert "Retry" in result["note"]
+    assert result["ok"] is True and result["status"] == "retry_scheduled"
     assert tracking.get(pk) == before
     assert tracking.status_counts() == counts
     assert queue.pending() == pending and queue.in_flight() == leases
-    assert tasks.tasks == [] and events == []
+    assert len(tasks.tasks) == 1 and events == []
 
 
 def test_retry_session_reset_failure_is_visible_and_second_retry_works(monkeypatch):
@@ -1187,7 +1194,7 @@ def test_retry_session_reset_failure_is_visible_and_second_retry_works(monkeypat
     assert row["status"] == "error"
     assert row["jd_read_revision"] == 8  # admitted + guarded attention
     assert row["jd_read_prepare_only"] is True
-    assert row["jd_read_attempts"] == 0
+    assert row["jd_read_attempts"] == 3  # failed reset cannot settle reader
     assert row["resume_s3_key"] == ""
     assert "Retry" in row["error"]
     assert row["apply_requested_at"] == ""
@@ -1677,3 +1684,268 @@ def test_historical_relative_prior_request_cannot_enter_application_handoff(
     assert outcome["result"] == "gated"
     assert outcome["reason"] == "posting_guard_review_required"
     assert tracking.get(pk) == before
+
+
+# Issue #403: an observation race is local, but a proven shared outage is not.
+def test_browser_page_refusal_and_malformed_report_do_not_latch_other_rows(monkeypatch):
+    at = [100.0]
+    monkeypatch.setattr(jd.time, "monotonic", lambda: at[0])
+    for problem in (
+            "BrowserSkill posting observation changed; retry this posting",
+            "BrowserSkill operation unavailable: permission_denied",
+            "BrowserSkill operation unavailable: invalid CLI response",
+            "BrowserSkill operation unavailable: posting did not finish loading",
+            "BrowserSkill operation unavailable: Workday JD container is empty"):
+        jd._note_browser_problem(problem)
+        assert jd._browser_retry == (0, "")
+    jd._note_browser_problem("BrowserSkill unavailable: daemon disconnected")
+    assert jd._browser_retry[0] == 400.0
+    with pytest.raises(jd.PostingReadUnavailable, match="daemon disconnected"):
+        jd._check_browser_reader()
+    # Browser availability is independently recovered after the pause.
+    at[0] = 401.0
+    jd._check_browser_reader()
+
+
+def test_unreadable_guarded_jd_is_deferred_without_metadata_settlement(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from core import steering
+
+    _quiet(monkeypatch)
+    tracking, pk = _synthetic_tracking()
+    stores = SimpleNamespace(tracking=tracking)
+    now = [datetime(2030, 1, 1, tzinfo=UTC)]
+    monkeypatch.setattr(run, "_utc_now", lambda: now[0])
+    source = tracking.get(pk)["jd_url"]
+    seen = []
+
+    async def reader(row, **kw):
+        seen.append((row["jd_url"], row.get("jd_read_attempts", 0)))
+        return "Error page" if len(seen) == 1 else GOOD
+
+    _guarded_meta(monkeypatch, reader)
+    first = run.run_job(pk, stores)
+    deferred = tracking.get(pk)
+    assert first["result"] == "deferred"
+    assert deferred["status"] == "found"
+    assert deferred["jd_read_attempts"] == 1
+    assert deferred["jd_text"] == "Test role"
+    assert deferred["jd_read_retry_at"] == (now[0] + timedelta(seconds=60)).isoformat()
+    assert run.run_job(pk, stores)["reason"] == "jd_read_not_eligible"
+    assert len(seen) == 1
+    # No ADK preparation is permitted even on a good subsequent read in this
+    # isolated synthetic test; a separate skip settles after source commit.
+    monkeypatch.setattr(steering, "read", lambda: {"content": ""})
+    monkeypatch.setattr(run, "_effective_prefs", lambda company: object())
+    monkeypatch.setattr(run, "_eligibility_conflict",
+                        lambda *args: "synthetic review-only exclusion")
+    now[0] += timedelta(seconds=60)
+    second = run.run_job(pk, stores)
+    settled = tracking.get(pk)
+    assert second["result"] == "skipped"
+    assert settled["jd_text"] == GOOD
+    assert settled["jd_read_attempts"] == 0
+    assert settled["jd_read_retry_at"] is None
+    assert settled["jd_read_error"] == ""
+    assert seen == [(source, 0), (source, 1)]
+
+
+@pytest.mark.parametrize(("status", "fail_kind"), [
+    (Status.ERROR, "jd_reader_exhausted"),
+    (Status.FAILED, "no_jd"),
+])
+def test_legacy_transient_row_has_backed_off_review_only_retry(monkeypatch, status, fail_kind):
+    from datetime import UTC, datetime, timedelta
+
+    _quiet(monkeypatch)
+    now = [datetime(2030, 1, 1, tzinfo=UTC)]
+    monkeypatch.setattr(run, "_utc_now", lambda: now[0])
+    tracking, pk = _synthetic_tracking()
+    future = (now[0] + timedelta(seconds=300)).isoformat()
+    tracking.set_status(pk, status, fail_kind=fail_kind,
+                        jd_read_attempts=3, jd_read_retry_at=future)
+    stores = SimpleNamespace(tracking=tracking)
+    original = tracking.get(pk)
+    assert run.retry_job(pk, stores)["reason"] == "jd_read_not_eligible"
+    assert tracking.get(pk) == original
+
+    async def reset(_pk):
+        assert tracking.get(pk)["jd_read_attempts"] == 3
+        assert tracking.get(pk)["fail_kind"] == fail_kind
+
+    monkeypatch.setattr(run, "_reset_session", reset)
+    now[0] += timedelta(seconds=300)
+    result = run.retry_job(pk, stores)
+    after = tracking.get(pk)
+    assert result["result"] == "deferred"
+    assert after["status"] == "found"
+    assert after["jd_url"] == original["jd_url"]
+    assert after["jd_read_attempts"] == 3
+    assert after["jd_read_retry_at"] == (now[0] + timedelta(seconds=300)).isoformat()
+    assert after["fail_kind"] == fail_kind  # old marker clears only after verified read
+    assert after["jd_read_prepare_only"] is True
+
+
+def test_apply_role_transient_response_has_no_placeholder_then_valid_reentry(monkeypatch):
+    from fastapi import BackgroundTasks
+    from tools import posting_guard as pg
+    import server
+
+    url = "https://jobs.ashbyhq.com/example-co/job-1"
+    assert server._manual_role_identity(url)
+    tracking = RedisTracking(fakeredis.FakeRedis(decode_responses=True))
+    stores = SimpleNamespace(tracking=tracking)
+    monkeypatch.setattr(server, "make_stores", lambda *a, **kw: stores)
+    monkeypatch.setattr(server, "get_settings", lambda: SimpleNamespace())
+    app = server.create_app()
+    callback = next(route.endpoint for route in app.routes
+                    if getattr(route, "path", "") == "/actions/apply-role")
+    inspected = pg.analyze(GOOD, html_variants=[
+        "<html><body><p>" + GOOD + "</p></body></html>"], source_required=True)
+    verified = {**inspected, "title": "Synthetic role",
+                "source_kind": "http_html", "source_url": url}
+    removed_text = "This job is no longer available."
+    removed = {**pg.analyze(removed_text, html_variants=[
+        "<html><body>" + removed_text + "</body></html>"], source_required=True),
+        "source_kind": "http_html", "source_url": url}
+    other = {**verified, "source_url": "https://different.example/jobs/2"}
+    short_text = "The posting is loading."
+    short = {**pg.analyze(short_text, html_variants=[
+        "<html><body><p>" + short_text + "</p></body></html>"], source_required=True),
+        "source_kind": "http_html", "source_url": url}
+    responses = [
+        jd.PostingReadUnavailable("synthetic read refused"),
+        removed, other, short, verified]
+    seen = []
+    def read(address, *args, **kw):
+        seen.append(address)
+        answer = responses.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(jd, "fetch_jd_meta", read)
+    for expected in ("posting_reader_unavailable", "posting_removed",
+                     "posting_source_unverified", "posting_reader_unavailable"):
+        tasks = BackgroundTasks()
+        result = callback({"url": url}, tasks)
+        assert result["ok"] is False and result["error"] == expected
+        if expected == "posting_reader_unavailable":
+            assert result["retryable"] is True
+            assert result["retry_after_seconds"] == 60
+        assert tracking.all() == []
+        assert tasks.tasks == []
+    tasks = BackgroundTasks()
+    success = callback({"url": url}, tasks)
+    assert success["ok"] is True
+    assert success["status"] == "running"
+    assert len(tracking.all()) == 1
+    assert len(tasks.tasks) == 1  # Not executed: no real preparation
+    assert seen == [url] * 5
+
+
+@pytest.mark.parametrize("marker", ["no_jd", "jd_reader_exhausted"])
+def test_legacy_transient_pending_queue_is_not_resurrected(monkeypatch, marker):
+    tracking, pk = _synthetic_tracking()
+    tracking.set_status(pk, Status.ERROR, fail_kind=marker,
+                        jd_read_attempts=3, jd_read_retry_at=None)
+    stores = SimpleNamespace(tracking=tracking)
+    original = tracking.get(pk)
+    monkeypatch.setattr(run, "_pending_apply_item", lambda *args: True)
+    assert run.retry_precheck(pk, stores)["reason"] == "apply_queue_pending"
+    assert run.retry_job(pk, stores)["reason"] == "apply_queue_pending"
+    assert tracking.get(pk) == original
+    assert not tracking.r.exists(f"lock:job:{pk}")
+
+
+def test_verified_row_browser_only_retry_cannot_inherit_old_source_proof(monkeypatch):
+    """A browser echo from a different final URL cannot settle a verified JD."""
+    from tools import posting_guard as pg
+
+    _quiet(monkeypatch)
+    tracking, pk = _synthetic_tracking()
+    url = tracking.get(pk)["jd_url"]
+    cached = "Build reliable platform services safely. " * 18
+    prior = pg.analyze(cached, html_variants=["<p>" + cached + "</p>"],
+                       source_required=True)
+    assert prior["posting_guard"]["source_verified"] is True
+    # The real store forbids status-only writes of bound JD/guard fields.
+    # Seed the verified generation via its normal guarded CAS.
+    assert tracking.update_posting_guard(
+        pk, tracking.get(pk), prior, source_witness=True)
+    tracking.set_status(pk, Status.FOUND, jd_read_attempts=1,
+                        jd_read_retry_at=None,
+                        apply_requested_at="synthetic-request")
+    before = tracking.get(pk)
+    stores = SimpleNamespace(tracking=tracking)
+
+    foreign = "Unrelated role description on a different page. " * 20
+    report = pg.analyze(foreign)
+    report.update(source_kind="", source_url="https://foreign.example/jobs/2")
+    assert not jd.matched_source_witness(before, report)
+    visited = []
+    def fetch(address, kind="jd"):
+        visited.append((address, kind))
+        return report
+    monkeypatch.setattr(jd, "fetch_jd_meta", fetch)
+    monkeypatch.setattr(run, "_enqueue_apply",
+                        lambda *a, **kw: pytest.fail("No queue after source mismatch"))
+    monkeypatch.setattr(run, "_drive_async",
+                        lambda *a, **kw: pytest.fail("No preparation after mismatch"))
+
+    result = run.run_job(pk, stores)
+    after = tracking.get(pk)
+    assert result["result"] == "deferred"
+    assert visited == [(url, "jd_sweep")]
+    assert after["status"] == "found"
+    assert after["jd_text"] == before["jd_text"]
+    assert after["posting_guard"] == before["posting_guard"]
+    assert after["posting_guard"]["source_verified"] is True  # old JD only
+    assert after["jd_read_attempts"] == 2
+    assert after["jd_read_retry_at"]
+    assert after.get("apply_requested_at") == before.get("apply_requested_at")
+    assert not tracking.r.exists(f"lock:job:{pk}")
+
+
+@pytest.mark.parametrize("attempts,matched", [(0, True), (2, True), (0, False), (2, False)])
+def test_http_removal_only_closes_original_source_conditionally(
+        monkeypatch, attempts, matched):
+    """Verified removal closes a row before ADK; foreign shells still defer."""
+    from tools import posting_guard as pg
+
+    _quiet(monkeypatch)
+    tracking, pk = _synthetic_tracking()
+    url = tracking.get(pk)["jd_url"]
+    tracking.set_status(pk, Status.FOUND, jd_read_attempts=attempts,
+                        jd_read_retry_at=None)
+    before = tracking.get(pk)
+    stores = SimpleNamespace(tracking=tracking)
+    notice = "This job is no longer available."
+    report = pg.analyze(notice, html_variants=["<p>" + notice + "</p>"],
+                        source_required=True)
+    report.update(source_kind="http_html",
+                  source_url=url if matched else "https://foreign.example/jobs/2")
+    assert jd.matched_source_witness(before, report) is matched
+    monkeypatch.setattr(jd, "fetch_jd_meta",
+                        lambda address, kind="jd": report)
+    monkeypatch.setattr(run, "_enqueue_apply",
+                        lambda *a, **kw: pytest.fail("Removed posting reached queue"))
+    monkeypatch.setattr(run, "_drive_async",
+                        lambda *a, **kw: pytest.fail("Removed posting reached ADK"))
+
+    result = run.run_job(pk, stores)
+    after = tracking.get(pk)
+    if matched:
+        assert result == {"result": "gone", "pk": pk, "reason": "posting_removed"}
+        assert after["status"] == "job_gone"
+        assert after["jd_read_attempts"] == 0
+        assert after["jd_read_retry_at"] is None
+        assert after["jd_read_error"] == ""
+        assert "removed" in after["fail_reason"]
+    else:
+        assert result["result"] == "deferred"
+        assert after["status"] == "found"
+        assert after["jd_read_attempts"] == attempts + 1
+        assert after["jd_read_retry_at"]
+    assert after["jd_text"] == before["jd_text"]
+    assert after["posting_guard"] == before["posting_guard"]
+    assert not tracking.r.exists(f"lock:job:{pk}")
