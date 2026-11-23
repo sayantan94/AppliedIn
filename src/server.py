@@ -498,6 +498,7 @@ def _manual_role_identity(url: str) -> dict | None:
     """Closed URL/tenant/posting grammar for manual row identity, not a reader."""
     import hashlib
     import re
+    import tldextract
     from urllib.parse import parse_qsl, urlsplit
 
     token = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -562,9 +563,9 @@ def _manual_role_identity(url: str) -> dict | None:
         personio = re.fullmatch(r"([a-z0-9_-]+)\.jobs\.personio\.(?:de|com)", host)
         if workday:
             ats, tenant = "workday", workday[1]
-            if len(parts) == 5 and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+            if len(parts) in (4, 5) and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
                 parts = parts[1:]
-            if len(parts) != 4 or parts[1] != "job":
+            if len(parts) not in (3, 4) or parts[1] != "job":
                 return None
             context = parts[0]
             posting = "/".join(parts[2:])
@@ -591,13 +592,13 @@ def _manual_role_identity(url: str) -> dict | None:
         # outside the accepted token alphabet, so replacing '/' is bijective.
         identity_id = f"{ats}:{tenant.lower()}:{context.lower()}:{posting.replace('/', '.')}"
     else:
-        # Unknown sites are *not* promoted to a vendor. Use only the owning
-        # registered hostname and exact path/query for a conservative identity.
-        labels = host.split(".")
-        if len(labels) < 2 or not parts:
+        # Keep the exact hostname/path posting identity. Resolve a conservative
+        # employer hint with the bundled offline public suffix list (com.vn).
+        registered = tldextract.TLDExtract(
+            suffix_list_urls=(), extra_suffixes=("test", "example"))(host)
+        if not registered.suffix or not registered.domain or not parts:
             return None
-        label = labels[-3] if len(labels) >= 3 and labels[-2:] in (
-            ["co", "uk"], ["com", "au"]) else labels[-2]
+        label = registered.domain
         if not token.fullmatch(label):
             return None
         meaningful = sorted((k, v) for k, v in query
@@ -608,16 +609,29 @@ def _manual_role_identity(url: str) -> dict | None:
         signature = repr((host, u.path.rstrip("/"), meaningful))
         identity_id = "custom:" + hashlib.sha256(signature.encode()).hexdigest()[:24]
 
-    if label.lower() in {"company", "unknown", "jobs", "job", "careers",
-                         "apply", "greenhouse", "ashby", "lever", "linkedin",
-                         "workday", "workable", "personio", "smartrecruiters"}:
+    generic = {"company", "unknown", "jobs", "job", "careers", "apply",
+               "greenhouse", "ashby", "ashbyhq", "lever", "linkedin",
+               "workday", "workable", "personio", "smartrecruiters",
+               "breezy", "homerun", "phenom", "eightfold", "jobvite",
+               "myworkdayjobs", "teamtailor", "recruitee"}
+    provider_host = (host.endswith((".breezy.hr", ".homerun.co", ".recruitee.com",
+                                  ".myworkdayjobs.com", ".eightfold.ai",
+                                  ".jobs.personio.com", ".jobs.personio.de"))
+                     or host in {"breezy.hr", "homerun.co", "recruitee.com",
+                                 "apply.workable.com",
+                                 "jobs.smartrecruiters.com", "jobs.ashbyhq.com",
+                                 "boards.greenhouse.io", "jobs.lever.co"})
+    generic_label = (label.lower() in generic
+                     or re.search(r"(?:^|[-_])(?:careers|jobs|recruiting)$",
+                                  label, re.I) is not None)
+    if ats != "custom" and generic_label:
         return None
-    company = " ".join(p for p in re.split(r"[-_]+", label) if p).title()
-    if not company or company.endswith("#"):
-        return None
+    # Known ATS paths expose an independent employer-bearing tenant; unknown
+    # shared-provider hosts do not. Keep posting identity for the page read.
+    company = ("" if ats == "custom" and (provider_host or generic_label) else
+               " ".join(p for p in re.split(r"[-_]+", label) if p).title())
     return {"ats": ats, "company": company, "job_id": identity_id,
             "linkedin_id": linkedin_id}
-
 
 def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tuple[dict | None, bool]:
     """Prefer canonical pks; recover historic rows using stored URL/hash proof.
@@ -652,6 +666,18 @@ def _manual_existing_role(tracking, identity: dict, source_url: str = "") -> tup
                 continue
             matches[row["pk"]] = row
     elif source_url:
+        # Canonical historical rows can have a different employer hint in
+        # their pk. Confirm URL-derived posting identity before any new pk.
+        for row in tracking.all():
+            if (not isinstance(row, dict) or row.get("ats") != identity["ats"]
+                    or row.get("job_id") != identity["job_id"]
+                    or not row.get("jd_url") or not row.get("company")
+                    or row.get("pk") != make_pk(row["company"], row["job_id"])):
+                continue
+            previous = _manual_role_identity(row["jd_url"])
+            if (previous and previous["ats"] == identity["ats"]
+                    and previous["job_id"] == identity["job_id"]):
+                matches[row["pk"]] = row
         # Pre-#372 apply-role hashed the entire *stored* source URL. Prove
         # that historic URL/hash pair before comparing parsed ATS posting IDs:
         # decorative query/slash differences must not evade a protected row.
@@ -2154,7 +2180,7 @@ def create_app() -> FastAPI:
         row, ambiguous = _manual_existing_role(stores.tracking, identity, url)
         if ambiguous:
             return {"ok": False, "error": "ambiguous_posting_identity"}
-        if not row and not identity["company"]:
+        if not row and identity["ats"] == "linkedin":
             # A standalone LinkedIn ID proves a role, not its employer.
             return {"ok": False, "error": "employer_identity_unverified"}
         if row:
@@ -2185,10 +2211,18 @@ def create_app() -> FastAPI:
                 or not pg.valid(meta.get("text"), meta.get("posting_guard"))
                 or not jd.matched_source_witness({"jd_url": read_url}, meta)):
             return {"ok": False, "error": "posting_source_unverified"}
-        title = (meta.get("title") or ((body or {}).get("title") or "").strip()
-                 or (row or {}).get("title") or "Role from URL")
-        if not isinstance(title, str):
+        title = meta.get("title") or (row or {}).get("title") or ""
+        if not isinstance(title, str) or not title.strip():
             return {"ok": False, "error": "posting_title_invalid"}
+        page_company = jd._employer_name(meta.get("company"))
+        if (row and not funded_tag and page_company
+                and page_company.casefold() != row["company"].casefold()):
+            # New text cannot silently re-key or overwrite a protected identity.
+            return {"ok": False, "error": "employer_identity_conflict"}
+        if not row and not funded_tag:
+            company = page_company or identity["company"]
+            if not company:
+                return {"ok": False, "error": "employer_identity_unverified"}
         if funded_tag:
             from core.outreach_sources import SourceHold
             from discovery.career_ops import funded_apply_role_handoff
