@@ -1841,3 +1841,17 @@ def test_apply_role_transient_response_has_no_placeholder_then_valid_reentry(mon
     assert len(tracking.all()) == 1
     assert len(tasks.tasks) == 1  # Not executed: no real preparation
     assert seen == [url] * 5
+
+
+@pytest.mark.parametrize("marker", ["no_jd", "jd_reader_exhausted"])
+def test_legacy_transient_pending_queue_is_not_resurrected(monkeypatch, marker):
+    tracking, pk = _synthetic_tracking()
+    tracking.set_status(pk, Status.ERROR, fail_kind=marker,
+                        jd_read_attempts=3, jd_read_retry_at=None)
+    stores = SimpleNamespace(tracking=tracking)
+    original = tracking.get(pk)
+    monkeypatch.setattr(run, "_pending_apply_item", lambda *args: True)
+    assert run.retry_precheck(pk, stores)["reason"] == "apply_queue_pending"
+    assert run.retry_job(pk, stores)["reason"] == "apply_queue_pending"
+    assert tracking.get(pk) == original
+    assert not tracking.r.exists(f"lock:job:{pk}")
