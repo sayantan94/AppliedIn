@@ -961,3 +961,80 @@ def test_apply_role_decision_unchanged_and_cheaper_than_per_call_extractor(
         slow_response = _apply(env, "https://boards.greenhouse.io/example-co/jobs/4242").json()
     assert fast_response == slow_response
     assert fast_response["ok"] is True and fast_response["status"] == "running"
+
+
+# #419: resident memory. A counted object census of repeated requests stays
+# flat; the growth is freed pages kept in per-thread glibc malloc arenas after
+# bursts of concurrent full-store requests. The daemon returns them after a slow
+# request, at most once a minute.
+def _apply_role_call():
+    from fastapi.routing import APIRoute
+
+    app = server.create_app()
+    return next(r for r in app.routes if isinstance(r, APIRoute)
+                and r.path == "/actions/apply-role").dependant.call
+
+
+def test_repeated_apply_role_keeps_object_count_flat_and_decision_same(env):
+    import collections
+    import gc
+
+    from fastapi import BackgroundTasks
+
+    _seed_custom_rows(env.tracking)
+    call = _apply_role_call()
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+
+    def census():
+        gc.collect()
+        return collections.Counter(type(o).__qualname__ for o in gc.get_objects())
+
+    warm = [call({"url": url}, BackgroundTasks()) for _ in range(3)]
+    census()  # the first census allocates its own bookkeeping
+    before = census()
+    repeated = [call({"url": url}, BackgroundTasks()) for _ in range(40)]
+    after = census()
+
+    assert all(response == warm[-1] for response in repeated)
+    assert warm[-1]["ok"] is True and warm[-1]["status"] == "existing"
+    grown = {name: n for name, n in (after - before).items() if n >= 20}
+    assert grown == {}, grown
+
+
+def _clock(monkeypatch, step):
+    ticks = iter(range(0, 10_000_000, step))
+    monkeypatch.setattr(server, "_wall_clock", lambda: float(next(ticks)))
+
+
+def test_slow_requests_release_freed_heap_at_most_once_a_minute(env, monkeypatch):
+    released = []
+    monkeypatch.setattr(server, "_release_freed_heap", lambda: released.append(1))
+    monkeypatch.setattr(server, "_heap_trim_at", [])
+    url = "https://boards.greenhouse.io/example-co/jobs/4242"
+
+    _clock(monkeypatch, 2)  # every request looks slow; two ticks per request
+    first, second = _apply(env, url).json(), _apply(env, url).json()
+    assert len(released) == 1
+
+    _clock(monkeypatch, 61)
+    server._heap_trim_at[:] = [0.0]
+    third = _apply(env, url).json()
+    assert len(released) == 2
+    assert first["ok"] is second["ok"] is third["ok"] is True
+    assert second == third
+
+
+def test_fast_requests_do_not_release_heap(env, monkeypatch):
+    released = []
+    monkeypatch.setattr(server, "_release_freed_heap", lambda: released.append(1))
+    monkeypatch.setattr(server, "_heap_trim_at", [])
+    monkeypatch.setattr(server, "_wall_clock", lambda: 5.0)
+
+    response = _apply(env, "https://boards.greenhouse.io/example-co/jobs/4242")
+
+    assert response.json()["ok"] is True
+    assert released == []
+
+
+def test_release_freed_heap_is_safe_on_this_platform():
+    server._release_freed_heap()
