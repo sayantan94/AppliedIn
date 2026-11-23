@@ -1,6 +1,7 @@
 """Daemon-PID shutdown regressions use only faked signals, clock and server."""
 import signal
 import subprocess
+import threading
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,8 +49,10 @@ def test_uvicorn_sigterm_exits_process_even_with_unfinished_executor(monkeypatch
         raise SelfExit()
 
     monkeypatch.setattr(daemon.os, "_exit", exit_process)
+    stopping = threading.Event()
     with pytest.raises(SelfExit):
-        daemon._serve_http(9911)
+        daemon._serve_http(9911, stop_event=stopping)
+    assert stopping.is_set()
     assert events[0] == "recovered"
     assert ("signal", signal.SIGTERM) in events
     assert ("exit", 0) in events
@@ -188,3 +191,22 @@ def test_two_same_instance_daemons_cannot_enter_recovery_concurrently(tmp_path, 
                 pytest.fail("duplicate daemon reached startup work")
     with daemon._instance_owner():
         pass
+
+
+@pytest.mark.parametrize("loop_name", [
+    "_discovery_loop", "_worker_loop", "_heartbeat_loop",
+])
+def test_stopped_worker_loops_do_not_begin_next_cycle(loop_name, monkeypatch):
+    stop_event = threading.Event()
+    stop_event.set()
+    # The already-stopped event must prevent all queued work/discovery/beat;
+    # no real store, network or browser may be called.
+    if loop_name == "_discovery_loop":
+        from core import flags
+        monkeypatch.setattr(flags, "get_flag", lambda *a: None)
+    elif loop_name == "_worker_loop":
+        monkeypatch.setattr(daemon, "make_stores", lambda: SimpleNamespace())
+    else:
+        from core import flags
+        monkeypatch.setattr(flags, "beat_workers", lambda *a: pytest.fail("heartbeat after stop"))
+    getattr(daemon, loop_name)(stop_event)
