@@ -138,3 +138,19 @@ def test_short_workday_http_fallback_remains_guarded(monkeypatch):
     assert meta["company"] == "Example Co"
     assert meta["title"] == "Platform Engineer"
     assert jd.matched_source_witness({"jd_url": url}, meta)
+
+
+def test_navigation_heading_is_not_the_role_heading(monkeypatch):
+    url = "https://careers.example-careers.com/role/1"
+    html = ("<html><body><h1>About Us</h1><h2>Platform Engineer</h2><p>" +
+            DETAIL + "</p></body></html>")
+    meta = read_page(monkeypatch, url, html)
+    assert meta["title"] == "Platform Engineer"
+
+
+def test_provider_brand_in_same_page_jsonld_is_not_a_company(monkeypatch):
+    url = "https://example.breezy.hr/p/role"
+    meta = read_page(monkeypatch, url, page(
+        url, company="Breezy HR", title="Platform Engineer"))
+    assert not meta.get("company")
+    assert meta["title"] == "Platform Engineer"
