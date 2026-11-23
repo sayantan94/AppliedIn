@@ -505,3 +505,15 @@ def test_deferred_fresh_read_requires_usable_source_without_cached_fallback(
     with pytest.raises(jd.PostingReadUnavailable):
         asyncio.run(run._jd_meta(row))
     assert row["jd_text"] == captured
+
+
+def test_deferred_row_without_original_url_cannot_settle_from_cached_text(monkeypatch):
+    from agent import run
+    from tools import jd
+
+    row = {"jd_url": "", "jd_text": "A previously cached description. " * 30,
+           "jd_read_attempts": 3}
+    monkeypatch.setattr(jd, "fetch_jd_meta",
+                        lambda *a, **kw: pytest.fail("No URL may reach a reader"))
+    with pytest.raises(jd.PostingReadUnavailable, match="Original posting URL"):
+        asyncio.run(run._jd_meta(row))
