@@ -561,11 +561,25 @@ github: {prefs.github or '""'}
 """
 
 
+@functools.lru_cache(maxsize=1)
+def _offline_tld_extract():  # noqa: ANN202
+    """One extractor over the bundled offline public suffix list.
+
+    Building a TLDExtract parses the whole suffix list into a trie (about 45 ms).
+    apply-role resolves the stored URL of every custom-host row through
+    `_manual_role_identity`, so a new extractor per call cost about 45 s of
+    CPU per request. The configuration is fixed, so one instance gives the
+    same answers.
+    """
+    import tldextract
+
+    return tldextract.TLDExtract(suffix_list_urls=(), extra_suffixes=("test", "example"))
+
+
 def _manual_role_identity(url: str) -> dict | None:
     """Closed URL/tenant/posting grammar for manual row identity, not a reader."""
     import hashlib
     import re
-    import tldextract
     from urllib.parse import parse_qsl, urlsplit
 
     token = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -661,8 +675,7 @@ def _manual_role_identity(url: str) -> dict | None:
     else:
         # Keep the exact hostname/path posting identity. Resolve a conservative
         # employer hint with the bundled offline public suffix list (com.vn).
-        registered = tldextract.TLDExtract(
-            suffix_list_urls=(), extra_suffixes=("test", "example"))(host)
+        registered = _offline_tld_extract()(host)
         if not registered.suffix or not registered.domain or not parts:
             return None
         label = registered.domain
