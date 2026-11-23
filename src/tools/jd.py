@@ -24,6 +24,21 @@ class PostingReadUnavailable(RuntimeError):
     """The reader failed before it could establish what is on the page."""
 
 
+_JD_FLOOR = 80
+_JD_NOISE = ("something went wrong", "page not found", "access denied", "enable javascript")
+
+
+def _unreadable(jd_text: str) -> bool:
+    """Too little to tailor from: a transient read, never a terminal JD.
+
+    The floor is intentionally low so legitimate short postings still pass.
+    """
+    t = " ".join((jd_text or "").lower().split())
+    if len(t) < _JD_FLOOR:
+        return True
+    return any(n in t for n in _JD_NOISE) and len(t) < 400
+
+
 # A shared CLI outage must not launch another session for every row in a sweep.
 # HTTP/ATS reads still run; only the browser reader backs off for five minutes.
 _browser_retry: tuple[float, str] = (0, "")
