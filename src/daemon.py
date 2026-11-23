@@ -14,12 +14,16 @@ then open http://127.0.0.1:8787
 
 from __future__ import annotations
 
+import fcntl
 import math
 import os
+import signal
 import threading
 import time
 from typing import Any
 import sys
+from contextlib import contextmanager
+from pathlib import Path
 
 # A typo or extra argument in a synthetic-only invocation must NEVER fall
 # through into the production worker/dashboard startup. Library imports are
@@ -75,9 +79,10 @@ def _discovery_due(last_raw: str, now: float) -> float:
     return min(last, now) + DISCOVER_INTERVAL
 
 
-def _discovery_loop() -> None:
+def _discovery_loop(stop_event: threading.Event | None = None) -> None:
     """The 'cron' — find + enqueue jobs on a schedule. Runs in its OWN thread so a
     long/expensive discovery cycle (many crawls) never blocks job processing."""
+    stop_event = stop_event or threading.Event()
     from core import flags
     from discovery.handler import run_discovery
 
@@ -92,7 +97,7 @@ def _discovery_loop() -> None:
     next_due = _discovery_due(flags.get_flag("last_discovery_at"), time.time())
     log.info("next scheduled discovery in %dm — use Discover to run one now",
              max(0, int(next_due - time.time())) // 60)
-    while True:
+    while not stop_event.is_set():
         now = time.time()
         try:
             from discovery.career_ops import scheduled_tick
@@ -175,17 +180,18 @@ def _evaluate_one(pk: str) -> None:
             log.exception("could not mark %s errored", pk)
 
 
-def _worker_loop() -> None:
+def _worker_loop(stop_event: threading.Event | None = None) -> None:
     """EVALUATE worker — drain the tailor queue and score + tailor each job
     (LLM-only). Runs _EVAL_LANES jobs CONCURRENTLY so one slow tailor never
     stalls the backlog. Auto-approved jobs are handed to the apply queue, NOT
     applied here, so a slow browser apply never blocks evaluation. Runs 24/7."""
+    stop_event = stop_event or threading.Event()
     from concurrent.futures import ThreadPoolExecutor
 
     from core import flags
 
     stores = make_stores()
-    while True:
+    while not stop_event.is_set():
         if flags.paused():
             time.sleep(POLL_INTERVAL)
             continue
@@ -367,7 +373,7 @@ def paused_dispatchable(q: Any, reason: str) -> dict | None:
     return q.next(requested_only=True)
 
 
-def _apply_loop() -> None:
+def _apply_loop(stop_event: threading.Event | None = None) -> None:
     """APPLY worker — its own thread, so a slow browser apply never blocks the
     evaluate worker.
 
@@ -399,10 +405,11 @@ def _apply_loop() -> None:
     # Sized to the ceiling; the live flag is enforced per dispatch below, so
     # turning concurrency down takes effect on the next application rather than
     # needing a restart.
+    stop_event = stop_event or threading.Event()
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="apply") as pool:
         running: set = set()
         last_release_check = float("-inf")
-        while True:
+        while not stop_event.is_set():
             running = {f for f in running if not f.done()}
             # Fold in anything the old flat queue still holds, so an upgrade never
             # strands work someone already approved. It runs while paused too: a
@@ -634,7 +641,7 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
         log.info("recovered %d orphaned 'tailoring' job(s) → reset to found", t)
 
 
-def _heartbeat_loop() -> None:
+def _heartbeat_loop(stop_event: threading.Event | None = None) -> None:
     """Publish which worker loops are ALIVE, so a process without them can't
     masquerade as a healthy pipeline (`python -m server` serves the board and
     answers /stats while discovering, tailoring and applying exactly nothing).
@@ -642,10 +649,11 @@ def _heartbeat_loop() -> None:
     Runs in its OWN thread and only inspects thread liveness — never work
     progress — so a worker legitimately busy for ten minutes inside one browser
     apply still reads as alive."""
+    stop_event = stop_event or threading.Event()
     from core import flags
 
     names = {"discovery", "evaluate", "apply"}
-    while True:
+    while not stop_event.is_set():
         try:
             flags.beat_workers(sorted({t.name for t in threading.enumerate()} & names))
         except Exception:
@@ -685,13 +693,14 @@ def _start_funding_poller(settings=None) -> bool:
 
 
 
-def _outreach_followup_loop() -> None:
+def _outreach_followup_loop(stop_event: threading.Event | None = None) -> None:
     """At most one newly due, unqueued stage per 300-second tick; never SMTP."""
+    stop_event = stop_event or threading.Event()
     from core.config import get_settings
     from core.outreach_ledger import Ledger
     from core.outreach_email import enqueue_due_followup
 
-    while True:
+    while not stop_event.is_set():
         settings=get_settings()
         if (settings.mode=="local" and settings.outreach_enabled
                 and settings.outreach_followups_auto):
@@ -704,13 +713,14 @@ def _outreach_followup_loop() -> None:
         time.sleep(300)
 
 
-def _outreach_sender_loop() -> None:
+def _outreach_sender_loop(stop_event: threading.Event | None = None) -> None:
     """Only active SMTP owner. SQLite globally fences even a second process."""
+    stop_event = stop_event or threading.Event()
     from core.config import get_settings
     from core.outreach_ledger import Ledger
     from core.outreach_email import send_approved
 
-    while True:
+    while not stop_event.is_set():
         settings=get_settings()
         if settings.mode=="local" and settings.outreach_enabled:
             try:
@@ -728,7 +738,7 @@ def _outreach_sender_loop() -> None:
         time.sleep(300)
 
 
-def _start_outreach_followups(settings=None) -> bool:
+def _start_outreach_followups(settings=None, stop_event: threading.Event | None = None) -> bool:
     from core.config import get_settings
     from core.outreach_ledger import Ledger
 
@@ -738,10 +748,10 @@ def _start_outreach_followups(settings=None) -> bool:
     # Only pre-queue legacy orphan handling. Queue-linked live owners are never
     # assumed dead by a concurrent startup or elapsed lease.
     Ledger(settings).hold_orphaned_attempts()
-    threading.Thread(target=_outreach_sender_loop,daemon=True,
+    threading.Thread(target=_outreach_sender_loop,args=(stop_event,),daemon=True,
                      name="outreach-queued-sender").start()
     # Always start a gated producer so a later enabled flag is observed.
-    threading.Thread(target=_outreach_followup_loop,daemon=True,
+    threading.Thread(target=_outreach_followup_loop,args=(stop_event,),daemon=True,
                      name="outreach-followup-enqueue").start()
     return True
 
@@ -763,34 +773,129 @@ def _start_outreach_pixel(settings=None) -> bool:
     return True
 
 
+
+# Uvicorn captures SIGTERM itself while running in the main thread; installing
+# a handler before uvicorn.run would be overwritten. Hook the actual Server
+# signal path instead, and enforce a daemon-local deadline even when executor
+# threads cannot cooperate or HTTP shutdown cannot finish.
+_SHUTDOWN_GRACE_S = 5.0  # headroom inside the CLI's 10 s SIGTERM-only window
+
+
+def _shutdown_watchdog(requested: threading.Event, finished: threading.Event,
+                       seconds: float = _SHUTDOWN_GRACE_S) -> None:
+    requested.wait()
+    if not finished.wait(seconds):
+        log.warning("daemon SIGTERM deadline: terminating process; in-flight work remains uncertain")
+        os._exit(0)  # executor atexit joins can otherwise keep the PID indefinitely
+
+
+def _serve_http(port: int, stop_event: threading.Event | None = None,
+                workers: tuple[threading.Thread, ...] = ()) -> None:
+    from core.config import get_settings
+    from server import create_app, _recover_stuck
+    import uvicorn
+
+    # Same pre-serve recovery and Uvicorn options as server.serve, but keep the
+    # server handle locally so its signal and cooperative exit can be supervised.
+    _recover_stuck(get_settings())
+    requested, finished = threading.Event(), threading.Event()
+    stop_event = stop_event or threading.Event()
+
+    class _LocalServer(uvicorn.Server):
+        def handle_exit(self, sig: int, frame) -> None:
+            if sig == signal.SIGTERM:
+                stop_event.set()  # stop admitting new work before attempting HTTP cleanup
+                requested.set()
+            super().handle_exit(sig, frame)
+
+    server = _LocalServer(uvicorn.Config(
+        create_app(), host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=_shutdown_watchdog, args=(requested, finished),
+                     name="daemon-shutdown-watchdog", daemon=True).start()
+    try:
+        server.run()
+    finally:
+        finished.set()
+        if requested.is_set():
+            # Uvicorn is down, but a ThreadPoolExecutor may have an arbitrarily
+            # long in-flight LLM/browser call. A normal interpreter exit joins
+            # executor threads and violates the PID deadline.
+            # Give already-idle workers a short opportunity to return without
+            # ever waiting for blocked executor tasks or violating the deadline.
+            for thread in workers:
+                thread.join(timeout=0.1)
+            log.warning("daemon SIGTERM: exiting process; interrupted tasks are not completed")
+            os._exit(0)
+
+
+
+@contextmanager
+def _instance_owner():
+    """One daemon per local instance, before any recovery or worker effects.
+
+    The kernel releases this advisory lock on process death, including
+    SIGTERM self-exit; unlike a saved PID it cannot point at a reused process.
+    Different --port instances have different local directories and locks.
+    """
+    from core.config import get_settings
+
+    settings = get_settings()
+    if settings.mode != "local":
+        # Cloud never owns a local daemon lock or changes its local state.
+        yield
+        return
+    path = Path(settings.local_dir) / "daemon.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("daemon already running for this local instance") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def main() -> None:
+    with _instance_owner():
+        _main_owned()
+
+
+def _main_owned() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
-    from server import serve
-
     stores = make_stores()
     if not hasattr(stores.queue, "drain"):
         raise SystemExit("daemon is for local mode; cloud uses EventBridge + SQS triggers.")
 
+    stop_event = threading.Event()
     _recover_orphans(stores)  # never leave a killed apply stuck at 'submitting'
     discovery_on = os.environ.get("APPLIEDIN_DISCOVERY", "on").lower() not in (
         "off", "0", "false", "no")
     log.info("daemon up: evaluate + apply workers + web%s (poll every %ds)",
              f" + discovery (every {DISCOVER_INTERVAL}s)" if discovery_on else " — DISCOVERY OFF",
              POLL_INTERVAL)
+    workers = []
     if discovery_on:
-        threading.Thread(target=_discovery_loop, daemon=True, name="discovery").start()
-    threading.Thread(target=_worker_loop, daemon=True, name="evaluate").start()
-    threading.Thread(target=_apply_loop, daemon=True, name="apply").start()
-    threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat").start()
+        workers.append(threading.Thread(target=_discovery_loop, args=(stop_event,),
+                                        daemon=True, name="discovery"))
+    workers.append(threading.Thread(target=_worker_loop, args=(stop_event,),
+                                    daemon=True, name="evaluate"))
+    workers.append(threading.Thread(target=_apply_loop, args=(stop_event,),
+                                    daemon=True, name="apply"))
+    workers.append(threading.Thread(target=_heartbeat_loop, args=(stop_event,),
+                                    daemon=True, name="heartbeat"))
+    for worker in workers:
+        worker.start()
     from core.config import get_settings
     _start_imap_poller(stores, get_settings())
     _start_funding_poller(get_settings())
-    _start_outreach_followups(get_settings())
+    _start_outreach_followups(get_settings(), stop_event)
     _start_outreach_pixel(get_settings())
     log.info("dashboard: http://127.0.0.1:%d", WEB_PORT)
     try:
-        serve(port=WEB_PORT)
+        _serve_http(WEB_PORT, stop_event, tuple(workers))
     except KeyboardInterrupt:
         log.info("daemon stopped")
 

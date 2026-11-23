@@ -634,7 +634,7 @@ async def test_typed_posting_url_is_not_reparsed_with_prompt_punctuation(monkeyp
             return False
         async def navigate(self, value):
             seen.append(value)
-            return page()
+            return {**page(), "url": value}
     monkeypatch.setattr(bsk, 'Session', Reader)
     report, problem = await bsk.run_task(f'Open {url}, wait for it to load.',
                                          report_key='description', urls=[url])
@@ -692,7 +692,8 @@ def test_native_select_can_derive_the_option_without_a_model_guessed_value():
 
 async def test_workday_shell_is_not_a_job_description():
     url = 'https://tenant.wd1.myworkdayjobs.com/careers/job/Remote/Lead_R1'
-    shell = {**page(text='Cookies and navigation. ' * 30), 'description': ''}
+    shell = {**page(text='Cookies and navigation. ' * 30),
+             'url': url, 'description': ''}
     session = SimpleNamespace(navigate=AsyncMock(return_value=shell))
     with pytest.raises(bsk.Unavailable, match='container is empty'):
         await bsk._read(session, url)
@@ -3393,6 +3394,27 @@ async def test_cooperation_sync_required_retry_is_unchanged(cooperative):
     await session.__aexit__(None, None, None)
 
 
+def test_user_service_never_spawns_shared_browser_skill_helper(monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+
+    def unavailable(*a, **kw):
+        raise bsk.Unavailable('offline helper absent')
+
+    monkeypatch.setattr(bsk, '_sync', unavailable)
+    monkeypatch.setattr(bsk.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail('service launched shared helper'))
+    ready, detail = bsk.ensure_daemon()
+    assert not ready and 'outside' in detail and 'orchestrator' in detail
+
+
+def test_user_service_reuses_reachable_shared_helper(monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+    monkeypatch.setattr(bsk, '_sync', lambda *a, **kw: {'ok': True})
+    monkeypatch.setattr(bsk.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail('unexpected new helper'))
+    assert bsk.ensure_daemon() == (True, '')
+
+
 # Issue #403: only a fixed, passive posting evaluate has a page-local retry.
 @pytest.mark.asyncio
 @pytest.mark.parametrize('reason', ['observation_changed', 'document_changed'])
@@ -3486,3 +3508,38 @@ async def test_posting_reader_classifies_second_refusal_without_cli_prose(cooper
     assert not report
     assert problem == 'BrowserSkill posting observation changed; retry this posting'
     assert len(_reads(cooperative)) == 2
+
+
+@pytest.mark.parametrize("content", [
+    GOOD,
+    "This job is no longer available.",
+])
+async def test_posting_reader_refuses_foreign_observed_url_before_result(content):
+    """The DOM's location.href, not the requested URL, owns JD provenance."""
+    expected = "https://example.test/jobs/123"
+    foreign = "https://example.test/jobs/other"
+
+    class Redirected:
+        async def navigate(self, url):
+            assert url == expected
+            return {"url": foreign, "title": "Different job", "text": content}
+
+    with pytest.raises(bsk.Unavailable, match="posting source changed"):
+        await bsk._read(Redirected(), expected)
+
+
+async def test_posting_reader_reports_observed_same_posting_route():
+    expected = "https://example.test/jobs/123"
+    observed = expected + "/"
+
+    class SamePosting:
+        async def navigate(self, url):
+            assert url == expected
+            return {"url": observed, "title": "Test role", "text": GOOD}
+
+    report = await bsk._read(SamePosting(), expected)
+    assert report["url"] == expected
+    assert report["source_url"] == observed
+    assert report["description"] == GOOD.strip()
+    assert report["gone"] is False
+

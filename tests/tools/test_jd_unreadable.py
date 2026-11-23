@@ -593,3 +593,60 @@ def test_manual_apply_role_readability_without_worker_private_import(
     row = tracking.get(result["pk"])
     assert row["jd_url"] == url and row["jd_text"] == good_text
     assert row["posting_guard"]["source_verified"] is True
+
+
+@pytest.mark.parametrize("redirected", [False, True])
+def test_http_removal_requires_matched_original_source_without_browser(
+        monkeypatch, redirected):
+    """An exact HTTP 200 removal is terminal; a redirect's shell is not."""
+    from tools import jd, posting_guard as pg
+
+    original = "https://example.test/jobs/123"
+    other = "https://example.test/jobs/other"
+    notice = "This job is no longer available."
+    page = "<html><body><p>" + notice + "</p></body></html>"
+    visits = []
+
+    def response(request):
+        url = str(request.url)
+        visits.append(url)
+        if redirected and url == original:
+            return httpx.Response(302, headers={"Location": other})
+        assert url == (other if redirected else original)
+        return httpx.Response(200, text=page)
+
+    monkeypatch.setattr(httpx, "Client", _patched(response))
+    monkeypatch.setattr(jd, "_from_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_new_ats", lambda url: None)
+    monkeypatch.setattr(jd, "_from_chrome",
+                        (lambda *args: None) if redirected else
+                        (lambda *args: pytest.fail(
+                            "Verified HTTP removal must not open a browser")))
+
+    meta = jd.fetch_jd_meta(original)
+    assert meta["text"] == notice
+    assert pg.valid(meta["text"], meta["posting_guard"])
+    assert jd._GONE_RX.search(meta["text"])
+    assert jd.matched_source_witness({"jd_url": original}, meta) is not redirected
+    assert meta["posting_guard"]["source_verified"] is not redirected
+    assert visits == ([original, other] if redirected else [original])
+
+
+def test_browser_report_cannot_claim_a_different_observed_route(
+        monkeypatch, _no_browser):
+    from tools import browser_runtime, jd
+
+    url = "https://example.test/jobs/123"
+    other = "https://example.test/jobs/other"
+    monkeypatch.setattr(jd, "_browser_retry", (0, ""))
+    monkeypatch.setattr(browser_runtime, "available", lambda: (True, ""))
+    monkeypatch.setattr(browser_runtime, "configuration",
+                        lambda: {"engine": "browser_skill"})
+
+    async def misplaced(*args, **kwargs):
+        return {"title": "Wrong posting", "description": "Wrong text. " * 100,
+                "source_url": other}, ""
+
+    monkeypatch.setattr(browser_runtime, "run_task", misplaced)
+    with pytest.raises(jd.PostingReadUnavailable, match="source changed"):
+        _no_browser(url)

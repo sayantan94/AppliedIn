@@ -2,6 +2,7 @@
 # appliedin — the one entry point.
 #
 #   ./appliedin setup     install everything (Python, Redis, Tectonic, Career Ops)
+#   ./appliedin service-install  enable the default daemon at user login
 #   ./appliedin start     start the daemon in the background (dashboard + workers)
 #   ./appliedin stop      stop it
 #   ./appliedin status    is it up? plus the pipeline board
@@ -58,6 +59,9 @@ preflight() {
 
 case "${1:-}" in
   setup) exec ./setup.sh ;;
+  service-install)
+    [ -x .venv/bin/python ] || { warn "environment missing — run ./appliedin setup first"; exit 1; }
+    exec .venv/bin/python -m cli service-install ;;
   browser-setup) ensure_env ;;
   start) ensure_env; preflight; ensure_career_ops --tools-only ;;
   update) exec ./scripts/update-from-upstream.sh ;;

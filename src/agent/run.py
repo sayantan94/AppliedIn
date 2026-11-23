@@ -621,12 +621,16 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
     try:
         jd_meta = await (_jd_meta(row, fresh=True) if guard_recovery is not None
                          else _jd_meta(row))
-        from tools import posting_guard as pg
+        from tools import jd as _jd, posting_guard as pg
 
-        if (not isinstance(jd_meta, dict)
-                or not isinstance(jd_meta.get("text"), str)
-                or not pg.valid(jd_meta["text"], jd_meta.get("posting_guard"))
-                or _unreadable(jd_meta["text"])):
+        valid = (isinstance(jd_meta, dict)
+                 and isinstance(jd_meta.get("text"), str)
+                 and pg.valid(jd_meta["text"], jd_meta.get("posting_guard")))
+        # Only independently source-matched removal can finish a reader claim.
+        # Cached text, a browser echo and foreign HTTP redirects do not qualify.
+        removed = bool(valid and _jd._GONE_RX.search(jd_meta["text"][:400])
+                       and _jd.matched_source_witness(row, jd_meta))
+        if not valid or (not removed and _unreadable(jd_meta["text"])):
             raise PostingReadUnavailable("Posting content is incomplete or unreadable")
         jd_text = jd_meta["text"]
     except JDURLUnresolvable as exc:
@@ -659,6 +663,30 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
                 pk, row, guard_recovery, stores, "posting_source_unavailable",
                 f"No complete matching current posting source: {exc}")
         return _defer_posting_read(pk, row, stores, str(exc))
+
+    if removed:
+        # Existing JOB_GONE settlement, against the admitted TAILORING
+        # generation. Never bind the removal shell as a new JD or start ADK.
+        try:
+            check = _reader_check(pk, row, stores)
+            if check:
+                return check
+            committed, _ = _reader_patch(pk, row, stores, {
+                "status": Status.JOB_GONE,
+                "fail_reason": "The posting has been removed.",
+                "fail_kind": "", "error": "",
+                "jd_read_attempts": 0, "jd_read_retry_at": None,
+                "jd_read_error": "",
+            })
+        except Exception as exc:
+            return _reader_storage_error(pk, stores, row, exc)
+        if not committed:
+            return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
+        from core.events import emit
+
+        emit("gone", pk=pk, url=row.get("jd_url"),
+             detail="The posting has been removed.")
+        return {"result": "gone", "pk": pk, "reason": "posting_removed"}
 
     # A current board URL, HTTP 200, or guessed effective address cannot
     # certify the historic original posting. Without an independent same-job
@@ -877,7 +905,9 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
                 or not pg.valid(remote["text"], remote.get("posting_guard"))
                 or not _jd.matched_source_witness(row, remote)):
             raise _jd.PostingReadUnavailable("No complete matching posting source")
-        if approval:
+        if approval or _jd._GONE_RX.search(remote["text"][:400]):
+            # A verified removal notice is not replacement JD text and must
+            # remain recognizable before unreadable-content classification.
             return remote
         # Findings already recorded for this posting are never dropped.
         captured = row.get("jd_text") or ""
@@ -932,16 +962,19 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
         # canonical + JobPosting identifier, never projected into persisted jd_url.
         remote = {**remote, "reader_effective_url": url}
     source_witness = _jd.matched_source_witness(row, remote)
-    # A deferred or legacy transient must not be settled from cached content.
-    # HTML/ATS source mismatches never become a witness by rereading a URL.
+    if source_witness and _jd._GONE_RX.search(rtext[:400]):
+        # Keep the independent current source metadata for conditional JOB_GONE.
+        return remote
+    # A deferred or legacy posting must NOT settle from browser-only text or
+    # any other source lacking current original-posting proof. Previous guard
+    # verification cannot be inherited by an unrelated replacement.
     if retry_read and (not rtext or _unreadable(rtext)
-                       or (not historical
-                           and remote.get("source_kind") in {"http_html", "ats_html"}
-                           and not source_witness)):
-        # For historic relative rows, the later _relative_attention gate
-        # owns missing independent same-job source proof; do not turn it
-        # into an ordinary page-unavailable deferral.
+                       or (not historical and not source_witness)):
+        # Historical relative rows retain their separate same-job review gate.
         raise _jd.PostingReadUnavailable("Fresh matching posting content unavailable")
+    if (not source_witness and old.get("source_verified") is True
+            and rtext != local["text"]):
+        raise _jd.PostingReadUnavailable("Replacement posting source is unverified")
     use_remote = bool(rtext) and (
         retry_read or len(rtext) > len(local["text"])
         or (need_source and source_witness))
@@ -1192,7 +1225,16 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
             check = _reader_check(pk, observed, stores)
             if check:
                 continue
+            guarded = observed.get("posting_guard") or {}
+            protected_read = bool(
+                observed.get("jd_read_attempts") or observed.get("jd_read_retry_at")
+                or (isinstance(guarded, dict)
+                    and guarded.get("source_verified") is True))
             if url in gone:
+                # A browser-only "gone" also lacks independent source HTML.
+                # Never close a previously verified or deferred row from it.
+                if protected_read:
+                    continue
                 patch = {"status": Status.JOB_GONE,
                          "fail_reason": "The posting has been removed."}
             else:
@@ -1202,6 +1244,11 @@ def prefetch_browser_jds(rows: list[dict], stores: Any) -> int:
                 meta = (result if isinstance(result, dict) else
                         pg.analyze(str(result), source_required=True,
                                    strip_trailing=True))
+                # The browser's URL-keyed prose is not independent original
+                # source HTML. It cannot clear backoff or inherit prior proof.
+                if (protected_read
+                        and not _jd.matched_source_witness(observed, meta)):
+                    continue
                 updated = _commit_posting_meta(pk, observed, meta, stores)
                 if updated is None:
                     continue

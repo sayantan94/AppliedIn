@@ -1109,12 +1109,28 @@ def test_ordinary_python_module_daemon_still_enters_workers_and_server(tmp_path)
         import threading
         from types import ModuleType, SimpleNamespace
 
-        # Server is the only network-owning foreground entry in main().
+        # The server is the only network-owning foreground entry in main().
         stub_server = ModuleType("server")
-        def serve(*, port):
-            print("ORDINARY_SERVER:" + str(port), flush=True)
-        stub_server.serve = serve
+        stub_server.create_app = lambda: object()
+        stub_server._recover_stuck = lambda settings: None
         sys.modules["server"] = stub_server
+
+        # _serve_http owns Uvicorn so it can bound daemon shutdown. Keep this
+        # ordinary-entry regression offline instead of opening the synthetic port.
+        stub_uvicorn = ModuleType("uvicorn")
+        class FakeConfig:
+            def __init__(self, app, *, host, port, log_level):
+                self.port = port
+        class FakeServer:
+            def __init__(self, config):
+                self.config = config
+            def run(self):
+                print("ORDINARY_SERVER:" + str(self.config.port), flush=True)
+            def handle_exit(self, sig, frame):
+                pass
+        stub_uvicorn.Config = FakeConfig
+        stub_uvicorn.Server = FakeServer
+        sys.modules["uvicorn"] = stub_uvicorn
 
         # Recovery imports release_claim regardless of whether rows exist.
         stub_run = ModuleType("agent.run")
@@ -1130,20 +1146,20 @@ def test_ordinary_python_module_daemon_still_enters_workers_and_server(tmp_path)
                 self.name = kwargs["name"]
             def start(self):
                 print("ORDINARY_THREAD:" + self.name, flush=True)
+        # This daemon starts workers before importing its supervised server path.
+        # Replace threads up front so no worker races the offline startup fixture.
+        threading.Thread = FakeThread
         def import_hook(name, *args, **kwargs):
             module = previous_import(name, *args, **kwargs)
             if name == "core.stores":
                 sys.modules["core.stores"].make_stores = lambda *_a, **_kw: stores
-            if name == "server":
-                # Install only after the production daemon has imported normally.
-                threading.Thread = FakeThread
             return module
         builtins.__import__ = import_hook
     '''))
     root = Path(__file__).resolve().parents[2]
     synthetic_port = 18793  # Deliberately not the daemon's default port.
     # Never inherit owner/provider settings or read a repository .env.
-    # The normal daemon entry and its fake stores/server/threads stay unchanged.
+    # The normal daemon entry uses fake stores/server/threads and binds no socket.
     env = {
         "HOME": str(tmp_path),
         "PATH": os.defpath,
@@ -1162,10 +1178,11 @@ def test_ordinary_python_module_daemon_still_enters_workers_and_server(tmp_path)
     server_lines = [line for line in result.stdout.splitlines()
                     if line.startswith("ORDINARY_SERVER:")]
     assert server_lines == [f"ORDINARY_SERVER:{synthetic_port}"]
-    assert result.stdout.count("ORDINARY_THREAD:") == 3
+    assert result.stdout.count("ORDINARY_THREAD:") == 4
     assert "ORDINARY_THREAD:evaluate" in result.stdout
     assert "ORDINARY_THREAD:apply" in result.stdout
     assert "ORDINARY_THREAD:heartbeat" in result.stdout
+    assert "ORDINARY_THREAD:daemon-shutdown-watchdog" in result.stdout
     assert "ORDINARY_THREAD:discovery" not in result.stdout
 
 

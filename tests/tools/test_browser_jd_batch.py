@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from agent.run import _unreadable, prefetch_browser_jds
 from tools import jd
 
@@ -529,3 +531,50 @@ def test_adapter_incomplete_page_is_local_to_one_batch_member(monkeypatch):
     assert problem == ""
     assert seen == URLS[:3]
     assert [entry["url"] for entry in report["postings"]] == [URLS[0], URLS[2]]
+
+
+def test_batch_rejects_report_with_foreign_observed_page(monkeypatch):
+    """A requested entry URL does not override the final page URL."""
+    from tools import posting_guard as pg
+
+    expected, other = URLS[:2]
+    run_task, _ = _fake_run_task([{"postings": [
+        {"url": expected, "source_url": "https://different.example/jobs/42",
+         "description": GOOD},
+        {"url": other, "source_url": other, "description": GOOD},
+    ]}])
+    monkeypatch.setattr(jd, "available", lambda: (True, ""))
+    monkeypatch.setattr(jd, "run_task", run_task)
+    result = jd.read_postings([expected, other], with_meta=True)
+    assert set(result) == {other}
+    assert pg.valid(result[other]["text"], result[other]["posting_guard"])
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_prefetch_never_settles_deferred_verified_row_from_browser_echo(
+        monkeypatch, gone):
+    """The batch prefetch cannot bypass the guarded single-posting retry."""
+    from tools import posting_guard as pg
+
+    url = "https://example.test/jobs/42"
+    short = "Loading"
+    previous = pg.analyze(short, html_variants=["<p>" + short + "</p>"],
+                          source_required=True)
+    assert previous["posting_guard"]["source_verified"] is True
+    original = {
+        "pk": "example-co#42", "company": "example-co", "job_id": "42",
+        "ats": "custom", "status": "found", "jd_url": url,
+        "jd_text": short, "posting_guard": previous["posting_guard"],
+        "jd_read_attempts": 1, "jd_read_retry_at": None,
+        "jd_read_revision": 2,
+    }
+    stores = _Stores([original])
+    monkeypatch.setattr("agent.run._browser_companies", lambda: {"example-co"})
+    echo = pg.analyze(GOOD)
+    echo.update(source_url="https://foreign.example/jobs/other")
+    assert not jd.matched_source_witness(original, echo)
+    monkeypatch.setattr(jd, "read_postings",
+                        lambda urls, **kw: (
+                            ({}, {url}) if gone else ({url: echo}, set())))
+    assert prefetch_browser_jds([dict(original)], stores) == 0
+    assert stores.tracking.get(original["pk"]) == original

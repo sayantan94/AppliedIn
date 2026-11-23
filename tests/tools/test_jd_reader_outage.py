@@ -1855,3 +1855,97 @@ def test_legacy_transient_pending_queue_is_not_resurrected(monkeypatch, marker):
     assert run.retry_job(pk, stores)["reason"] == "apply_queue_pending"
     assert tracking.get(pk) == original
     assert not tracking.r.exists(f"lock:job:{pk}")
+
+
+def test_verified_row_browser_only_retry_cannot_inherit_old_source_proof(monkeypatch):
+    """A browser echo from a different final URL cannot settle a verified JD."""
+    from tools import posting_guard as pg
+
+    _quiet(monkeypatch)
+    tracking, pk = _synthetic_tracking()
+    url = tracking.get(pk)["jd_url"]
+    cached = "Build reliable platform services safely. " * 18
+    prior = pg.analyze(cached, html_variants=["<p>" + cached + "</p>"],
+                       source_required=True)
+    assert prior["posting_guard"]["source_verified"] is True
+    # The real store forbids status-only writes of bound JD/guard fields.
+    # Seed the verified generation via its normal guarded CAS.
+    assert tracking.update_posting_guard(
+        pk, tracking.get(pk), prior, source_witness=True)
+    tracking.set_status(pk, Status.FOUND, jd_read_attempts=1,
+                        jd_read_retry_at=None,
+                        apply_requested_at="synthetic-request")
+    before = tracking.get(pk)
+    stores = SimpleNamespace(tracking=tracking)
+
+    foreign = "Unrelated role description on a different page. " * 20
+    report = pg.analyze(foreign)
+    report.update(source_kind="", source_url="https://foreign.example/jobs/2")
+    assert not jd.matched_source_witness(before, report)
+    visited = []
+    def fetch(address, kind="jd"):
+        visited.append((address, kind))
+        return report
+    monkeypatch.setattr(jd, "fetch_jd_meta", fetch)
+    monkeypatch.setattr(run, "_enqueue_apply",
+                        lambda *a, **kw: pytest.fail("No queue after source mismatch"))
+    monkeypatch.setattr(run, "_drive_async",
+                        lambda *a, **kw: pytest.fail("No preparation after mismatch"))
+
+    result = run.run_job(pk, stores)
+    after = tracking.get(pk)
+    assert result["result"] == "deferred"
+    assert visited == [(url, "jd_sweep")]
+    assert after["status"] == "found"
+    assert after["jd_text"] == before["jd_text"]
+    assert after["posting_guard"] == before["posting_guard"]
+    assert after["posting_guard"]["source_verified"] is True  # old JD only
+    assert after["jd_read_attempts"] == 2
+    assert after["jd_read_retry_at"]
+    assert after.get("apply_requested_at") == before.get("apply_requested_at")
+    assert not tracking.r.exists(f"lock:job:{pk}")
+
+
+@pytest.mark.parametrize("attempts,matched", [(0, True), (2, True), (0, False), (2, False)])
+def test_http_removal_only_closes_original_source_conditionally(
+        monkeypatch, attempts, matched):
+    """Verified removal closes a row before ADK; foreign shells still defer."""
+    from tools import posting_guard as pg
+
+    _quiet(monkeypatch)
+    tracking, pk = _synthetic_tracking()
+    url = tracking.get(pk)["jd_url"]
+    tracking.set_status(pk, Status.FOUND, jd_read_attempts=attempts,
+                        jd_read_retry_at=None)
+    before = tracking.get(pk)
+    stores = SimpleNamespace(tracking=tracking)
+    notice = "This job is no longer available."
+    report = pg.analyze(notice, html_variants=["<p>" + notice + "</p>"],
+                        source_required=True)
+    report.update(source_kind="http_html",
+                  source_url=url if matched else "https://foreign.example/jobs/2")
+    assert jd.matched_source_witness(before, report) is matched
+    monkeypatch.setattr(jd, "fetch_jd_meta",
+                        lambda address, kind="jd": report)
+    monkeypatch.setattr(run, "_enqueue_apply",
+                        lambda *a, **kw: pytest.fail("Removed posting reached queue"))
+    monkeypatch.setattr(run, "_drive_async",
+                        lambda *a, **kw: pytest.fail("Removed posting reached ADK"))
+
+    result = run.run_job(pk, stores)
+    after = tracking.get(pk)
+    if matched:
+        assert result == {"result": "gone", "pk": pk, "reason": "posting_removed"}
+        assert after["status"] == "job_gone"
+        assert after["jd_read_attempts"] == 0
+        assert after["jd_read_retry_at"] is None
+        assert after["jd_read_error"] == ""
+        assert "removed" in after["fail_reason"]
+    else:
+        assert result["result"] == "deferred"
+        assert after["status"] == "found"
+        assert after["jd_read_attempts"] == attempts + 1
+        assert after["jd_read_retry_at"]
+    assert after["jd_text"] == before["jd_text"]
+    assert after["posting_guard"] == before["posting_guard"]
+    assert not tracking.r.exists(f"lock:job:{pk}")

@@ -283,6 +283,12 @@ def ensure_daemon() -> tuple[bool, str]:
         _sync("status")
         return True, ""
     except Unavailable:
+        # A foreground helper started from inside a systemd unit inherits its
+        # cgroup despite start_new_session=True. This shared helper is external.
+        if os.environ.get('APPLIEDIN_USER_SERVICE') == '1':
+            return False, ('BrowserSkill unavailable: shared helper is not reachable; '
+                           'start or repair it outside the AppliedIn user service '
+                           'through the orchestrator; run bsk doctor.')
         home = Path(os.environ.get("BSK_HOME") or Path.home() / ".bsk")
         record = home / "daemon.json"
         if record.exists():
@@ -848,16 +854,25 @@ _MEMBER_READ_FAILURES = frozenset({
     "BrowserSkill operation unavailable: posting text was truncated",
     "BrowserSkill operation unavailable: Workday JD container is empty",
     "BrowserSkill operation unavailable: posting did not finish loading",
+    "BrowserSkill operation unavailable: posting source changed",
 })
 
 
 async def _read(session: Session, url: str) -> dict:
     page = await session.navigate(url)
+    # PAGE obtains this from location.href, not from the requested route or
+    # model-written report. A redirect to another posting is not source proof.
+    from tools.jd import _same_posting_url
+
+    observed = page.get("url")
+    if not isinstance(observed, str) or not _same_posting_url(url, observed):
+        raise Unavailable("BrowserSkill operation unavailable: posting source changed")
     text = str(page.get("description") or page.get("text") or "").strip()
     if page.get("truncated") and not page.get("description"):
         raise Unavailable("BrowserSkill operation unavailable: posting text was truncated")
     if _GONE.search(text[:1200]):
-        return {"url": url, "title": page.get("title", ""), "description": "", "gone": True}
+        return {"url": url, "source_url": observed,
+                "title": page.get("title", ""), "description": "", "gone": True}
     if ('myworkdayjobs.com' in (urlsplit(url).hostname or '')
             and '/job/' in urlsplit(url).path and not page.get('description')):
         # Cookie banners and 'not found' shells can exceed the text-length guard.
@@ -866,7 +881,8 @@ async def _read(session: Session, url: str) -> dict:
     if len(text) < 400:
         raise Unavailable("BrowserSkill operation unavailable: posting did not finish loading")
     log.info("BrowserSkill posting read (url=%s, characters=%d)", url, len(text))
-    return {"url": url, "title": page.get("title", "")[:90], "description": text, "gone": False}
+    return {"url": url, "source_url": observed,
+            "title": page.get("title", "")[:90], "description": text, "gone": False}
 
 
 async def run_task(task: str, *, report_key: str, model: str = "", timeout_s: int = 300,

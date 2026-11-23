@@ -9,10 +9,12 @@ from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
 
+import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
 import server
+from core.apply_queue import ApplyQueue as _RealApplyQueue
 
 
 _BEFORE_MIDNIGHT = "2030-01-01T20:59:00+00:00"
@@ -153,7 +155,7 @@ def stats_client(monkeypatch):
         def __init__(self, redis):
             assert redis is tracking.r
 
-        def pending(self):
+        def pending(self, **kwargs):
             return []
 
     monkeypatch.setattr(apply_queue, "ApplyQueue", _Queue)
@@ -247,3 +249,63 @@ def test_dashboard_and_demo_have_independent_submitted_vitals():
     assert 'tick($("#v-total"), s.total_submitted ??' in script
     assert 'today_submitted: 2,' in demo
     assert 'total_submitted: 3,' in demo
+
+
+_NOW = 1_900_000_000.0
+
+
+@pytest.fixture
+def queue_client(stats_client, monkeypatch):
+    """/stats over a real queue on fakeredis, with the clock frozen."""
+    client, tracking = stats_client
+    import core.apply_queue as apply_queue
+    from core import flags
+
+    # The submitted-count fake above keeps its own Redis; the queue gets a real
+    # in-memory one, handed to the route wherever it builds an ApplyQueue.
+    queue_redis = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(apply_queue, "ApplyQueue",
+                        lambda redis: _RealApplyQueue(queue_redis))
+    monkeypatch.setattr(flags, "apply_concurrency", lambda: 1, raising=False)
+    monkeypatch.setattr(time, "time", lambda: _NOW)
+    return client, _RealApplyQueue(queue_redis)
+
+
+def _queue(q, pk, status, queued_at):
+    q.put(pk, "Acme " + pk, queued_at=queued_at)
+    q.r.set(f"app:{pk}", json.dumps({"pk": pk, "status": status}))
+
+
+def test_queue_age_is_the_oldest_actionable_entry(queue_client):
+    client, q = queue_client
+    _queue(q, "old#1", "applied", _NOW - 1_600_000)        # finished, 18 days old
+    _queue(q, "old#2", "skipped", _NOW - 1_500_000)
+    _queue(q, "live#1", "failed", _NOW - 300)               # retry awaiting backoff
+    _queue(q, "live#2", "tailored", _NOW - 60)
+    _queue(q, "live#3", "tailored", _NOW - 30)
+    q.r.set("app:live#3", json.dumps({"pk": "live#3", "status": []}))   # malformed
+
+    assert client.get("/stats").json()["queue_age_seconds"] == 300
+    # Same filter on the queue endpoint, while its raw counts stay physical.
+    body = client.get("/apply-queue").json()
+    assert {i["pk"] for i in body["pending"]} == {"live#1", "live#2", "live#3"}
+    assert body["total"] == 5
+
+
+def test_queue_age_is_none_when_only_finished_entries_remain(queue_client):
+    client, q = queue_client
+    _queue(q, "old#1", "job_gone", _NOW - 1_600_000)
+    _queue(q, "old#2", "applied_manual", _NOW - 1_000)
+
+    assert client.get("/stats").json()["queue_age_seconds"] is None
+
+
+def test_an_unstamped_actionable_entry_does_not_date_the_queue_to_the_epoch(queue_client):
+    client, q = queue_client
+    q.r.sadd("applyq:companies", "acme")
+    q.r.rpush("applyq:co:acme", json.dumps(
+        {"pk": "legacy#1", "company": "Acme", "queued_at": 0}))
+    q.r.rpush("applyq:co:acme", json.dumps(
+        {"pk": "nan#1", "company": "Acme", "queued_at": "nan"}))
+
+    assert client.get("/stats").json()["queue_age_seconds"] == 0
