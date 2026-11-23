@@ -2204,8 +2204,7 @@ def create_app() -> FastAPI:
         if jd._GONE_RX.search((meta.get("text") or "")[:400]):
             # A verified removal notice is not a verified job description.
             return {"ok": False, "error": "posting_removed"}
-        from agent.run import _unreadable
-        if _unreadable(meta["text"]):
+        if jd._unreadable(meta["text"]):
             # Even source-verifiable HTML may be a short loading/error shell.
             # A first-read failure has no row to defer; the caller retries
             # the same original URL explicitly through this route.
