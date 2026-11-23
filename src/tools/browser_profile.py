@@ -129,6 +129,8 @@ def _launch_lock(directory: str):
 
 
 def _launch(cfg: dict, url: str) -> int:
+    if _in_user_service():
+        raise ValueError('Chrome launch is orchestrator-owned and forbidden inside the user service')
     Path(cfg['user_data_dir']).mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
         [_chrome(cfg), '--user-data-dir=' + cfg['user_data_dir'],
@@ -166,6 +168,46 @@ def _owned_profile_pid(cfg: dict, launched_pid: int | None = None) -> int:
         raise ValueError('Launched Chrome PID/argv lineage cannot be established')
     return pids[0]
 
+def _in_user_service() -> bool:
+    return os.environ.get('APPLIEDIN_USER_SERVICE') == '1'
+
+
+def _outside_user_service_cgroup(pid: int) -> bool:
+    """The pinned Chrome owner must be outside this daemon service cgroup."""
+    try:
+        def unified(path):
+            for line in path.read_text().splitlines():
+                if line.startswith('0::'):
+                    return line[3:]
+            return ''
+
+        ours = unified(Path('/proc/self/cgroup'))
+        chrome = unified(Path('/proc') / str(pid) / 'cgroup')
+        return bool(ours and chrome and ours != '/'
+                    and chrome != ours and not chrome.startswith(ours.rstrip('/') + '/'))
+    except OSError:
+        return False
+
+
+def _adopt_service_browser(cfg: dict, rows: list[dict]) -> tuple[bool, str]:
+    """No launch, profile switch or ambiguous extension/process adoption."""
+    matches = [b for b in rows if b.get('instance_id') == cfg['browser']
+               and not b.get('unresponsive') and not b.get('version_skew')]
+    if len(matches) != 1:
+        return False, ('BrowserSkill unavailable: pinned extension is absent, disconnected '
+                       'or ambiguous; the orchestrator must repair the external browser.')
+    try:
+        pid = _owned_profile_pid(cfg)
+        if not _outside_user_service_cgroup(pid):
+            return False, ('BrowserSkill unavailable: pinned Chrome is inside the daemon '
+                           'service cgroup or cgroup separation is unverified; '
+                           'the orchestrator must repair the external browser.')
+        return True, ''
+    except (OSError, ValueError, RuntimeError):
+        return False, ('BrowserSkill unavailable: one dedicated pinned Chrome process '
+                       'was not proven; the orchestrator must inspect it.')
+
+
 def can_start(settings=None) -> tuple[bool, str]:
     """A connected ID without an owned Chrome argv is NOT a usable session."""
     try:
@@ -173,6 +215,8 @@ def can_start(settings=None) -> tuple[bool, str]:
         if not cfg['browser']:
             return False, 'BrowserSkill unavailable: run ./appliedin browser-setup first.'
         rows = _browsers()
+        if _in_user_service():
+            return _adopt_service_browser(cfg, rows)
         if _connected(rows, cfg['browser']):
             _owned_profile_pid(cfg)
             return True, ''
@@ -257,6 +301,8 @@ def ensure_browser(settings=None) -> tuple[bool, str]:
         if not ready:
             return False, problem
         rows = _browsers()
+        if _in_user_service():
+            return _adopt_service_browser(cfg, rows)
         if _connected(rows, cfg['browser']):
             _owned_profile_pid(cfg)
             return True, ''
@@ -296,7 +342,12 @@ def connection_status(settings=None) -> dict:
             if not cfg['browser']:
                 state, detail = 'setup_required', 'Run ./appliedin browser-setup for the clean profile.'
             elif _connected(rows, cfg['browser']):
-                _owned_profile_pid(cfg)
+                if _in_user_service():
+                    ready, problem = _adopt_service_browser(cfg, rows)
+                    if not ready:
+                        return {'state': 'unavailable', 'detail': problem}
+                else:
+                    _owned_profile_pid(cfg)
                 state, detail = 'connected', 'Pinned extension and dedicated Chrome argv observed.'
             elif profile_pids(cfg['user_data_dir']):
                 matching = [row for row in rows if row.get('instance_id') == cfg['browser']]
@@ -310,6 +361,8 @@ def connection_status(settings=None) -> dict:
             else:
                 _chrome(cfg)
                 state, detail = 'not_running', (
+                    'Dedicated Chrome is not running; the orchestrator must restore it '
+                    'outside the daemon service cgroup.' if _in_user_service() else
                     'Dedicated Chrome is not running; it will start for the next browser task.')
             result = {'state': state, 'detail': detail}
             _STATUS_CACHE = (key, time.monotonic(), result)

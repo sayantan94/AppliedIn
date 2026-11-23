@@ -833,3 +833,68 @@ def test_fixture_duplicate_pinned_rows_remain_ambiguous(sandbox, monkeypatch):
     ready, why = profile._fixture_read_only_browser()
     assert not ready and 'pinned extension is absent' in why
     assert 'dedicated Chrome not running' not in why and 'AGENTS.md' not in why
+
+
+def test_user_service_adopts_only_single_external_pinned_chrome(sandbox, monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+    monkeypatch.setattr(profile, '_browsers', lambda: [{'instance_id': 'pinned'}])
+    monkeypatch.setattr(profile, 'profile_pids', lambda _: [320])
+    monkeypatch.setattr(profile, '_outside_user_service_cgroup', lambda pid: pid == 320)
+    monkeypatch.setattr(profile, '_launch',
+                        lambda *a: pytest.fail('service must never launch Chrome'))
+    assert profile.ensure_browser() == (True, '')
+    assert profile.can_start() == (True, '')
+    assert profile.connection_status()['state'] == 'connected'
+
+
+@pytest.mark.parametrize('rows,pids,outside', [
+    ([], [], False),
+    ([{'instance_id': 'pinned'}], [320, 321], True),
+    ([{'instance_id': 'pinned'}, {'instance_id': 'pinned'}], [320], True),
+    ([{'instance_id': 'pinned'}], [320], False),
+])
+def test_service_refuses_missing_ambiguous_or_cgroup_coupled_browser(
+        sandbox, monkeypatch, rows, pids, outside):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+    monkeypatch.setattr(profile, '_browsers', lambda: rows)
+    monkeypatch.setattr(profile, 'profile_pids', lambda _: pids)
+    monkeypatch.setattr(profile, '_outside_user_service_cgroup', lambda _: outside)
+    monkeypatch.setattr(profile, '_launch',
+                        lambda *a: pytest.fail('service must not launch Chrome'))
+    ready, message = profile.ensure_browser()
+    assert not ready
+    assert 'orchestrator' in message
+    assert profile.can_start()[0] is False
+
+
+def test_service_chrome_launch_is_refused_even_when_directly_called(sandbox, monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+    monkeypatch.setattr(profile.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail('forbidden Chrome process'))
+    cfg = profile._config()
+    with pytest.raises(ValueError, match='orchestrator-owned'):
+        profile._launch(cfg, profile.DASHBOARD)
+
+
+def test_cgroup_proof_refuses_same_or_descendant_service_group(tmp_path, monkeypatch):
+    own = tmp_path / 'self-cgroup'
+    chrome = tmp_path / 'proc/42/cgroup'
+    chrome.parent.mkdir(parents=True)
+    own.write_text('0::/user.slice/app.slice/appliedin.service\n')
+    original = Path
+
+    def fake_path(value):
+        if str(value) == '/proc/self/cgroup':
+            return own
+        if str(value) == '/proc':
+            return tmp_path / 'proc'
+        return original(value)
+
+    monkeypatch.setattr(profile, 'Path', fake_path)
+    for target, expected in [
+        ('/user.slice/app.slice/appliedin.service', False),
+        ('/user.slice/app.slice/appliedin.service/child', False),
+        ('/user.slice/app.slice/run-browser.scope', True),
+    ]:
+        chrome.write_text('0::' + target + '\n')
+        assert profile._outside_user_service_cgroup(42) is expected
