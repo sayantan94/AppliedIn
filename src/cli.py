@@ -312,13 +312,23 @@ def install_service() -> dict:
             path = _service_unit()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(_render_unit())
-        for args in (("daemon-reload",), ("enable", "--now", _SERVICE)):
+        # An existing manually started daemon already owns the instance. Enable
+        # login startup, but do not launch a competing unit and trigger a
+        # restart-on-failure loop against its instance lock.
+        live = _live_pid()
+        service_pid = _service_pid()
+        manual_owner = live is not None and live != service_pid
+        enable = ("enable", _SERVICE) if manual_owner else ("enable", "--now", _SERVICE)
+        for args in (("daemon-reload",), enable):
             result = _systemctl(*args)
             if result.returncode:
                 return {"status": "service error",
                         "error": "systemctl --user " + " ".join(args) + " failed"}
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return {"status": "service error", "error": type(exc).__name__}
+    if manual_owner:
+        return {"status": "enabled (existing manual daemon)", "unit": _SERVICE,
+                "pid": live, "hint": "Unit enabled for the next login; existing daemon was not stopped."}
     pid = _service_pid()
     return {"status": "running" if pid else "enabled (startup unverified)",
             "unit": _SERVICE, "pid": pid,

@@ -51,6 +51,8 @@ def test_install_enable_is_idempotent_without_rewriting_existing_unit(world, mon
         return subprocess.CompletedProcess(args, 0, "0\n", "")
 
     monkeypatch.setattr(cli, "_systemctl", systemctl)
+    monkeypatch.setattr(cli, "_live_pid", lambda: None)
+    monkeypatch.setattr(cli, "_service_pid", lambda: None)
     first = cli.install_service()
     unit = cli._service_unit()
     saved, mtime = unit.read_text(), unit.stat().st_mtime_ns
@@ -116,3 +118,16 @@ def test_service_install_entrypoint_does_not_run_setup_or_uv(tmp_path):
     block = script.split("  service-install)", 1)[1].split("  browser-setup)", 1)[0]
     assert "exec .venv/bin/python -m cli service-install" in block
     assert "ensure_env" not in block and "uv run" not in block
+
+
+def test_install_enables_without_competing_with_manual_daemon(world, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_live_pid", lambda: 500)
+    monkeypatch.setattr(cli, "_service_pid", lambda: None)
+    monkeypatch.setattr(cli, "_systemctl",
+                        lambda *a: (calls.append(a) or
+                                    subprocess.CompletedProcess(a, 0, "", "")))
+    result = cli.install_service()
+    assert result["status"] == "enabled (existing manual daemon)" and result["pid"] == 500
+    assert calls == [("daemon-reload",), ("enable", "appliedin.service")]
+    assert cli._service_unit().read_text() == cli._render_unit()
