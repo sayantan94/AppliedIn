@@ -9,7 +9,12 @@ DynamoDB — same contract, different host.
 
 from __future__ import annotations
 
+import contextvars
+import functools
+import inspect
 import json
+import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +35,68 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 # grey out its button. Background tasks run in this same process, so a plain dict
 # is enough — no need to round-trip through Redis for a transient UI hint.
 _RUNNING = {"discover": False, "process": False}
+
+
+# Slow-request log. The daemon has no access log, so a saturated interpreter
+# gave no clue which requests were costing it. Any request slower than this is
+# logged with its method, path, wall time and the CPU its endpoint used on its
+# own thread (a sync endpoint's worker thread; for an async endpoint, the event
+# loop thread, which includes work interleaved with it).
+_SLOW_REQUEST_S = 1.0
+_wall_clock = time.perf_counter
+_request_cpu: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "_request_cpu", default=None)
+_timing_log = logging.getLogger("server.timing")
+
+
+def _cpu_timed(call):  # noqa: ANN001, ANN202
+    """Wrap an endpoint so it reports its own thread CPU to the current request."""
+    if getattr(call, "_cpu_timed", False):
+        return call
+    if inspect.iscoroutinefunction(call):
+        @functools.wraps(call)
+        async def timed(*args, **kwargs):  # noqa: ANN202
+            sink, start = _request_cpu.get(), time.thread_time()
+            try:
+                return await call(*args, **kwargs)
+            finally:
+                if sink is not None:
+                    sink.append(time.thread_time() - start)
+    else:
+        @functools.wraps(call)
+        def timed(*args, **kwargs):  # noqa: ANN202
+            sink, start = _request_cpu.get(), time.thread_time()
+            try:
+                return call(*args, **kwargs)
+            finally:
+                if sink is not None:
+                    sink.append(time.thread_time() - start)
+    timed._cpu_timed = True
+    return timed
+
+
+def _install_request_timing(app: FastAPI) -> None:
+    """Time every API route registered so far and log the slow requests."""
+    from fastapi.routing import APIRoute
+
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.dependant.call is not None:
+            route.dependant.call = _cpu_timed(route.dependant.call)
+
+    @app.middleware("http")
+    async def _log_slow_requests(request, call_next):  # noqa: ANN001, ANN202
+        sink: list = []
+        token = _request_cpu.set(sink)
+        start = _wall_clock()
+        try:
+            return await call_next(request)
+        finally:
+            _request_cpu.reset(token)
+            wall = _wall_clock() - start
+            if wall > _SLOW_REQUEST_S:
+                cpu = f"{sum(sink):.3f}s" if sink else "n/a"
+                _timing_log.warning("slow request: %s %s wall=%.3fs thread_cpu=%s",
+                                    request.method, request.url.path, wall, cpu)
 
 
 # A /stats poll runs every three seconds. Keep each JSON read batch bounded:
@@ -3739,6 +3806,9 @@ def create_app() -> FastAPI:
         from fastapi.responses import FileResponse
 
         return FileResponse(_WEB / "dashboard.html")
+
+    # Outermost middleware, after every API route exists.
+    _install_request_timing(app)
 
     # Static assets (app.js, styles.css, …) at the root, last so
     # the explicit API routes above win.
