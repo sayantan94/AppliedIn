@@ -38,7 +38,19 @@ def _note_browser_problem(problem: str) -> None:
     from tools.browser_runtime import is_infrastructure
 
     global _browser_retry
-    if is_infrastructure(problem):
+    # Only a shared CLI/daemon/profile/configuration fault can pause other
+    # postings. A structured page race is classified at the adapter; generic
+    # operation failures, malformed reports and unreadable JDs prove no outage.
+    shared_browser = problem.startswith((
+        "BrowserSkill unavailable:", "BrowserSkill configuration unavailable:",
+        "Browser configuration unavailable:",
+    )) or problem in {
+        "BrowserSkill operation unavailable: daemon_unavailable",
+        "BrowserSkill operation unavailable: daemon_disconnected",
+    }
+    other_engine = (not problem.startswith(("BrowserSkill", "Browser configuration"))
+                    and is_infrastructure(problem))
+    if shared_browser or other_engine:
         _browser_retry = (time.monotonic() + 300, problem)
 
 _TAG_RX = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.S | re.I)
@@ -753,6 +765,7 @@ def read_postings(urls: list[str], *, batch: int = 6, kind: str = "jd_sweep",
     _check_browser_reader()
     ok, why = available()
     if not ok:
+        _note_browser_problem(why)
         raise PostingReadUnavailable(why)
 
     out: dict = {}
@@ -841,6 +854,7 @@ def _from_chrome(url: str, kind: str = "jd") -> dict | None:
     _check_browser_reader()
     ok, why = available()
     if not ok:
+        _note_browser_problem(why)
         raise PostingReadUnavailable(why)
     from tools.browser_runtime import TAB_HYGIENE
 
