@@ -226,6 +226,26 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+# A malformed scorer answer is retried by the ordinary FOUND sweeps after this
+# delay. It is deliberately separate from the posting-reader budget.
+_SCORER_RETRY_DELAY = timedelta(minutes=30)
+
+
+def _scorer_retry_pending(row: dict, now: datetime | None = None) -> bool:
+    """True while a deferred scorer retry is not yet due (or its deadline is corrupt)."""
+    deadline = row.get("scorer_retry_at")
+    if not deadline:
+        return False
+    try:
+        cutoff = datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
+        if cutoff.tzinfo is None:
+            return True
+        return (now or _utc_now()) < cutoff
+    except (TypeError, ValueError, OverflowError):
+        # A corrupt deadline is not authorization to retry immediately.
+        return True
+
+
 def _reader_witness(row: dict) -> dict:
     # Omission means absence in BOTH backends, not a wildcard/None.
     return {field: row[field] for field in _READER_FIELDS if field in row}
@@ -237,6 +257,8 @@ def _reader_eligible(row: dict, *, now: datetime | None = None) -> bool:
         return False
     try:
         if int(row.get("jd_read_attempts") or 0) >= 3:
+            return False
+        if _scorer_retry_pending(row, now):
             return False
         deadline = row.get("jd_read_retry_at")
         if not deadline:
@@ -700,6 +722,7 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
             "rescore_requested": False,
             "jd_read_attempts": 0,
             "jd_read_retry_at": None, "jd_read_error": "",
+            "scorer_retry_at": None,
             # The refusal itself is settled only once the new generation is bound.
             **(_REFUSAL_MARKER_CLEARED if guard_recovery is not None else {}),
         })
@@ -790,17 +813,25 @@ async def _run_job_async(pk: str, row: dict, stores: Any, *,
     except ScorerInvalidOutput:
         # No new diagnostics or artifacts: a stale score/PDF must not appear
         # as evidence of this evaluation or enable a downstream approval.
+        # An invalid answer is retried later by the ordinary FOUND sweeps; it
+        # is never a terminal skip and never spends the posting-reader budget.
         from core.events import emit
 
+        retry_at = _utc_now() + _SCORER_RETRY_DELAY
         detail = ("The scorer did not return a valid score after one correction. "
-                  "Nothing was tailored or queued; use Reopen & re-score to retry.")
+                  "Nothing was tailored or queued; it will be scored again later "
+                  f"(not before {retry_at.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}).")
+        # A review-only attempt stays review-only on the due retry (the daemon
+        # sweep calls run_job without prepare_only): never fall back to root_agent.
         committed, _ = _reader_patch(pk, row, stores, {
-            "status": Status.SKIPPED, "skip_reason": "scorer_invalid_output",
-            "match_score": None, "fail_reason": detail})
+            "status": Status.FOUND, "scorer_retry_at": retry_at.isoformat(),
+            "match_score": None,
+            **({"jd_read_prepare_only": True} if prepare_only else {})})
         if not committed:
             return {"result": "conflict", "pk": pk, "reason": "jd_reader_state_changed"}
-        emit("skipped", pk=pk, detail=detail, url=row.get("jd_url"))
-        return {"result": "skipped", "pk": pk, "reason": "scorer_invalid_output"}
+        emit("response", pk=pk, detail=detail, url=row.get("jd_url"))
+        return {"result": "deferred", "pk": pk, "reason": "scorer_invalid_output",
+                "detail": detail}
 
     # The writer gets the current validated score, never the pre-run row's
     # historical score (which could describe a different evaluation).
