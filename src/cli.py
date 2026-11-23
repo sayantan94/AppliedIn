@@ -366,6 +366,21 @@ def _live_pid() -> int | None:
 
 def start(no_discover: bool = False) -> dict:
     """Use the installed default unit, or a legacy local isolated instance."""
+    owner = _unit_owner()
+    if owner == "foreign":
+        return {"status": "refused", "error": "a different user unit is installed; inspect it"}
+
+    if owner == "absent":
+        # Legacy start always repairs the selected instance before checking for
+        # a running daemon. Existing scanner and --port callers rely on this;
+        # the installed service bypasses it entirely, including on login.
+        from discovery.career_ops_setup import ensure_checkout
+        try:
+            ensure_checkout(Path(get_settings().local_dir))
+        except Exception as exc:
+            return {"status": "setup failed", "error": f"Career Ops: {exc}",
+                    "dashboard": _dashboard()}
+
     try:
         pid = _live_pid()
     except ValueError as exc:
@@ -374,10 +389,11 @@ def start(no_discover: bool = False) -> dict:
         return {"status": "already running", "pid": pid, "dashboard": _dashboard(),
                 "hint": "stop the existing daemon before restarting"}
 
-    owner = _unit_owner()
-    if owner == "foreign":
-        return {"status": "refused", "error": "a different user unit is installed; inspect it"}
-    if owner == "ours" and not no_discover:
+    if owner == "ours":
+        if no_discover:
+            return {"status": "refused", "error": (
+                "an installed default unit cannot silently switch discovery mode; "
+                "use --port for a separate no-discover instance")}
         try:
             result = _systemctl("start", _SERVICE)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -387,17 +403,7 @@ def start(no_discover: bool = False) -> dict:
         pid = _service_pid()
         return {"status": "started" if pid else "starting", "pid": pid,
                 "unit": _SERVICE, "dashboard": _dashboard()}
-    if owner == "ours" and no_discover:
-        return {"status": "refused", "error": (
-            "an installed default unit cannot silently switch discovery mode; "
-            "use --port for a separate no-discover instance")}
 
-    from discovery.career_ops_setup import ensure_checkout
-    try:
-        ensure_checkout(Path(get_settings().local_dir))
-    except Exception as exc:
-        return {"status": "setup failed", "error": f"Career Ops: {exc}",
-                "dashboard": _dashboard()}
     from tools.browser_runtime import ensure_started
     ready, problem = ensure_started()
     if not ready:

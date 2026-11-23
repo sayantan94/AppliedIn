@@ -89,6 +89,7 @@ def test_manual_start_uses_existing_default_unit_not_second_daemon(world, monkey
 
 
 def test_running_daemon_prevents_second_service_start(world, monkeypatch):
+    monkeypatch.setattr(cli, "_unit_owner", lambda: "ours")
     monkeypatch.setattr(cli, "_live_pid", lambda: 448)
     monkeypatch.setattr(cli, "_systemctl",
                         lambda *a: pytest.fail("duplicate service start"))
