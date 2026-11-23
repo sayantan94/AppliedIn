@@ -49,6 +49,8 @@ import argparse
 import json
 import os
 import signal
+import subprocess
+import time
 from pathlib import Path
 
 from core.config import get_settings
@@ -173,6 +175,13 @@ def logs() -> None:
     """Follow the background daemon's log (like tail -f). Ctrl-C to stop."""
     import subprocess
 
+    if _unit_owner() == "ours":
+        try:
+            subprocess.run(["journalctl", "--user", "-u", _SERVICE,
+                            "-n", "200", "-f"])
+        except (OSError, KeyboardInterrupt):
+            pass
+        return
     logfile = _log_file()
     if not logfile.exists():
         print(f"no daemon log yet at {logfile} — run `appliedin start` first")
@@ -186,52 +195,204 @@ def logs() -> None:
         pass
 
 
+
+# The installed login unit never runs setup or browser preflight on startup.
+_SERVICE = "appliedin.service"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _service_unit() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / (
+        "systemd/user/" + _SERVICE)
+
+
+def _unit_path(value: Path, *, word: bool) -> str:
+    raw = str(value)
+    if not raw.startswith("/") or any(c in raw for c in ("\n", "\r", "\0")):
+        raise ValueError("checkout path cannot be represented in a systemd unit")
+    # Percent is a systemd specifier; executable paths are one argument even
+    # when the checkout name contains spaces.
+    raw = raw.replace("%", "%%").replace("\\", "\\\\")
+    if word:
+        return '"' + raw.replace('"', '\\"').replace("$", "$") + '"'
+    return raw.replace(" ", "\\x20")
+
+
+def _render_unit() -> str:
+    root = _repo_root()
+    template = (root / "systemd/appliedin.service.in").read_text()
+    return (template.replace("@WORKDIR@", _unit_path(root, word=False))
+            .replace("@PYTHON@", _unit_path(root / ".venv/bin/python", word=True)))
+
+
+def _default_instance() -> bool:
+    return int(os.environ.get("APPLIEDIN_WEB_PORT") or DEFAULT_PORT) == DEFAULT_PORT
+
+
+def _unit_owner() -> str:
+    """Absent, ours, or a unit owned by another checkout/configuration."""
+    if not _default_instance():
+        return "absent"
+    unit = _service_unit()
+    if not unit.exists():
+        return "absent"
+    try:
+        return "ours" if unit.read_text() == _render_unit() else "foreign"
+    except (OSError, ValueError):
+        return "foreign"
+
+
+def _systemctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args],
+                          capture_output=True, text=True, timeout=12)
+
+
+def _daemon_identity(pid: int) -> str | None:
+    """Proof of checkout, selected instance and original process start.
+
+    A PID file or socket-owner observation alone can refer to a reused/unrelated
+    PID. Private proc data is never exposed in diagnostics or public logs.
+    """
+    if pid <= 1:
+        return None
+    proc = Path("/proc") / str(pid)
+    try:
+        argv = [p.decode(errors="replace") for p in
+                (proc / "cmdline").read_bytes().split(b"\0") if p]
+        if not any(argv[i:i + 2] == ["-m", "daemon"]
+                   for i in range(len(argv) - 1)):
+            return None
+        if (proc / "cwd").resolve(strict=True) != _repo_root():
+            return None
+        env = (proc / "environ").read_bytes().split(b"\0")
+        ports = [v.partition(b"=")[2].decode("ascii") for v in env
+                 if v.startswith(b"APPLIEDIN_WEB_PORT=")]
+        if len(ports) > 1:
+            return None
+        observed = ports[0] if ports else str(DEFAULT_PORT)
+        selected = str(int(os.environ.get("APPLIEDIN_WEB_PORT") or DEFAULT_PORT))
+        if observed != selected:
+            return None
+        # /proc/stat comm may itself contain parentheses and spaces.
+        fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
+        if fields[0] in ("Z", "X"):
+            return None
+        return fields[19]  # kernel starttime changes on PID reuse
+    except (OSError, ValueError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def _service_pid() -> int | None:
+    if _unit_owner() != "ours":
+        return None
+    try:
+        result = _systemctl("show", _SERVICE, "--property=MainPID", "--value")
+        if result.returncode:
+            return None
+        pid = int(result.stdout.strip())
+        return pid if _daemon_identity(pid) is not None else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def install_service() -> dict:
+    """Idempotent local user-service installation; foreign units are not overwritten."""
+    if os.environ.get("APPLIEDIN_MODE", "local") != "local" or not _default_instance():
+        return {"status": "refused", "error": "user service is only for the local default instance"}
+    if not (_repo_root() / ".venv/bin/python").is_file():
+        return {"status": "setup required", "error": "run ./appliedin setup first"}
+    owner = _unit_owner()
+    if owner == "foreign":
+        return {"status": "refused", "error": "existing user unit differs; inspect it manually"}
+    try:
+        if owner == "absent":
+            path = _service_unit()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_render_unit())
+        for args in (("daemon-reload",), ("enable", "--now", _SERVICE)):
+            result = _systemctl(*args)
+            if result.returncode:
+                return {"status": "service error",
+                        "error": "systemctl --user " + " ".join(args) + " failed"}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return {"status": "service error", "error": type(exc).__name__}
+    return {"status": "enabled", "unit": _SERVICE, "pid": _service_pid(),
+            "hint": "The unit starts at the next normal user login."}
+
+
 def _running_pid() -> int | None:
-    """The live daemon PID, or None. Clears a stale pid file."""
+    """A recorded PID only counts if its full identity still matches."""
     f = _pid_file()
     if not f.exists():
         return None
     try:
         pid = int(f.read_text().strip())
-        os.kill(pid, 0)  # signal 0 → just check the process exists
-        return pid
-    except (ValueError, OSError):
-        f.unlink(missing_ok=True)
-        return None
+        if _daemon_identity(pid) is not None:
+            return pid
+    except (OSError, ValueError):
+        pass
+    f.unlink(missing_ok=True)
+    return None
 
 
 def _port_pid() -> int | None:
-    """PID of whatever is serving the web port — catches a daemon that isn't in
-    the pid file (e.g. one launched by hand or orphaned from a past session)."""
-    import subprocess
-
-    port = os.environ.get("APPLIEDIN_WEB_PORT", "8787")
+    """Never adopt an arbitrary port listener."""
+    port = os.environ.get("APPLIEDIN_WEB_PORT", str(DEFAULT_PORT))
     try:
-        out = subprocess.run(  # noqa: S603,S607
+        out = subprocess.run(
             ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-        return int(out.splitlines()[0]) if out else None
-    except Exception:
+            capture_output=True, text=True, timeout=5)
+        pids = {int(line) for line in out.stdout.splitlines() if line.strip().isdigit()}
+        valid = [pid for pid in pids if _daemon_identity(pid) is not None]
+        return valid[0] if len(valid) == 1 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
 
 def _live_pid() -> int | None:
-    """A running daemon by pid file OR by port (adopts an untracked one)."""
-    pid = _running_pid() or _port_pid()
+    """Refuse ambiguous owners instead of overwriting a PID or stopping the wrong one."""
+    candidates = {pid for pid in (_running_pid(), _service_pid(), _port_pid()) if pid}
+    if len(candidates) > 1:
+        raise ValueError("multiple matching daemons; inspect the selected port")
+    pid = next(iter(candidates), None)
     if pid is not None:
+        _pid_file().parent.mkdir(parents=True, exist_ok=True)
         _pid_file().write_text(str(pid))
     return pid
 
 
 def start(no_discover: bool = False) -> dict:
-    """Launch the daemon detached, in the background. With no_discover=True the
-    crawler/discovery is off — just the dashboard + queue worker (handy for
-    testing the approval workflow without the crawler churning)."""
-    from discovery.career_ops_setup import ensure_checkout
+    """Use the installed default unit, or a legacy local isolated instance."""
+    try:
+        pid = _live_pid()
+    except ValueError as exc:
+        return {"status": "refused", "error": str(exc)}
+    if pid is not None:
+        return {"status": "already running", "pid": pid, "dashboard": _dashboard(),
+                "hint": "stop the existing daemon before restarting"}
 
-    # Instance selection and --fresh have already run. Repair this instance even
-    # if its daemon is already running, without touching another port's data.
+    owner = _unit_owner()
+    if owner == "foreign":
+        return {"status": "refused", "error": "a different user unit is installed; inspect it"}
+    if owner == "ours" and not no_discover:
+        try:
+            result = _systemctl("start", _SERVICE)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"status": "service error", "error": type(exc).__name__}
+        if result.returncode:
+            return {"status": "service error", "error": "systemctl --user start failed"}
+        pid = _service_pid()
+        return {"status": "started" if pid else "starting", "pid": pid,
+                "unit": _SERVICE, "dashboard": _dashboard()}
+    if owner == "ours" and no_discover:
+        return {"status": "refused", "error": (
+            "an installed default unit cannot silently switch discovery mode; "
+            "use --port for a separate no-discover instance")}
+
+    from discovery.career_ops_setup import ensure_checkout
     try:
         ensure_checkout(Path(get_settings().local_dir))
     except Exception as exc:
@@ -241,9 +402,6 @@ def start(no_discover: bool = False) -> dict:
     ready, problem = ensure_started()
     if not ready:
         log.warning("%s", problem)
-    if (pid := _live_pid()) is not None:
-        return {"status": "already running", "pid": pid, "dashboard": _dashboard(),
-                "hint": "use `appliedin stop` first to restart"}
 
     import subprocess
     import sys
@@ -266,47 +424,70 @@ def start(no_discover: bool = False) -> dict:
             "discovery": "off" if no_discover else "on", "log": str(logfile)}
 
 
-def stop() -> dict:
-    """Stop the running daemon (and its detached process group). Escalates to
-    SIGKILL if it lingers — a half-dead worker thread must never keep writing
-    state (a zombie run once clobbered a job row minutes after 'stop')."""
-    import time
+def _signal_verified(pid: int, original: str, sig: signal.Signals) -> bool:
+    # Check identity again immediately before both TERM and the failure fallback.
+    if _daemon_identity(pid) != original:
+        return False
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
 
-    pid = _running_pid() or _port_pid()
+
+def _clear_pid_file(pid: int) -> None:
+    try:
+        f = _pid_file()
+        if f.exists() and f.read_text().strip() == str(pid):
+            f.unlink()
+    except OSError:
+        pass
+
+
+def stop() -> dict:
+    """Only signal the verified daemon PID; escalation never counts as success."""
+    try:
+        pid = _live_pid()
+    except ValueError as exc:
+        return {"status": "refused", "error": str(exc)}
     if pid is None:
         return {"status": "not running"}
+    original = _daemon_identity(pid)
+    if original is None:
+        return {"status": "refused", "error": "daemon PID identity could not be verified"}
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)  # the whole detached group
+        signalled = _signal_verified(pid, original, signal.SIGTERM)
+    except OSError as exc:
+        return {"status": "stop failed", "error": type(exc).__name__}
+    if not signalled:
+        return {"status": "refused", "error": "daemon PID changed before SIGTERM"}
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if _daemon_identity(pid) != original:
+            _clear_pid_file(pid)
+            return {"status": "stopped", "pid": pid}
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    try:
+        forced = _signal_verified(pid, original, signal.SIGKILL)
     except OSError:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    for _ in range(20):  # up to 2s for a graceful exit
-        time.sleep(0.1)
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            break  # gone
-    else:  # still alive — kill hard
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except OSError:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-    _pid_file().unlink(missing_ok=True)
-    return {"status": "stopped", "pid": pid}
+        forced = False
+    _clear_pid_file(pid)
+    return {"status": "timeout", "pid": pid, "forced_pid_only": forced,
+            "error": "SIGTERM-only deadline failed; PID-only SIGKILL attempted as cleanup"}
 
 
 def status() -> dict:
     """Daemon liveness + the pipeline board (counts per state)."""
-    pid = _running_pid()
+    try:
+        pid = _live_pid()
+        pid_error = None
+    except ValueError as exc:
+        pid, pid_error = None, str(exc)
     stores = make_stores()
     board = {st.value: n for st in Status if (n := len(stores.tracking.query_status(st)))}
     return {
-        "daemon": {"running": pid is not None, "pid": pid, "dashboard": _dashboard()},
+        "daemon": {"running": pid is not None, "pid": pid, "dashboard": _dashboard(),
+                   "error": pid_error, "unit": _SERVICE if _unit_owner() == "ours" else None},
         "board": board,
     }
 
@@ -378,6 +559,7 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("pk")
     r.add_argument("answer")
 
+    sub.add_parser("service-install", help="install and enable the default local user daemon at login")
     sub.add_parser("browser-setup", help="install BrowserSkill manually in a clean Chrome profile")
     sub.add_parser("imap-setup", help="configure optional local IMAP reply ingestion")
     args = p.parse_args(argv)
@@ -396,6 +578,9 @@ def main(argv: list[str] | None = None) -> None:
                               "hint": "appliedin start --port 8788 --fresh"},
                              indent=2))
             return
+    if args.cmd == "service-install":
+        print(json.dumps(install_service(), indent=2))
+        return
     if args.cmd == "browser-setup":
         from tools.browser_profile import browser_setup
         print(json.dumps(browser_setup(), indent=2))
