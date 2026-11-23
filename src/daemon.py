@@ -778,7 +778,7 @@ def _start_outreach_pixel(settings=None) -> bool:
 # a handler before uvicorn.run would be overwritten. Hook the actual Server
 # signal path instead, and enforce a daemon-local deadline even when executor
 # threads cannot cooperate or HTTP shutdown cannot finish.
-_SHUTDOWN_GRACE_S = 8.0
+_SHUTDOWN_GRACE_S = 5.0  # headroom inside the CLI's 10 s SIGTERM-only window
 
 
 def _shutdown_watchdog(requested: threading.Event, finished: threading.Event,

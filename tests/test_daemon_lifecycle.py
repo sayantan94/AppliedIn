@@ -3,6 +3,7 @@ import signal
 import subprocess
 import threading
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,8 +110,67 @@ def test_sigterm_deadline_watchdog_bounded_for_idle_and_blocked_work(blocked, mo
     else:
         daemon._shutdown_watchdog(Requested(), Finished())
         assert exits == []
-    assert waits == [("requested", None), ("finished", 8.0)]
+    assert waits == [("requested", None), ("finished", daemon._SHUTDOWN_GRACE_S)]
     assert waits[-1][1] < 10.0
+
+
+_CHILD = r"""
+import signal, sys, threading, time, types
+sys.path.insert(0, sys.argv[1])
+import daemon
+import core.config
+
+mode = sys.argv[2]
+
+
+class Config:
+    def __init__(self, app, **kwargs):
+        pass
+
+
+class Server:
+    should_exit = False
+
+    def __init__(self, config):
+        pass
+
+    def handle_exit(self, sig, frame):
+        self.should_exit = True
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.handle_exit)  # as uvicorn does
+        print("ready", flush=True)
+        while mode == "hung-http" or not self.should_exit:
+            time.sleep(0.05)
+
+
+sys.modules["uvicorn"] = types.SimpleNamespace(Config=Config, Server=Server)
+sys.modules["server"] = types.SimpleNamespace(
+    create_app=lambda: object(), _recover_stuck=lambda settings: None)
+core.config.get_settings = lambda: object()
+# An unfinished non-daemon executor-like thread keeps a normal interpreter exit alive.
+threading.Thread(target=threading.Event().wait).start()
+daemon._serve_http(0)
+"""
+
+
+@pytest.mark.parametrize("mode", ["http-stops", "hung-http"])
+def test_real_process_exits_on_sigterm_alone_under_ten_seconds(mode):
+    # Real signal delivery to a real interpreter: no SIGKILL, no scope stop.
+    src = str(Path(daemon.__file__).resolve().parent)
+    child = subprocess.Popen([sys.executable, "-c", _CHILD, src, mode],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        started = time.monotonic()
+        child.send_signal(signal.SIGTERM)
+        assert child.wait(timeout=10.0) == 0  # self-exit, not killed by a signal
+        assert time.monotonic() - started < 10.0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        child.stdout.close()
 
 
 def test_stop_sigterm_only_succeeds_when_original_pid_disappears(tmp_path, monkeypatch):
