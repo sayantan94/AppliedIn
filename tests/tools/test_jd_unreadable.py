@@ -456,3 +456,52 @@ def test_short_historical_http_preserves_independent_identity_after_chrome_text(
     assert observed["source_url"] == url
     assert pg.valid(observed["text"], observed["posting_guard"])
     assert jd.matched_source_witness(original, observed) is verified
+
+
+# Issue #403: a cached historical no_jd/exhaustion marker is not a fresh read.
+@pytest.mark.parametrize("marker", ["no_jd", "jd_reader_exhausted"])
+def test_legacy_transient_cache_is_not_accepted_when_fresh_read_refuses(
+        monkeypatch, marker):
+    from agent import run
+    from tools import jd
+
+    url = "https://example.test/jobs/1"
+    row = {"jd_url": url, "jd_text": "An earlier cached description. " * 30,
+           "jd_read_attempts": 3, "fail_kind": marker}
+    calls = []
+    def refuses(target, kind="jd"):
+        calls.append((target, kind))
+        raise jd.PostingReadUnavailable("synthetic observation race")
+    monkeypatch.setattr(jd, "fetch_jd_meta", refuses)
+
+    with pytest.raises(jd.PostingReadUnavailable, match="observation race"):
+        asyncio.run(run._jd_meta(row))
+    assert calls == [(url, "jd_sweep")]
+    assert row["jd_text"].startswith("An earlier cached")
+
+
+@pytest.mark.parametrize("case", ["short", "invalid_guard", "wrong_html_source"])
+def test_deferred_fresh_read_requires_usable_source_without_cached_fallback(
+        monkeypatch, case):
+    from agent import run
+    from tools import jd, posting_guard as pg
+
+    url = "https://example.test/jobs/1"
+    captured = "Previously cached description. " * 30
+    row = {"jd_url": url, "jd_text": captured, "jd_read_attempts": 2,
+           "jd_read_retry_at": "2030-01-01T00:00:00+00:00"}
+    text = ("Error page" if case == "short"
+            else "Build distributed systems and maintain safety. " * 20)
+    inspected = pg.analyze(text, html_variants=[
+        "<html><body><p>" + text + "</p></body></html>"],
+        source_required=True)
+    remote = {**inspected, "source_kind": "http_html", "source_url": url}
+    if case == "invalid_guard":
+        remote["posting_guard"] = {}
+    if case == "wrong_html_source":
+        remote["source_url"] = "https://different.example/jobs/9"
+    monkeypatch.setattr(jd, "fetch_jd_meta", lambda target, kind="jd": remote)
+
+    with pytest.raises(jd.PostingReadUnavailable):
+        asyncio.run(run._jd_meta(row))
+    assert row["jd_text"] == captured
