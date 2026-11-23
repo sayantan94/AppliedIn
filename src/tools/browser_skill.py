@@ -842,6 +842,15 @@ async def decision(task: str, page: dict, history: list, *, model: str = "") -> 
     flags.note_llm_error("browser", problem)
     raise Unavailable(problem) from None
 
+# Failures produced *after* a posting navigation with no usable page text.
+# These fixed adapter messages name one read, never a shared CLI outage.
+_MEMBER_READ_FAILURES = frozenset({
+    "BrowserSkill operation unavailable: posting text was truncated",
+    "BrowserSkill operation unavailable: Workday JD container is empty",
+    "BrowserSkill operation unavailable: posting did not finish loading",
+})
+
+
 async def _read(session: Session, url: str) -> dict:
     page = await session.navigate(url)
     text = str(page.get("description") or page.get("text") or "").strip()
@@ -879,11 +888,13 @@ async def run_task(task: str, *, report_key: str, model: str = "", timeout_s: in
                         try:
                             results.append(await _read(session, url))
                         except Unavailable as exc:
-                            if not exc.page_read_race:
+                            if (not exc.page_read_race
+                                    and str(exc) not in _MEMBER_READ_FAILURES):
                                 raise
-                            # No effect and unchanged session ownership: retain
-                            # earlier members and keep reading independent URLs.
-                            log.info("BrowserSkill posting observation race; member deferred")
+                            # An exact no-effect read race or a known empty page
+                            # is local to this URL. Keep earlier members and
+                            # continue safely with independent posting URLs.
+                            log.info("BrowserSkill posting member unreadable; deferred")
                     return {"postings": results}, ""
                 if report_key == "description":
                     return await _read(session, urls[0]), ""
