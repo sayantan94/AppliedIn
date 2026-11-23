@@ -48,6 +48,39 @@ _request_cpu: contextvars.ContextVar[list | None] = contextvars.ContextVar(
     "_request_cpu", default=None)
 _timing_log = logging.getLogger("server.timing")
 
+# Freed-heap release. Sync endpoints run on worker threads, and glibc gives
+# each thread its own malloc arena. A burst of concurrent full-store requests
+# leaves gigabytes of freed but unreturned pages in those arenas, so resident
+# memory climbs with every burst while the Python object count stays flat.
+# After a slow request, return the free pages to the OS at most once a minute.
+_HEAP_TRIM_INTERVAL_S = 60.0
+_heap_trim_at: list[float] = []
+
+
+@functools.lru_cache(maxsize=1)
+def _malloc_trim():  # noqa: ANN202
+    """glibc malloc_trim, or None where the C library has no such call."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        return ctypes.CDLL(ctypes.util.find_library("c")).malloc_trim
+    except (AttributeError, OSError, TypeError):
+        return None
+
+
+def _release_freed_heap() -> None:
+    trim = _malloc_trim()
+    if trim is not None:
+        trim(0)
+
+
+def _heap_trim_due(now: float) -> bool:
+    if _heap_trim_at and now - _heap_trim_at[0] < _HEAP_TRIM_INTERVAL_S:
+        return False
+    _heap_trim_at[:] = [now]
+    return True
+
 
 def _cpu_timed(call):  # noqa: ANN001, ANN202
     """Wrap an endpoint so it reports its own thread CPU to the current request."""
@@ -92,11 +125,16 @@ def _install_request_timing(app: FastAPI) -> None:
             return await call_next(request)
         finally:
             _request_cpu.reset(token)
-            wall = _wall_clock() - start
+            end = _wall_clock()
+            wall = end - start
             if wall > _SLOW_REQUEST_S:
                 cpu = f"{sum(sink):.3f}s" if sink else "n/a"
                 _timing_log.warning("slow request: %s %s wall=%.3fs thread_cpu=%s",
                                     request.method, request.url.path, wall, cpu)
+                if _heap_trim_due(end):
+                    from starlette.concurrency import run_in_threadpool
+
+                    await run_in_threadpool(_release_freed_heap)
 
 
 # A /stats poll runs every three seconds. Keep each JSON read batch bounded:
