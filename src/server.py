@@ -1048,7 +1048,7 @@ def create_app() -> FastAPI:
 
             from core.apply_queue import ApplyQueue
 
-            pending = ApplyQueue(stores.tracking.r).pending()
+            pending = ApplyQueue(stores.tracking.r).pending(actionable=True)
             oldest = None
             for item in pending:
                 stamp = float(item.get("queued_at") or 0)
@@ -2744,7 +2744,7 @@ def create_app() -> FastAPI:
         from core.apply_queue import ApplyQueue, MAX_ATTEMPTS
 
         q = ApplyQueue(make_stores(settings).tracking.r)
-        return {**q.depth(), "pending": q.pending(), "in_flight": sorted(q.in_flight()),
+        return {**q.depth(), "pending": q.pending(actionable=True), "in_flight": sorted(q.in_flight()),
                 "concurrency": flags.apply_concurrency(),
                 "max_attempts": MAX_ATTEMPTS}
 

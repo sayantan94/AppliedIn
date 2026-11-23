@@ -5,6 +5,8 @@ sends a second application under a real name; draining one company at a time is
 the pattern an employer's automation defences look for.
 """
 
+import json
+
 import fakeredis
 import pytest
 
@@ -450,3 +452,114 @@ def test_a_real_failure_still_spends_them(q):
     assert q.retry(item, "the form could not be filled") is True
     got = next(i for i in q.pending() if i["pk"] == "acme#1")
     assert got["attempts"] == 1
+
+
+# --- the actionable view of pending() ----------------------------------------
+def _row(q, pk, status):
+    q.r.set(f"app:{pk}", json.dumps({"pk": pk, "status": status}))
+
+
+_HIDDEN = ("applied", "applied_manual", "skipped", "job_gone")
+_KEPT = ("failed", "error", "capped", "found", "tailoring", "tailored",
+         "submitting", "needs_human", "some_future_status")
+
+
+def test_pending_hides_only_the_four_finished_statuses(q):
+    n = 0
+    expected = set()
+    for status in _HIDDEN + _KEPT:
+        n += 1
+        q.put(f"co{n}#1", f"Co{n}", queued_at=float(n))
+        _row(q, f"co{n}#1", status)
+        if status in _KEPT:
+            expected.add(f"co{n}#1")
+    # Rows that prove nothing about the job stay visible: absent, malformed,
+    # not an object, and an object with no status.
+    q.put("none#1", "NoRow", queued_at=100.0)
+    q.put("bad#1", "Bad", queued_at=101.0)
+    q.r.set("app:bad#1", "{not json")
+    q.put("list#1", "ListRow", queued_at=102.0)
+    q.r.set("app:list#1", "[]")
+    q.put("nostatus#1", "NoStatus", queued_at=103.0)
+    q.r.set("app:nostatus#1", json.dumps({"pk": "nostatus#1"}))
+    q.put("lst#1", "ListStatus", queued_at=104.0)       # unhashable status values
+    q.r.set("app:lst#1", json.dumps({"pk": "lst#1", "status": []}))
+    q.put("obj#1", "ObjStatus", queued_at=105.0)
+    q.r.set("app:obj#1", json.dumps({"pk": "obj#1", "status": {}}))
+    expected |= {"none#1", "bad#1", "list#1", "nostatus#1", "lst#1", "obj#1"}
+
+    assert {i["pk"] for i in q.pending(actionable=True)} == expected
+    # The physical queue is untouched: nothing was deleted or made dispatchable.
+    assert q.depth()["total"] == len(_HIDDEN) + len(_KEPT) + 6
+    # The default stays the physical queue: guards and drains must see everything.
+    assert len(q.pending()) == len(_HIDDEN) + len(_KEPT) + 6
+
+
+def test_filtered_pending_keeps_order_rank_backoff_and_busy(q):
+    import time as _t
+    now = _t.time()
+    q.put("acme#1", "Acme", queued_at=1.0)
+    _row(q, "acme#1", "applied")                    # oldest, finished
+    q.put("acme#2", "Acme", queued_at=2.0)
+    q.put("acme#3", "Acme", queued_at=3.0, not_before=now + 500)
+    _row(q, "acme#3", "failed")                     # a retry waiting out its backoff
+    q.put("beta#1", "Beta", queued_at=2.5)
+    _row(q, "beta#1", "capped")                     # parked, still waiting
+    q.r.sadd("applyq:inflight", "beta")
+
+    got = q.pending(actionable=True)
+    assert [i["pk"] for i in got] == ["acme#2", "beta#1", "acme#3"]
+    by = {i["pk"]: i for i in got}
+    assert by["acme#2"]["company_rank"] == 1, "rank counts survivors only"
+    assert by["acme#3"]["company_rank"] == 2
+    assert by["acme#3"]["blocked"] == "backoff" and by["acme#3"]["ready_in"] > 0
+    assert by["beta#1"]["blocked"] == "company_busy"
+
+
+def test_the_limit_applies_after_the_filter(q):
+    for i in range(1, 6):
+        q.put(f"old#{i}", "Old", queued_at=float(i))
+        _row(q, f"old#{i}", "job_gone")
+    for i in range(6, 9):
+        q.put(f"live#{i}", "Live", queued_at=float(i))
+
+    assert [i["pk"] for i in q.pending(limit=2, actionable=True)] == ["live#6", "live#7"]
+
+
+class _CountingRedis(fakeredis.FakeRedis):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.mgets = 0
+
+    def get(self, *a, **kw):
+        raise AssertionError("one GET per queue entry is forbidden")
+
+    def mget(self, *a, **kw):
+        self.mgets += 1
+        return super().mget(*a, **kw)
+
+
+def test_a_large_queue_is_filtered_in_a_few_batched_reads():
+    r = _CountingRedis(decode_responses=True)
+    q = ApplyQueue(r)
+    for i in range(1, 1171):
+        q.r.rpush("applyq:co:acme", json.dumps(
+            {"pk": f"acme#{i}", "company": "Acme", "queued_at": float(i)}))
+        r.set(f"app:acme#{i}", json.dumps(
+            {"pk": f"acme#{i}", "status": "applied" if i <= 1070 else "tailored"}))
+    r.sadd("applyq:companies", "acme")
+
+    got = q.pending(actionable=True)
+    assert [i["pk"] for i in got] == [f"acme#{i}" for i in range(1071, 1171)]
+    assert 1 <= r.mgets <= 3
+
+
+def test_an_unreadable_status_read_hides_nothing(q):
+    q.put("acme#1", "Acme", queued_at=1.0)
+    _row(q, "acme#1", "applied")
+
+    def boom(keys):
+        raise ConnectionError("redis went away")
+
+    q.r.mget = boom
+    assert [i["pk"] for i in q.pending(actionable=True)] == ["acme#1"]

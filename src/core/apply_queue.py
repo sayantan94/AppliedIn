@@ -78,6 +78,17 @@ TERMINAL = frozenset({
 })
 
 
+# Tracking statuses that prove a queued entry is no longer work to do: a
+# submission is on record, the owner skipped the role, or the posting is gone.
+# This is NOT the retry TERMINAL set above (those are failure reasons), and it is
+# deliberately narrow. `failed` is stored by the apply path BEFORE `retry()` may
+# queue a backoff entry for the same job, `capped` is parked for a later run, and
+# `error` is retryable, so none of those say the entry is stale. Anything else,
+# and any row that cannot be read, stays visible: unknown is never terminal.
+_INACTIVE_STATUSES = frozenset({"applied", "applied_manual", "skipped", "job_gone"})
+_STATUS_BATCH = 500
+
+
 def _norm(company: str) -> str:
     return (company or "").strip().lower() or "unknown"
 
@@ -387,8 +398,46 @@ class ApplyQueue:
                 "running": running, "flushing": sorted(self.flushing()),
                 "dlq": self.r.llen(_DLQ)}
 
-    def pending(self, limit: int = 5000) -> list[dict]:
+    def _inactive_pks(self, pks: set[str]) -> set[str]:
+        """The subset of `pks` whose tracking row PROVES the job is finished.
+
+        Read only, and batched (`MGET`, not one `GET` per entry), because /stats
+        polls this and the queue can hold over a thousand entries. A missing,
+        malformed or unreadable row, or any read error, proves nothing, so it is
+        never reported here and the entry stays visible.
+        """
+        keys = sorted(pk for pk in pks if pk)
+        inactive: set[str] = set()
+        for start in range(0, len(keys), _STATUS_BATCH):
+            chunk = keys[start:start + _STATUS_BATCH]
+            try:
+                rows = self.r.mget([f"app:{pk}" for pk in chunk])
+            except Exception:  # noqa: BLE001 - unreadable means unknown, not terminal
+                continue
+            for pk, raw in zip(chunk, rows or []):
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                status = row.get("status") if isinstance(row, dict) else None
+                # A list or object status is unhashable and proves nothing.
+                if isinstance(status, str) and status in _INACTIVE_STATUSES:
+                    inactive.add(pk)
+        return inactive
+
+    def pending(self, limit: int = 5000, *, actionable: bool = False) -> list[dict]:
         """Everything waiting, in the order it will actually start.
+
+        `actionable=True` hides entries whose tracking row is already `applied`,
+        `applied_manual`, `skipped` or `job_gone`. Nothing is removed from the queue
+        and nothing becomes dispatchable: it is a read-side view for reporting
+        (/stats queue age, the /apply-queue listing), so a stale entry for a
+        finished job stops dating the queue and stops showing as waiting. The
+        default is the physical queue, which is what the guards and the rebind and
+        rotation drains need: `next()` leases from the raw lists, so they must see
+        every entry `next()` could see.
 
         `depth()` answers "how many"; this answers "when is mine". Dispatch is
         first come first served by `queued_at` ACROSS companies, so that sort is
@@ -419,6 +468,11 @@ class ApplyQueue:
                     continue
                 it["_co"] = co
                 items.append(it)
+
+        if actionable and items:
+            inactive = self._inactive_pks({str(i.get("pk") or "") for i in items})
+            if inactive:
+                items = [i for i in items if str(i.get("pk") or "") not in inactive]
 
         items.sort(key=lambda i: float(i.get("queued_at") or 0))
         rank: dict[str, int] = {}
