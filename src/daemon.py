@@ -80,9 +80,9 @@ def _discovery_due(last_raw: str, now: float) -> float:
 
 
 def _discovery_loop(stop_event: threading.Event | None = None) -> None:
-    """
-    stop_event = stop_event or threading.Event()The 'cron' — find + enqueue jobs on a schedule. Runs in its OWN thread so a
+    """The 'cron' — find + enqueue jobs on a schedule. Runs in its OWN thread so a
     long/expensive discovery cycle (many crawls) never blocks job processing."""
+    stop_event = stop_event or threading.Event()
     from core import flags
     from discovery.handler import run_discovery
 
@@ -181,11 +181,11 @@ def _evaluate_one(pk: str) -> None:
 
 
 def _worker_loop(stop_event: threading.Event | None = None) -> None:
-    """
-    stop_event = stop_event or threading.Event()EVALUATE worker — drain the tailor queue and score + tailor each job
+    """EVALUATE worker — drain the tailor queue and score + tailor each job
     (LLM-only). Runs _EVAL_LANES jobs CONCURRENTLY so one slow tailor never
     stalls the backlog. Auto-approved jobs are handed to the apply queue, NOT
     applied here, so a slow browser apply never blocks evaluation. Runs 24/7."""
+    stop_event = stop_event or threading.Event()
     from concurrent.futures import ThreadPoolExecutor
 
     from core import flags
@@ -642,14 +642,14 @@ def _recover_orphans(stores) -> None:  # noqa: ANN001
 
 
 def _heartbeat_loop(stop_event: threading.Event | None = None) -> None:
-    """
-    stop_event = stop_event or threading.Event()Publish which worker loops are ALIVE, so a process without them can't
+    """Publish which worker loops are ALIVE, so a process without them can't
     masquerade as a healthy pipeline (`python -m server` serves the board and
     answers /stats while discovering, tailoring and applying exactly nothing).
 
     Runs in its OWN thread and only inspects thread liveness — never work
     progress — so a worker legitimately busy for ten minutes inside one browser
     apply still reads as alive."""
+    stop_event = stop_event or threading.Event()
     from core import flags
 
     names = {"discovery", "evaluate", "apply"}
@@ -694,8 +694,8 @@ def _start_funding_poller(settings=None) -> bool:
 
 
 def _outreach_followup_loop(stop_event: threading.Event | None = None) -> None:
-    """
-    stop_event = stop_event or threading.Event()At most one newly due, unqueued stage per 300-second tick; never SMTP."""
+    """At most one newly due, unqueued stage per 300-second tick; never SMTP."""
+    stop_event = stop_event or threading.Event()
     from core.config import get_settings
     from core.outreach_ledger import Ledger
     from core.outreach_email import enqueue_due_followup
@@ -714,8 +714,8 @@ def _outreach_followup_loop(stop_event: threading.Event | None = None) -> None:
 
 
 def _outreach_sender_loop(stop_event: threading.Event | None = None) -> None:
-    """
-    stop_event = stop_event or threading.Event()Only active SMTP owner. SQLite globally fences even a second process."""
+    """Only active SMTP owner. SQLite globally fences even a second process."""
+    stop_event = stop_event or threading.Event()
     from core.config import get_settings
     from core.outreach_ledger import Ledger
     from core.outreach_email import send_approved
