@@ -865,3 +865,99 @@ def test_short_workday_identity_is_stable_across_decorations(env):
     for malformed in (url.replace("/job/ROLE-1", "/job/../../ROLE-1"),
                       url.replace("/job/ROLE-1", "/jobs/ROLE-1")):
         assert server._manual_role_identity(malformed) is None
+
+
+# #417: apply-role CPU. `_manual_existing_role` resolves the stored URL of every
+# custom-host row through `_manual_role_identity`; each resolution used to build a
+# new tldextract.TLDExtract, which parses the whole public suffix list.
+_CUSTOM_ROWS = 30
+
+
+def _seed_custom_rows(tracking, n=_CUSTOM_ROWS):
+    import hashlib
+
+    for i in range(n):
+        url = f"https://careers.storeco{i}.example/jobs/role-{i}"
+        job_id = hashlib.sha1(url.encode()).hexdigest()[:12]
+        company = f"Store Co {i}"
+        pk = make_pk(company, job_id)
+        tracking.rows[pk] = {"pk": pk, "company": company, "job_id": job_id,
+                             "ats": "custom", "jd_url": url, "status": "found"}
+
+
+def _per_call_extractor(monkeypatch):
+    """The pre-#417 shape: a fresh extractor for every identity resolution."""
+    import tldextract
+
+    monkeypatch.setattr(server, "_offline_tld_extract", lambda: tldextract.TLDExtract(
+        suffix_list_urls=(), extra_suffixes=("test", "example")))
+
+
+def _count_extractor_builds(monkeypatch):
+    import tldextract
+
+    built = []
+    real = tldextract.TLDExtract
+
+    class Counting(real):
+        def __init__(self, *args, **kwargs):
+            built.append(1)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(tldextract, "TLDExtract", Counting)
+    server._offline_tld_extract.cache_clear()
+    return built
+
+
+def test_apply_role_builds_the_suffix_extractor_once_not_per_stored_row(env, monkeypatch):
+    _seed_custom_rows(env.tracking)
+    built = _count_extractor_builds(monkeypatch)
+    resolved = []
+    real_identity = server._manual_role_identity
+    monkeypatch.setattr(server, "_manual_role_identity",
+                        lambda url: resolved.append(url) or real_identity(url))
+
+    first = _apply(env, "https://boards.greenhouse.io/example-co/jobs/4242")
+    second = _apply(env, "https://careers.example-co.com/jobs/role-17")
+
+    assert first.json()["ok"] is True and second.json()["ok"] is True
+    # Every stored custom row still goes through identity resolution...
+    assert sum(u.startswith("https://careers.storeco") for u in resolved) >= _CUSTOM_ROWS
+    # ...but the expensive call, building tldextract.TLDExtract, happens once.
+    assert len(built) == 1
+    server._offline_tld_extract.cache_clear()
+
+
+def test_apply_role_decision_unchanged_and_cheaper_than_per_call_extractor(
+        env, monkeypatch):
+    import time
+
+    _seed_custom_rows(env.tracking)
+    target = "https://careers.storeco7.example/jobs/role-7"
+    identity = server._manual_role_identity(target)
+
+    def timed_lookup():
+        start = time.thread_time()
+        result = server._manual_existing_role(env.tracking, identity, target)
+        return result, time.thread_time() - start
+
+    server._offline_tld_extract.cache_clear()
+    server._offline_tld_extract()  # warm, as in a running daemon
+    fast, fast_cpu = timed_lookup()
+    with monkeypatch.context() as slow_patch:
+        _per_call_extractor(slow_patch)
+        slow, slow_cpu = timed_lookup()
+
+    assert fast == slow
+    row, ambiguous = fast
+    assert ambiguous is False and row["company"] == "Store Co 7"
+    assert fast_cpu < slow_cpu / 3
+
+    snapshot = deepcopy(env.tracking.rows)
+    fast_response = _apply(env, "https://boards.greenhouse.io/example-co/jobs/4242").json()
+    env.tracking.rows = snapshot
+    with monkeypatch.context() as slow_patch:
+        _per_call_extractor(slow_patch)
+        slow_response = _apply(env, "https://boards.greenhouse.io/example-co/jobs/4242").json()
+    assert fast_response == slow_response
+    assert fast_response["ok"] is True and fast_response["status"] == "running"
