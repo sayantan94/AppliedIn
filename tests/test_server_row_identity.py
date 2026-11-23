@@ -733,6 +733,7 @@ def test_tailor_completed_repeat_refuses_late_hold_before_restage(env):
     "https://jobs.example.com.vn/role/1",
     "https://example.breezy.hr/p/role",
     "https://example.homerun.co/role",
+    "https://example.recruitee.com/platform-engineer",
     "https://careers.example-careers.com/role/1",
     "https://example-co.wd3.myworkdayjobs.com/example/job/ROLE-1",
 ])
@@ -755,11 +756,23 @@ def test_apply_role_persists_source_employer_and_title_not_host(env, url):
 @pytest.mark.parametrize("url", [
     "https://example.breezy.hr/p/role",
     "https://example.homerun.co/role",
+    "https://example.recruitee.com/platform-engineer",
     "https://careers.example-careers.com/role/1",
 ])
 def test_provider_or_careers_host_without_employer_has_no_phantom(env, url):
     result = _apply(env, url)
     assert result.json() == {"ok": False, "error": "employer_identity_unverified"}
+    assert env.reader.calls == [url]
+    assert not env.tracking.rows
+    assert not env.runs
+
+
+def test_recruitee_host_and_og_brand_cannot_create_provider_row(env):
+    """#404: neither shared ATS hostname nor provider-branded page metadata is a company."""
+    url = "https://example.recruitee.com/platform-engineer"
+    env.reader.company = "Recruitee Hiring Platform"
+    response = _apply(env, url)
+    assert response.json() == {"ok": False, "error": "employer_identity_unverified"}
     assert env.reader.calls == [url]
     assert not env.tracking.rows
     assert not env.runs
