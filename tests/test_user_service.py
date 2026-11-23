@@ -30,6 +30,7 @@ def test_installed_unit_starts_real_module_at_login_not_setup(world):
     assert "KillMode=process" in template
     assert "Restart=on-failure" in template
     assert "APPLIEDIN_USER_SERVICE=1" in template
+    assert "Environment=APPLIEDIN_WEB_PORT=8787" in template
     assert "Environment=PATH=%h/.local/bin:" in template
     assert "ExecStartPre" not in template
     assert "systemd-run" not in template

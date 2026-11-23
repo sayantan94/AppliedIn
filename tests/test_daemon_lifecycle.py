@@ -175,3 +175,16 @@ def test_proc_identity_rejects_wrong_module_checkout_port_and_reused_pid(tmp_pat
     (target / "environ").write_bytes(b"APPLIEDIN_WEB_PORT=8787\0")
     (target / "stat").write_text("91 (python) " + " ".join(fields[:19] + ["890", "0"]))
     assert cli._daemon_identity(91) == "890"
+
+
+def test_two_same_instance_daemons_cannot_enter_recovery_concurrently(tmp_path, monkeypatch):
+    # The second owner is refused before touching the store/recovery/worker
+    # boundary. A dead owner releases its kernel lock without queue mutations.
+    monkeypatch.setattr("core.config.get_settings",
+                        lambda: SimpleNamespace(local_dir=str(tmp_path / "synthetic")))
+    with daemon._instance_owner():
+        with pytest.raises(SystemExit, match="already running"):
+            with daemon._instance_owner():
+                pytest.fail("duplicate daemon reached startup work")
+    with daemon._instance_owner():
+        pass

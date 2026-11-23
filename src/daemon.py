@@ -14,6 +14,7 @@ then open http://127.0.0.1:8787
 
 from __future__ import annotations
 
+import fcntl
 import math
 import os
 import signal
@@ -21,6 +22,8 @@ import threading
 import time
 from typing import Any
 import sys
+from contextlib import contextmanager
+from pathlib import Path
 
 # A typo or extra argument in a synthetic-only invocation must NEVER fall
 # through into the production worker/dashboard startup. Library imports are
@@ -812,7 +815,36 @@ def _serve_http(port: int) -> None:
             os._exit(0)
 
 
+
+@contextmanager
+def _instance_owner():
+    """One daemon per local instance, before any recovery or worker effects.
+
+    The kernel releases this advisory lock on process death, including
+    SIGTERM self-exit; unlike a saved PID it cannot point at a reused process.
+    Different --port instances have different local directories and locks.
+    """
+    from core.config import get_settings
+
+    path = Path(get_settings().local_dir) / "daemon.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("daemon already running for this local instance") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def main() -> None:
+    with _instance_owner():
+        _main_owned()
+
+
+def _main_owned() -> None:
     # Discovery and the pipeline worker run as SEPARATE background threads (so
     # neither blocks the other); the web server runs in the foreground.
     stores = make_stores()
