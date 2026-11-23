@@ -899,7 +899,11 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
     need_source = "source_html_unavailable" in old.get("reasons", [])
     retry_read = bool(row.get("jd_read_attempts") or row.get("jd_read_retry_at")
                       or row.get("fail_kind") in {"no_jd", "jd_reader_exhausted"})
-    if not url or (len(captured) >= 400 and not need_source and not retry_read):
+    if not url:
+        if retry_read:
+            raise _jd.PostingReadUnavailable("Original posting URL unavailable for fresh read")
+        return local
+    if len(captured) >= 400 and not need_source and not retry_read:
         return local
     try:
         remote = await asyncio.to_thread(
@@ -925,8 +929,12 @@ async def _jd_meta(row: dict, *, yielding: bool = True,
     # A deferred or legacy transient must not be settled from cached content.
     # HTML/ATS source mismatches never become a witness by rereading a URL.
     if retry_read and (not rtext or _unreadable(rtext)
-                       or (remote.get("source_kind") in {"http_html", "ats_html"}
+                       or (not historical
+                           and remote.get("source_kind") in {"http_html", "ats_html"}
                            and not source_witness)):
+        # For historic relative rows, the later _relative_attention gate
+        # owns missing independent same-job source proof; do not turn it
+        # into an ordinary page-unavailable deferral.
         raise _jd.PostingReadUnavailable("Fresh matching posting content unavailable")
     use_remote = bool(rtext) and (
         retry_read or len(rtext) > len(local["text"])
