@@ -6,6 +6,7 @@ network or remote CSS renderer is involved here.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -425,11 +426,26 @@ def projection(text: str, guard: dict | None) -> dict:
     """Legacy rows cannot become auto-clean just because a view sanitizes them."""
     if valid(text, guard):
         return {"text": text, "posting_guard": guard}
+    if not isinstance(text, str):
+        return _legacy_projection(text)
+    # The board list projects every row on every refresh. Re-analyzing each
+    # legacy row's text was most of that request's CPU, so reuse the result:
+    # this path depends on the text alone. Callers get their own copy.
+    cached = _legacy_projection_cached(text)
+    return {"text": cached["text"],
+            "posting_guard": {**cached["posting_guard"],
+                              "reasons": list(cached["posting_guard"]["reasons"])}}
+
+
+def _legacy_projection(text: str) -> dict:
     inspected = analyze(text)
     meta = inspected["posting_guard"]
     reasons = set(meta["reasons"])
     reasons.add("source_html_unavailable")
     return _result(inspected["text"], reasons, False)
+
+
+_legacy_projection_cached = functools.lru_cache(maxsize=8192)(_legacy_projection)
 
 
 def _removed_hidden_only(guard: dict) -> bool:
