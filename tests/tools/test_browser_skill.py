@@ -3390,3 +3390,24 @@ async def test_cooperation_sync_required_retry_is_unchanged(cooperative):
         await session.call('evaluate', bsk.PAGE)
     assert len(_reads(cooperative)) == 4
     await session.__aexit__(None, None, None)
+
+
+def test_user_service_never_spawns_shared_browser_skill_helper(monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+
+    def unavailable(*a, **kw):
+        raise bsk.Unavailable('offline helper absent')
+
+    monkeypatch.setattr(bsk, '_sync', unavailable)
+    monkeypatch.setattr(bsk.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail('service launched shared helper'))
+    ready, detail = bsk.ensure_daemon()
+    assert not ready and 'outside' in detail and 'orchestrator' in detail
+
+
+def test_user_service_reuses_reachable_shared_helper(monkeypatch):
+    monkeypatch.setenv('APPLIEDIN_USER_SERVICE', '1')
+    monkeypatch.setattr(bsk, '_sync', lambda *a, **kw: {'ok': True})
+    monkeypatch.setattr(bsk.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail('unexpected new helper'))
+    assert bsk.ensure_daemon() == (True, '')
