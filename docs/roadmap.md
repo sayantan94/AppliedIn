@@ -50,7 +50,10 @@ Depends on Phase 1 item 1 merged and Phase 2 item 1 merged.
 1. Shortlist from the latest search: AI tier first, then IT, filtered by the owner's private
    constraints. Owner and local agents only; nothing from the board is published.
 2. Score and tailor the shortlist; the owner reviews each résumé.
-3. The owner approves applications in the dashboard. Agents never approve, queue or submit.
+3. Board agents approve postings and fill and submit applications in the application
+   browser (owner decisions 2026-10-28 and 2026-11-04). `precheck.py` enforces duplicates,
+   caps and one Submit in code. New personal facts, owner accounts and new legal facts stay
+   with the owner.
 4. Multi-step forms: after real attempts, add support for the form patterns that gated
    (for example Workday steps), each with a synthetic local fixture test.
 
